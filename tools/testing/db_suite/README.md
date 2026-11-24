@@ -10,9 +10,11 @@ Package discovery parses only `go list` stdout. Module-download diagnostics
 remain visible on stderr and cannot become test package names; a failed
 `go list` stops the runner instead of using a partial list.
 
-Use only an owned, fully initialized loopback test database. Initialize a new
-empty database with `go run ./cmd/db-initialize` using the same configuration
-as the API and set:
+Use an owned loopback test database. Initialize a new empty PostgreSQL 18.6
+database with `go run ./cmd/db-initialize` using the same configuration as the
+API. This installs generation 171. The CI profile uses the installed schema
+and fixtures create the accounts they need. Set the following variables for
+the owned database.
 
 ```text
 APP_ENV=test
@@ -36,3 +38,7 @@ Each invocation retains Go's ten-minute package alarm, `-count=1`, `-p=1`,
 and `-parallel=1`; only the number of independent fixtures accumulated under
 one alarm is bounded (default 30). `-batch-size` may range from 1 to 100.
 `MCMODS_GO_BINARY` can select an explicit installed Go executable.
+
+Keep the source commit, PostgreSQL version, generation, complete batch output
+and exit status with each run. The current validation records the top-level and
+subtest results from the same run. [Current gate results](../../../docs/governance.md#当前版本与验收) · [GitHub Actions configuration](../../../.github/workflows/ci.yml)

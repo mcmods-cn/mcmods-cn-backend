@@ -2,9 +2,11 @@
 
 本站的 HTTP API、审核和后台任务使用 Go 与 PostgreSQL。玩家在游戏里生成资料包，编辑者在前端选定项目与资料版本，后端核验原包、保存修订并控制发布。涉及游戏对象的生产规则在 [exporter](https://github.com/mcmods-cn/mcmods_exporter)，页面与浏览器传输在 [frontend](https://github.com/mcmods-cn/mcmods-cn-frontend)。
 
+上线和回滚前，核对验收绑定的三仓提交、generation 171、发行产物及目标环境待验项。[当前版本与验收](docs/governance.md#当前版本与验收) · [系统与权限地图](docs/system-map.md) · [安全复核](docs/security-review-2026-11.md)
+
 ## 本地启动
 
-使用 [go.mod](go.mod) 声明的 Go 工具链和 PostgreSQL。CI 采用 PostgreSQL 18.6。开发者可以用仓库脚本启动独立的 PostgreSQL、Redis 和带 JetStream 的 NATS。首次运行需要 Python 3.9+、本机 Docker daemon 以及下载固定镜像的权限。
+使用 [go.mod](go.mod) 声明的 Go 1.26.11 工具链。CI 采用 PostgreSQL 18.6。开发者可以用仓库脚本启动独立的 PostgreSQL、Redis 和带 JetStream 的 NATS。首次运行需要 Python 3.9+、本机 Docker daemon 以及下载固定镜像的权限。
 
 ```sh
 go version
@@ -42,7 +44,7 @@ go run ./tools/testing/db_suite
 go test -race -p 1 ./internal/queue ./internal/querycache -count=1
 ```
 
-账号与收藏链使用前端 `test:live`。需要连同数据库和进程一并启动与回收时，用 [live_acceptance_v2.py](tools/testing/live_acceptance_v2.py) 创建新的测试范围。它在清理前重验创建时记录的数据库 OID、所有者和随机标记。旧版记录缺少这些字段时保留原状，按[历史所有权说明](docs/audit/t002-live-acceptance-v2.md)核对。游戏原包的端到端入口、加载器、预期配方和浏览器步骤见[隔离验证说明](docs/testing-isolated-environment.md#真实游戏包经浏览器和-jetstream-的验证)，本轮门禁结果见[治理台账](docs/governance.md)。
+账号与收藏链使用前端 `test:live`。配套驱动可以在新隔离范围内启动、校验并回收数据库与进程，清理前重验创建时记录的数据库 OID、所有者和随机标记。游戏包验证应保留导出原件、生产提交和 SHA-256。[账号和服务验证](docs/testing-isolated-environment.md#实际服务检查与测试) · [游戏包联调](docs/testing-isolated-environment.md#真实游戏包经浏览器和-jetstream-的验证) · [当前门禁结果](docs/governance.md#当前版本与验收)
 
 ## 数据库安装、发布和恢复
 
@@ -54,6 +56,10 @@ go run ./cmd/db-initialize
 go run ./cmd/db-initialize --bootstrap-admin
 ```
 
-`--bootstrap-admin` 可在空库直接执行，已有安装只能成功一次。部署配置在操作结束后撤掉初始密码。重启保留管理员变更过的权限、账号状态和站点设置。恢复时用与源码配对的数据库快照，在隔离库验证版本、catalog 和合成业务记录后再接入应用。[功能与验证台账](docs/governance.md) · [数据库函数恢复](docs/database-function-repair.md) · [队列恢复](docs/queue-recovery.md)
+`--bootstrap-admin` 可在空库直接执行，已有安装只能成功一次。部署配置在操作结束后撤掉初始密码。重启保留管理员变更过的权限、账号状态和站点设置。[功能与验证台账](docs/governance.md#当前版本与验收) · [数据库函数恢复](docs/database-function-repair.md)
 
-后端按数据库身份和 schema 就绪后才提供业务 API。`/live` 判断进程，`/ready` 返回依赖状态与初始化失败原因。队列积压或消费失败先查管理员基础设施指标、最老未交付事件和业务任务状态。按现有死信恢复流程处理，保留在途任务和对象的来源记录。发布顺序、回滚边界与这轮版本组合见[治理台账](docs/governance.md)。过去的压测、审计与整改可从[历史索引](docs/history/README.md)追溯。
+将与源码配对的 PostgreSQL 备份恢复到隔离空库，再以目标库的 `DATABASE_URL` 运行 `go run ./cmd/db-initialize` 复核版本和结构指纹。备份和恢复的参数使用 `pg_dump --format=custom --no-owner --no-privileges` 和 `pg_restore --single-transaction --exit-on-error --no-owner --no-privileges`。恢复后核对样本业务记录，并校对独立托管的数据库授权、对象来源和队列进度，再接入应用。回退时保留与对应源码版本配套的镜像和快照。[实库恢复验收](docs/governance.md#当前版本与验收) · [对象生命周期](docs/oss-object-layout.md)
+
+准备数据库及已启用的依赖，再启动同时承载 API 和后台 Worker 的后端进程。`/live` 判断进程，`/ready` 返回依赖状态与初始化失败原因。启用 JetStream 时另核对实际 durable 的就绪、积压和消费进度。前端按目标公开域名与代理路径构建，API 信任的代理网段要与实际部署一致。[队列运维](docs/queue-recovery.md) · [前端部署配置](https://github.com/mcmods-cn/mcmods-cn-frontend#readme)
+
+GitHub `main` 上的构建结果可从 [Actions](https://github.com/mcmods-cn/mcmods-cn-backend/actions) 查看。容器发布入口为 `v*` 标签或手动工作流。过去的压测、审计与整改可从[历史索引](docs/history/README.md)追溯。[发布容器工作流](.github/workflows/release-container.yml)

@@ -1,6 +1,6 @@
 # 系统与权限地图
 
-维护入口按用户操作排列。前端组件和 `app/_lib` 指向 frontend 仓库，Java 类及 `schema/` 指向 exporter，其余源码均在 backend。精确 HTTP 方法、路径和中间件以 [server.go](../internal/httpapi/server.go) 和各模块注册函数为准。
+维护入口按用户操作排列。前端组件和 `app/_lib` 位于 frontend 仓库，Java 类及 `schema/` 位于 exporter，其余源码均在 backend。精确 HTTP 方法、路径和中间件以路由及各模块注册函数为准。[路由注册](../internal/httpapi/server.go) · [当前版本与验收](governance.md#当前版本与验收)
 
 ## 游戏包到公开目录
 
@@ -26,7 +26,7 @@
 
 ## 数据标识、事务与缓存
 
-当前 schema 的安装顺序在 `internal/database/schema.go`，版本、定义和实库结构由 `initialize.go` 核对。资料、审核、日志短链和队列的关键持久关系如下。
+当前 PostgreSQL 基线为 generation 171。安装顺序在 `internal/database/schema.go`，版本、定义和实库结构由 `initialize.go` 核对。外部更新日志和镜像下载按项目、供应商和各自的外部标识确定唯一归属。资料、审核、日志短链和队列的关键持久关系如下。
 
 ```mermaid
 flowchart LR
@@ -46,7 +46,7 @@ flowchart LR
   C -->|父评论可见范围| L
 ```
 
-- 普通项目修订共用 `createContentRevisionTx`。同一项目行锁确认类型、公开 ID 和基线，审核使用 `resolveCurrentReviewActorTx` 重新解析实际会话和审核权限。治理隐藏由 `checkProjectRevisionModerationTx` 约束普通批准、驳回及自动发布。资料目录继续由 `publishCatalogRevisionsTx` 统一应用审核和投影。
+- 普通项目修订共用 `createContentRevisionTx`。同一项目行锁确认类型、公开 ID 和基线。项目、社区内容和服务器的审核入口在锁住提交后调用 `requireCurrentReviewActor`，重新核对当前会话以及当前目标的适用权限。治理隐藏由 `checkProjectRevisionModerationTx` 约束普通批准、驳回及自动发布。资料目录由 `publishCatalogRevisionsTx` 统一应用审核和投影。[审核权限入口](../internal/httpapi/review_permissions.go)
 - 评论衍生日志以 `comment_scope_id` 绑定父评论，准备工作在租约内读取自有文件。发布、绑定、附件就绪与租约终态在同一事务中完成。metadata、chunk、下载都检查当前父评论和目标范围。
 
 - 多数站内对象用 bigint 关联，用全局注册的随机 `public_id` 对外访问。项目路由可有 slug，技术字段另有 Minecraft 的 `namespace:path`、供应商 ID、包哈希、导入 UUID 和事件 ID。前端不得用导入源 ID 推导站内身份。[双 ID 架构](dual-id-architecture.md)
@@ -69,7 +69,7 @@ flowchart LR
 
 ## 第二轮审查范围
 
-每行列出本轮追踪的用户操作、写入边界和实际检验。业务测试使用任务自有数据库和合成身份。端到端、定向实测与静态阅读的区别见[第二轮验收台账](governance.md)。
+以下为第二轮的追踪记录，描述当时的写入边界、缺口和实测。当前审核、安装和运行结果见本页前述入口及[当前验收](governance.md#当前版本与验收)，阶段性结果见[第二轮验收台账](governance.md#第二轮工作记录)。
 
 | 业务与前端入口 | 后端权威入口、权限与副作用 | 本轮核对及处理 |
 | --- | --- | --- |

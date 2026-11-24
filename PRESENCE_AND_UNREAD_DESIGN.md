@@ -13,7 +13,7 @@
 
 ## 未读计数
 
-`GET /api/v1/me/unread-summary` 返回 notifications/messages/total。旧通知和消息未读接口保留兼容。
+`GET /api/v1/me/unread-summary` 是通知和私信共用的未读摘要入口，返回 `notifications`、`messages` 和 `total`。[现有客户端约定](COMPATIBILITY_BOUNDARIES.md)
 
 1. 读取进程缓存和 Redis Hash。
 2. 缺失/epoch 不同则用一个 SQL（两个标量子查询）读取 PostgreSQL事实。
@@ -27,6 +27,8 @@
 ## SSE 与轮询
 
 `GET /api/v1/realtime/events` 使用服务端 Session认证，只能订阅当前用户；每 20 秒心跳，慢客户端使用有界缓冲并断开重连。API实例通过 `realtime.user.{id}` Core NATS广播已提交事件。
+
+`/ready` 的 `realtimeBroadcast` 在当前连接的订阅重放获得 broker 确认后报告就绪。客户端重连时从未读摘要或聊天游标恢复业务状态。[订阅恢复和就绪](docs/queue-recovery.md#停机及验证)
 
 事件转发与每 20 秒的心跳都以 PostgreSQL 中的当前会话、账号状态及认证版本为准。事件可以先接受缓存中的拒绝提示，心跳直接查权威记录。每次认证查询最多 3 秒。会话失效、查询失败、JWT 到期或达到最长 30 分钟都会关闭流并释放连接额度。
 

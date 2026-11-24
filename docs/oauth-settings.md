@@ -15,6 +15,8 @@ settings encryption key 加密。服务端会解密使用；管理界面响应�
 底层数据库、解密错误或凭据信息。此时不会创建 OAuth 状态 cookie、
 发起供应商请求或把空默认配置保存回数据库。
 
+回调按请求时读到的供应商配置检查是否仍可登录。供应商停用或配置不全时返回 503，响应发生在核对 state 和发起授权码交换之前。未知供应商返回 404，已启用供应商收到失效 state 时返回 400。[回调实现](../internal/httpapi/oauth_handlers.go) · [供应商配置回归](../internal/httpapi/oauth_provider_readiness_integration_test.go)
+
 `PATCH /api/v1/admin/config/oauth` 接受界面中实际改动的字段。例如，停用 GitHub 登录只需提交
 `{"providers":{"github":{"enabled":false}}}`。调用者须具有 `admin.config.write`。
 每个列出的供应商至少提供一个字段。字段支持 `enabled`、`clientId`、`redirectUri` 和

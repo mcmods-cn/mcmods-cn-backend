@@ -53,6 +53,8 @@ python3 -B tools/testing/isolated_environment.py run -- go run ./tools/testing/d
 不能把成功退出等同于所有条件测试均执行。独立的外部 exporter 样本、Minecraft loader 在线数据
 和 Modrinth 元数据测试仍需要各自显式条件。它们与真实 AI 供应商测试不同，不会由本工具偷偷启用。
 
+复现 CI 空库门时，使用全新且已核实归属的专用 PostgreSQL 18.6 数据库，以 `go run ./cmd/db-initialize` 安装 generation 171。账号浏览联调使用单独的合成身份。记录实际源码提交、数据库代际、每批终态和仍跳过的用例，恢复与重跑范围以同一源码为准。[批次工具](../tools/testing/db_suite/README.md) · [当前执行结果](governance.md#当前版本与验收)
+
 默认单元/race门和真实DB门应区分环境。若运行默认门，显式取消
 `MCMODS_TEST_DATABASE_URL`并设`MCMODS_RUN_DB_INTEGRATION=0`；应用`DATABASE_URL`
 仍只能指向本任务拥有的回环库。真实DB门设`MCMODS_RUN_DB_INTEGRATION=1`，
@@ -94,6 +96,26 @@ npm run dev -- --hostname 127.0.0.1 --port 3001
 `MCMODS_LIVE_PASSWORD` 后执行。合成密码从私有环境读入，不应写在命令历史中。
 这项测试使用实际 API、session cookie 和持久化；常规 `test:browser` 使用受控 API fixture，边界不同。
 浏览器二进制应通过项目 Playwright 1.62.1 安装；设置与安装位置一致的 `PLAYWRIGHT_BROWSERS_PATH`。
+
+在支持 pidfd 的 Linux 上可用配套驱动统一管理账号旅程。为前端从提交导出独立副本，保留原 `package-lock.json`，解包时排除 `.env*`。在副本运行 `npm ci`，并安装 Playwright 所需的 Chromium。后端源、前端源和本次运行目录各自独立。[驱动入口](../tools/testing/live_acceptance_v2.py)
+
+```sh
+frontend="$(cd ../mcmods-cn-frontend && pwd)"
+acceptance_dir="$(mktemp -d)"
+mkdir "$acceptance_dir/frontend"
+git -C "$frontend" archive HEAD | tar --exclude='.env*' -xf - -C "$acceptance_dir/frontend"
+(
+  cd "$acceptance_dir/frontend"
+  npm ci
+  npx playwright install chromium
+)
+python3 -B tools/testing/live_acceptance_v2.py \
+  --state "$PWD/.audit-test-environment" --frontend "$frontend" \
+  --scope "$acceptance_dir/run" --frontend-copy "$acceptance_dir/frontend" \
+  --adopt-prepared-copy all
+```
+
+此驱动从已核验的服务创建专用测试数据库和合成账号，保留测试退出码和隔离范围内的运行证据。源码记录、会话和运行环境文件留在私有目录。清理失败时先核对该目录的状态，再针对同一范围执行 `cleanup`。第三方登录、真实邮件及付费供应商按各自的外部验证流程处理。[清理和失败恢复](#结束与失败恢复)
 
 常规生产产物 browser fixture 要用它自己的编译地址构建：
 
@@ -163,7 +185,7 @@ node tools/testing/ai_configuration_browser.mjs "$MCMODS_AI_CONFIG_BROWSER_DIR" 
 ### 真实游戏包经浏览器和 JetStream 的验证
 
 使用已初始化的隔离环境、干净的三个仓库检出和已安装依赖的独立前端目录。
-[本轮的两个原包及输入](../internal/httpapi/testdata/game-20261121/provenance.json)记录生产提交、加载器、输入模组、原包大小与哈希。
+[仓内固定的两种加载器样本](../internal/httpapi/testdata/game-20261121/provenance.json)记录生产提交、加载器、输入模组、原包大小与哈希。当前标准镜像与新版开发原包的验证组合及哈希见[当前验收](governance.md#当前版本与验收)。
 下列命令在后端根目录运行。两个仓库变量指向本机检出目录，前端使用空闲的回环端口。
 
 ```sh

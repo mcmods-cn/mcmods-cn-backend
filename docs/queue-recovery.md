@@ -17,6 +17,8 @@
 
 应用初次创建的新 stream 用文件存储、LimitsPolicy、DiscardNew，默认 `MaxBytes=268435456`（256 MiB），没有按年龄或条数自动淘汰。该字节数是初始配置值，应按现场事件大小、流量、重放保留需求和磁盘配额选择。管理员可预置覆盖相应 subject prefix 的 stream。应用只读取已存在的 stream，无论重连、重新配置或候选配置回滚，都保留其历史、durable 和限制。
 
+核对 broker 的文件存储预留、账号配额和实际磁盘空间。即使已有 stream 实际只存放少量消息，它的预算仍可能占用 broker 配额。本地同包演练遇到过创建新 stream 被拒，业务由数据库降级完成。JetStream 验收应从专用服务中观察 durable 已成功建立，再用同一个包核对投递、ACK 和已提交的业务结果。[演练记录](governance.md#当前版本与验收)
+
 在 JetStream 集群中，应用新建的 stream 仍采用 broker 默认的单副本。需要容忍节点丢失时，由运维按实际故障域和磁盘容量预置 stream 与副本数，再启动派发。已有 stream 的副本调整应就地评估，保留未处理事件和消费者进度。第二轮用同机三个文件存储节点验证三副本的 leader 停机与重连，跨主机网络分区和生产恢复还需部署验收。[实测边界](governance.md#第二轮真实运行)
 
 `queue.stream.capacityState` 按已配置的字节或条数配额占比中的较高者报告，80% 为 warning，95% 为 critical，达到上限为 full。无限字节且未跨其他阈值时为 no_byte_limit。将这些状态、主机剩余磁盘、JetStream 账号存储配额及 `outbox.oldestSeconds` 接到运维告警。单条新消息可能超出剩余空间，也可能先耗尽整个账号配额。
@@ -62,7 +64,7 @@ WHERE consumer = 'notification.email' AND event_id = $1;
 
 ## 停机及验证
 
-关闭 queue client 或父上下文会取消运行中的任务。等待本地分发协程完成后再关闭数据库。已建立 JetStream 暂时断连时按原配置重连，未获 PubAck 的行保留或按预算转发布死信。没有 JetStream 上下文时使用同一业务处理函数的本地模式。升级所有会运行 Dispatcher/Worker 的实例，使其均使用相同的任务开关、并发和邮件回执。回滚旧版前先停止接收新任务，核对正在执行的邮件、已接受和待核实回执，并确认不存在须由旧代码重新发送的任务。旧程序不能识别这些回执。本次调整没有数据库迁移。
+关闭 queue client 或父上下文会取消运行中的任务。等待本地分发协程完成后再关闭数据库。已建立 JetStream 暂时断连时按原配置重连，未获 PubAck 的行保留或按预算转发布死信。没有 JetStream 上下文时使用同一业务处理函数的本地模式。升级所有会运行 Dispatcher/Worker 的实例，使其均使用相同的任务开关、并发和邮件回执。回滚前先停止接收新任务，核对在途邮件、已接受及待核实回执，并按源码、数据库代际和已验证快照配对恢复。[发布和回退](../README.md#数据库安装发布和恢复)
 
 跨实例 realtime 广播采用 Core NATS 的即时语义。订阅恢复前错过的广播需通过业务状态查询确认。`/ready` 的 `realtimeBroadcast` 反映本实例当前连接的订阅确认情况。
 

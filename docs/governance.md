@@ -2,9 +2,32 @@
 
 本页记录各轮变更的依据、复跑方式和待验事项。[系统地图](system-map.md)用于查业务和权限入口。[历史材料](history/README.md)保留既有证据。
 
+## 当前版本与验收
+
+2026-11-23 的验收绑定以下三个源码快照。核对镜像、JAR 和原包时使用各自产物所记录的源码提交。后端账号旅程使用单独验过的联调驱动 `2861d713be36521489c43c3836db3026c6625657`，该提交的差异是测试驱动读取调度器当前的忙状态说明。[受控账号联调入口](testing-isolated-environment.md#实际服务检查与测试)
+
+| 仓库 | 验收源码 | 当前维护入口 |
+| --- | --- | --- |
+| 后端 | [db0acc9edd57ee9be3f6a8ff9126119719393f96](https://github.com/mcmods-cn/mcmods-cn-backend/tree/db0acc9edd57ee9be3f6a8ff9126119719393f96) | [启动与恢复](../README.md) |
+| 前端 | [a71d99fb30227b5931468e078989b70ace882589](https://github.com/mcmods-cn/mcmods-cn-frontend/tree/a71d99fb30227b5931468e078989b70ace882589) | [运行和浏览器验证](https://github.com/mcmods-cn/mcmods-cn-frontend#readme) |
+| exporter | [5d058d38984c26ee1eb96cf29bdd92dc32617f4b](https://github.com/mcmods-cn/mcmods_exporter/tree/5d058d38984c26ee1eb96cf29bdd92dc32617f4b) | [包契约和发行验证](https://github.com/mcmods-cn/mcmods_exporter/blob/main/docs/contract-validation.md) |
+
+上述冻结快照的逐文件台账核对了 2,707 个跟踪文件。2,591 个文件有连续审读及语义记录，116 个完成格式或来源核验。后端 1,808 个、前端 750 个、exporter 149 个，三个快照的待审及待复审均为零。后续修改使用其各自的新内容哈希复核。复跑台账完整性使用 [review_snapshot.py](../tools/audit/review_snapshot.py)。
+
+| 验收 | 运行环境与实际结果 |
+| --- | --- |
+| 后端基础与完整库 | Go 1.26.11、PostgreSQL 18.6、空库 generation 171。基础门含 vet、build 和并行 race。完整 `go run ./tools/testing/db_suite` 运行 94 批，顶层 2,250 通过、41 条件跳过，子用例 2,041 通过、1 条件跳过。退出 0，零失败。需要直接变更测试库 public 对象的三项在独占库另行通过。 |
+| 真实服务与恢复 | PostgreSQL、Redis 7.4.11、NATS 2.11.17 和 Typesense 29.0 专项通过 30 个顶层和 6 个子用例。并行重连复验通过 56 项，具名重启场景另通过 8 次。三个同宿主真实 JetStream 节点完成三次 leader 停机复验。跨主机条件由目标环境核验。 |
+| 前端及发行构建 | 前端通过类型检查、lint、418 项单元和 336 项 Chromium 测试。标准 Dockerfile 通过构建并以非 root 运行。Exporter 使用 JDK 17 与 Gradle 8.8，通过 77 项 JUnit、54 项真实包及合成契约检查和 Fabric、Forge 标准构建。两个干净加载器实例识别了对应 JAR。 |
+| 最新原包到匿名页面 | 使用 `5d058d3` 的 Fabric 开发客户端导出的原包。该原包 SHA-256 为 `31a50489c64c63ee843f350ad84a0c1668dffecd3229795b1389cdca651782e1`。真实 Chromium 经可信本地 HTTPS、真实 PostgreSQL、Redis、JetStream 和受控对象存储完成中止、续传、独立审核及匿名读取。一个生效修订，投递与 ACK 各一次，零重投。首次在已有 broker 的运行触及存储预留上限，数据库降级完成业务，真实 JetStream 验收在全新隔离服务复跑通过。 |
+
+首次部署可在 PostgreSQL 18.6 空库安装 generation 171，或从与该版本配对的备份恢复。已存在的目标库先核对代际和结构指纹。空库并发安装、重复启动、版本拒绝以及合成数据备份恢复均有真库结果。按业务数据和凭据的保留范围配对源码、镜像及数据库快照，部署后在目标反代核对就绪、Cookie、上传与消费者进度。[数据库安装与回退](../README.md#数据库安装发布和恢复) · [队列恢复](queue-recovery.md)
+
+正式 Minecraft 会话中的发行 JAR 入世界和同包回放待验。目标 TLS、跨主机恢复、实体 GPU、Windows ACL 及启用的云 OSS、OAuth、SMTP、AI 供应商均按部署范围单独核验。本地结果使用隔离服务和合成账号。GitHub 主分支的执行状态以相应仓库的 Actions 为准。[后端 CI](https://github.com/mcmods-cn/mcmods-cn-backend/actions/workflows/ci.yml) · [真实服务工作流](https://github.com/mcmods-cn/mcmods-cn-backend/actions/workflows/real-services.yml) · [前端 CI](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/workflows/ci.yml) · [exporter 契约与构建](https://github.com/mcmods-cn/mcmods_exporter/actions/workflows/contracts.yml)
+
 ## 第三轮工作记录
 
-2026-11-22 核对 GitHub 默认分支和本地工作树。三仓 `main` 与用户基线一致，原工作树干净。实施在各仓的 `governance/round3` 上，审查快照以完整提交号固定。
+2026-11-22 的初始记录对应当时的 GitHub 默认分支和工作树。实施在各仓的 `governance/round3` 上，审查快照以完整提交号固定。当前结果见[本页验收](#当前版本与验收)。
 
 | 仓库 | 冻结的 `main` |
 | --- | --- |
@@ -36,13 +59,13 @@
 
 本轮生成的 Fabric 开发客户端包 `e4a79df5bc8219b9d0d4f4009b917fa59991d7465072b4b49eba77870e667c38` 已经实际 Chromium 上传、JetStream 业务导入、另一账号独立审核，再以同一修订匿名打开配方。一个 ready 任务、一个生效修订，投递与确认各一次，未重投。首次匿名导航超时后仅重试匿名读取，导出图的解码 RGBA 与原 ZIP 一致。对象存储使用回环替身。[单包验收入口](testing-isolated-environment.md#真实游戏包经浏览器和-jetstream-的验证)
 
-发布顺序为准备 PostgreSQL 与有边界的 Redis、JetStream、对象前缀，初始化当前库并核对恢复，再启动 API/Worker，最后配置前端的公开 HTTPS 地址。回退时源码、镜像和已验证的 schema 快照一起配对；同一个 169 库不能直接交给旧 168 程序。生产环境与有效 Minecraft 标准启动器会话分别验收。
+当时的发布顺序从部署 PostgreSQL、Redis、JetStream 和对象前缀开始。该批回退涉及 169 与 168 的历史边界，操作使用与源码配对的快照。当前部署与回退见 [README](../README.md#数据库安装发布和恢复)。
 
 第三轮逐行审查的后续状态见下节。运行记录分别绑定源提交、隔离真实服务、开发游戏原包、发行产物和目标部署条件。
 
 ### 2026-11-23 第三轮接续
 
-从后端 `d24c576536547fddb461fb7ee7008771c672c975`、前端 `2c6da361ab50629a17bd90d19563401bafbd0f01` 和 exporter `01b50137fb3dee206507f96c245e7554fb814ec3` 继续。各仓原有主分支与审查证据保留，续做候选各自独立提交。源码台账仍有待审项，以 `review_snapshot.py` 对固定 Git 树的核对为准。
+从后端 `d24c576536547fddb461fb7ee7008771c672c975`、前端 `2c6da361ab50629a17bd90d19563401bafbd0f01` 和 exporter `01b50137fb3dee206507f96c245e7554fb814ec3` 继续。此节保存阶段性发现、历史结果与复验线索。最终冻结快照以[当前版本与验收](#当前版本与验收)为准。
 
 | 事项 | 已核对的影响与处理 |
 | --- | --- |
@@ -74,9 +97,9 @@ Generation 170 使用同一个空库安装命令。PostgreSQL 18.6 上，以两�
 
 同版 PostgreSQL 18.6 的普通 owner 并发空库安装及合成备份恢复通过。171 实库有 291 个表、1,148 个索引和 4,079 个约束。与 170 对比，外部日志和下载的项目范围唯一索引同时覆盖各自的项目路由外键，相关四个旧索引由两个索引接替。其余索引定义相同。恢复以与应用源码配对的 catalog 和数据事实为准。
 
-开发游戏原包、标准启动器识别正式 JAR、凭有效玩家会话入世界的证据分别记录。当前实际通过的三仓开发包组合与最终镜像和独立启动器验收另列。
+开发游戏原包、标准启动器识别正式 JAR、凭有效玩家会话入世界的状态见[当前版本与验收](#当前版本与验收)。
 
-生产 Dockerfile 对应后端 `914bb9b` 和前端 `202502f`，以本地可信 HTTPS 启动，在普通身份下验证路径前缀、Cookie、退出及真实库就绪。由 exporter `71e548a` 的开发 Minecraft 客户端生成的未修改 ZIP 在该组镜像经实际 Chromium 续传、独立审核、匿名资源和配方页面，原包保持私有。该原包与两个标准发行 JAR 的入世界验证分开。前端测试提交 `a71d99f` 的 336 项浏览器用例全部通过，包含真实 ZIP 像素。共载时的 WebGL 超时及同产物隔离复验完整保留。
+阶段验收使用生产 Dockerfile 构建的后端 `914bb9b` 和前端 `202502f`。本地可信 HTTPS 检查了非 root、路径前缀、Cookie、退出及真实库就绪。Exporter `71e548a` 的原开发包在该组镜像经实际 Chromium 续传、独立审核及匿名查看资料和配方，原包保持私有。后续 `a71d99f` 的 336 项浏览器用例通过，包含真实 ZIP 像素。保留共载时 WebGL 超时和同产物的隔离复验。
 
 ## 第二轮工作记录
 

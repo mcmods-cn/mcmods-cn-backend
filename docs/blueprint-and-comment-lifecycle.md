@@ -8,6 +8,8 @@
 uploading / failed；queued 的重复 complete 保持既有幂等返回。锁等待期间发生
 删除时返回资源不存在，不把 deleted 重置成 queued。无 Schema 或 API URL 变化。
 
+蓝图生成与发布先锁住任务行，再用 PostgreSQL 的 `clock_timestamp()` 核对 token、attempt 和租约截止时间。最终状态更新再次核对同次领取。派生物绑定、最终状态和通知共用事务，失去租约的写入整体回滚。[租约检查](../internal/httpapi/blueprint_worker.go) · [并发验证](governance.md#2026-11-23-第三轮接续)
+
 蓝图派生物 PUT 返回后重新核对任务 run token、attempt，以及精确 artifact/file/key
 身份和 pending 状态。失去主体或租约的结果返回 lease lost；独立于请求取消的
 10 秒清理上下文把该 key 的删除意图重新入队。已经 abandoned/deleted 的同一
