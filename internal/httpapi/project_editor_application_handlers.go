@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 type createProjectEditorApplicationRequest struct {
@@ -231,6 +233,18 @@ func (s *Server) adminProjectEditorApplications(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "hasMore": hasMore, "nextCursor": nextCursor})
 }
 
+func requireCurrentProjectEditorReviewer(w http.ResponseWriter, r *http.Request, tx pgx.Tx) (security.Claims, bool) {
+	claims, ok := requireCurrentReviewActor(w, r, tx)
+	if !ok {
+		return security.Claims{}, false
+	}
+	if !claimsAllow(claims, "project.editor.review") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return security.Claims{}, false
+	}
+	return claims, true
+}
+
 func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.Request) {
 	applicationPublicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
 	var request reviewProjectEditorApplicationRequest
@@ -274,7 +288,10 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusServiceUnavailable, "failed to load application target")
 		return
 	}
-	claims := currentClaims(r)
+	claims, ok := requireCurrentProjectEditorReviewer(w, r, tx)
+	if !ok {
+		return
+	}
 	if _, err = tx.Exec(r.Context(), `update project_editor_applications set status=$2,reviewed_by=$3,
 		review_note=$4,reviewed_at=now(),updated_at=now() where id=$1`, applicationID, request.Status, claims.Subject, request.Note); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save editor application review")
@@ -349,7 +366,10 @@ func (s *Server) revokeProjectEditorAssignment(w http.ResponseWriter, r *http.Re
 	}
 	defer tx.Rollback(r.Context())
 	var userID int64
-	err = tx.QueryRow(r.Context(), `select id from users where public_id=$1`, userPublicID).Scan(&userID)
+	var active bool
+	err = tx.QueryRow(r.Context(), `select account.id,exists(select 1 from project_editor_assignments assignment
+		where assignment.user_id=account.id and assignment.target_route_id=$2 and assignment.status='active' for update)
+		from users account where account.public_id=$1`, userPublicID, target.RouteID).Scan(&userID, &active)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "user not found")
 		return
@@ -358,7 +378,14 @@ func (s *Server) revokeProjectEditorAssignment(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusServiceUnavailable, "failed to load user")
 		return
 	}
-	claims := currentClaims(r)
+	if !active {
+		writeError(w, http.StatusNotFound, "active editor assignment not found")
+		return
+	}
+	claims, ok := requireCurrentProjectEditorReviewer(w, r, tx)
+	if !ok {
+		return
+	}
 	result, err := tx.Exec(r.Context(), `update project_editor_assignments set status='revoked',revoked_by=$3,
 		revoked_at=now(),revoke_reason=$4,updated_at=now() where target_route_id=$1 and user_id=$2 and status='active'`,
 		target.RouteID, userID, claims.Subject, request.Reason)

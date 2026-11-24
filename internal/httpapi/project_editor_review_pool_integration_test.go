@@ -41,12 +41,18 @@ func TestProjectEditorReviewDoesNotReenterPoolDuringTransactionIntegration(t *te
 		}
 	}()
 	if _, err = pool.Exec(ctx, `insert into users(id,username,email,password_hash) values
- (99480001,'editor-applicant','editor-applicant@example.invalid','test-only'),
- (99480002,'editor-reviewer','editor-reviewer@example.invalid','test-only');
+ (99480001,'editor-applicant','editor-applicant@example.invalid','test-only');
  insert into mods(id,project_code,slug,primary_name,review_status,submitted_by)
  values(99480003,'editpool1','editor-pool','Editor pool target','approved',99480001)`); err != nil {
 		t.Fatal(err)
 	}
+	cfg := config.Load()
+	reviewerID, _, token := createTEST044User(t, ctx, pool, cfg, "editor-pool-reviewer", "UTC")
+	claims, err := security.ParseToken(cfg.JWTSecret, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims.Subject = reviewerID
 	cache := querycache.New(config.RedisConfig{})
 	defer cache.Close()
 	server := &Server{db: pool, cache: cache}
@@ -59,12 +65,25 @@ func TestProjectEditorReviewDoesNotReenterPoolDuringTransactionIntegration(t *te
 			}
 			queryCtx, queryCancel := context.WithTimeout(ctx, 2*time.Second)
 			defer queryCancel()
-			req := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/project-editor-applications/"+applicationID, strings.NewReader(`{"status":"`+decision+`","note":"synthetic review"}`))
-			req.SetPathValue("id", applicationID)
-			req = req.WithContext(context.WithValue(queryCtx, claimsContextKey, security.Claims{Subject: 99480002}))
-			response := httptest.NewRecorder()
-			server.reviewProjectEditorApplication(response, req)
-			if response.Code != http.StatusOK {
+			review := func() *httptest.ResponseRecorder {
+				req := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/project-editor-applications/"+applicationID, strings.NewReader(`{"status":"`+decision+`","note":"synthetic review"}`))
+				req.SetPathValue("id", applicationID)
+				req = req.WithContext(context.WithValue(queryCtx, claimsContextKey, claims))
+				response := httptest.NewRecorder()
+				server.reviewProjectEditorApplication(response, req)
+				return response
+			}
+			if decision == "approved" {
+				if response := review(); response.Code != http.StatusForbidden {
+					t.Fatalf("review without the permission returned %d", response.Code)
+				}
+				var pending bool
+				if err := pool.QueryRow(ctx, `select status='pending' and reviewed_by is null from project_editor_applications where public_id=$1`, applicationID).Scan(&pending); err != nil || !pending {
+					t.Fatalf("pending application changed before grant: pending=%t err=%v", pending, err)
+				}
+				grantTEST044Permissions(t, ctx, pool, reviewerID, "project.editor.review")
+			}
+			if response := review(); response.Code != http.StatusOK {
 				t.Fatalf("single-connection review returned %d: %s", response.Code, response.Body.String())
 			}
 			if queryCtx.Err() != nil {
