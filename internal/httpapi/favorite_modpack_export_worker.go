@@ -201,6 +201,16 @@ func (worker *FavoriteModpackExportWorker) recoverOrphanedArtifacts(ctx context.
 		return fmt.Errorf("iterate orphaned favorite export artifacts: %w", err)
 	}
 	rows.Close()
+	if len(fileIDs) > 0 {
+		// A build can commit its link after the scan's SELECT snapshot but
+		// before the file is locked. Recheck with all file locks already held.
+		if err = tx.QueryRow(ctx, `select array(
+			select candidate from unnest($1::bigint[]) candidate
+			where not exists(select 1 from favorite_modpack_export_tasks where result_file_id=candidate)
+		)`, fileIDs).Scan(&fileIDs); err != nil {
+			return fmt.Errorf("recheck favorite export artifact references: %w", err)
+		}
+	}
 	for _, fileID := range fileIDs {
 		if err = worker.server.tombstoneOSSFileTx(ctx, tx, fileID, "favorite_modpack_export_orphaned"); err != nil {
 			return fmt.Errorf("tombstone orphaned favorite export artifact %d: %w", fileID, err)
@@ -266,16 +276,16 @@ func (worker *FavoriteModpackExportWorker) expireCompleted(ctx context.Context) 
 		return fmt.Errorf("begin favorite export expiration: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	rows, err := tx.Query(ctx, `select task.id,file.id,task.owner_user_id,task.pack_name,task.public_id from favorite_modpack_export_tasks task
-		join oss_files file on file.id=task.result_file_id
+	rows, err := tx.Query(ctx, `select task.id,task.result_file_id,task.owner_user_id,task.pack_name,task.public_id from favorite_modpack_export_tasks task
 		where task.status='ready' and task.expires_at<=now()
 		order by task.expires_at,task.id for update of task skip locked limit 50`)
 	if err != nil {
 		return fmt.Errorf("query expired favorite exports: %w", err)
 	}
 	type expiredArtifact struct {
-		taskID, fileID, ownerID int64
-		name, publicID          string
+		taskID, ownerID int64
+		fileID          *int64
+		name, publicID  string
 	}
 	artifacts := make([]expiredArtifact, 0)
 	for rows.Next() {
@@ -292,8 +302,10 @@ func (worker *FavoriteModpackExportWorker) expireCompleted(ctx context.Context) 
 	}
 	rows.Close()
 	for _, artifact := range artifacts {
-		if err = worker.server.tombstoneOSSFileTx(ctx, tx, artifact.fileID, "favorite_modpack_export_expired"); err != nil {
-			return fmt.Errorf("tombstone expired favorite export %s: %w", artifact.publicID, err)
+		if artifact.fileID != nil {
+			if err = worker.server.tombstoneOSSFileTx(ctx, tx, *artifact.fileID, "favorite_modpack_export_expired"); err != nil {
+				return fmt.Errorf("tombstone expired favorite export %s: %w", artifact.publicID, err)
+			}
 		}
 		tag, updateErr := tx.Exec(ctx, `update favorite_modpack_export_tasks set status='expired',stage='expired',updated_at=now() where id=$1 and status='ready'`, artifact.taskID)
 		if updateErr != nil {
@@ -512,6 +524,15 @@ func (worker *FavoriteModpackExportWorker) finalizeFavoriteExportArtifact(ctx co
 	}
 	if status != "processing" || currentLease != leaseToken {
 		return false, errFavoriteExportLeaseLost
+	}
+	// The orphan scanner locks the same file before deciding on removal.
+	// Holding it through commit prevents a ready notification for a removed artifact.
+	var active bool
+	if err = tx.QueryRow(ctx, `select status='active' from oss_files where id=$1 for no key update`, fileID).Scan(&active); err != nil {
+		return false, fmt.Errorf("lock generated favorite export file: %w", err)
+	}
+	if !active {
+		return false, errors.New("generated favorite export file is no longer active")
 	}
 	template := "modpack_export_completed"
 	if skipped > 0 {

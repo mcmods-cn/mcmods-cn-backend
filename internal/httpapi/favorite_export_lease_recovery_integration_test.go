@@ -180,3 +180,86 @@ func TestFavoriteExportLeaseDuringNotificationIntegration(t *testing.T) {
 		})
 	}
 }
+
+func TestFavoriteExportOrphanRecoverySerializesWithPublication(t *testing.T) {
+	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
+		t.Skip("requires an isolated PostgreSQL database")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	pool, ownerID := newPostgresUserFixture(t, ctx, "favorite-file-publication")
+	worker := NewFavoriteModpackExportWorker(config.Load(), pool, nil)
+	var fileID int64
+	if err := pool.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,source,status,scan_status,created_at)
+		values('test','https://oss.example.test','test-region','old.mrpack','favorite_modpack_export','active','trusted_generated',now()-interval '2 days') returning id`).Scan(&fileID); err != nil {
+		t.Fatal(err)
+	}
+	var taskID string
+	if err := pool.QueryRow(ctx, `insert into favorite_modpack_export_tasks(owner_user_id,collection_public_id_snapshot,pack_name,
+		pack_version_id,minecraft_version,loader_type,loader_version,status,lease_token,lease_expires_at)
+		values($1,'testcol01','Favorite fixture','1','1.20.1','fabric','0.16','processing','holder',now()+interval '10 minutes') returning public_id`, ownerID).Scan(&taskID); err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(ctx)
+	if _, err = blocker.Exec(ctx, "lock table nats_outbox in share mode"); err != nil {
+		t.Fatal(err)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, err := worker.finalizeFavoriteExportArtifact(ctx, taskID, "holder", fileID, 10, "fixture", time.Now().Add(time.Hour))
+		result <- err
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var waiting bool
+		if err = pool.QueryRow(ctx, `select exists(select 1 from pg_stat_activity where datname=current_database()
+			and $1=any(pg_blocking_pids(pid)))`, int64(blocker.Conn().PgConn().PID())).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case err = <-result:
+			t.Fatalf("completion returned before reaching the notification: %v", err)
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+	}
+	if err = worker.recoverOrphanedArtifacts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = blocker.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-result; err != nil {
+		t.Fatal(err)
+	}
+	var readyWithActiveArtifact bool
+	if err = pool.QueryRow(ctx, `select task.status='ready' and file.status='active'
+		from favorite_modpack_export_tasks task join oss_files file on file.id=task.result_file_id
+		where task.public_id=$1`, taskID).Scan(&readyWithActiveArtifact); err != nil || !readyWithActiveArtifact {
+		t.Errorf("published task with active generated artifact = %v, %v", readyWithActiveArtifact, err)
+	}
+	if _, err = pool.Exec(ctx, "delete from oss_files where id=$1", fileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `update favorite_modpack_export_tasks set expires_at=now()-interval '1 second' where public_id=$1`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	if err = worker.expireCompleted(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var expiredAndNotified bool
+	if err = pool.QueryRow(ctx, `select status='expired' and result_file_id is null and exists(
+		select 1 from nats_outbox where payload->>'templateKey'='modpack_export_expired' and payload#>>'{data,taskId}'=$1
+	) from favorite_modpack_export_tasks where public_id=$1`, taskID).Scan(&expiredAndNotified); err != nil || !expiredAndNotified {
+		t.Fatalf("history expired and notified after file removal = %v, %v", expiredAndNotified, err)
+	}
+}
