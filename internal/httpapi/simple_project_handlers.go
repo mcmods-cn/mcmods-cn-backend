@@ -282,6 +282,14 @@ func (s *Server) simpleProjects(w http.ResponseWriter, r *http.Request) {
 	writeBoundedCatalogJSON(w, map[string]any{"items": items, "total": total})
 }
 
+func writeSimpleProjectReadError(w http.ResponseWriter, err error, missing string) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, missing)
+		return
+	}
+	writeError(w, http.StatusInternalServerError, "failed to read project")
+}
+
 func (s *Server) simpleProjectItem(w http.ResponseWriter, r *http.Request) {
 	projectType := normalizeSimpleProjectType(r.PathValue("projectType"))
 	siteID := normalizeModSiteID(r.PathValue("siteId"))
@@ -295,7 +303,7 @@ func (s *Server) simpleProjectItem(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, currentClaims(r).Subject, false)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "project not found")
+		writeSimpleProjectReadError(w, err, "project not found")
 		return
 	}
 	item.CanEdit = canEditSimpleProject(currentClaims(r), item)
@@ -351,7 +359,7 @@ func (s *Server) simpleProjectEditor(w http.ResponseWriter, r *http.Request) {
 	item, err := s.simpleProjectBySiteID(r.Context(), normalizeSimpleProjectType(r.PathValue("projectType")),
 		normalizeModSiteID(r.PathValue("siteId")), currentClaims(r).Subject, true)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "project not found")
+		writeSimpleProjectReadError(w, err, "project not found")
 		return
 	}
 	if !canEditSimpleProject(currentClaims(r), item) {
@@ -515,7 +523,7 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 	claims := currentClaims(r)
 	current, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, claims.Subject, true)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "project not found")
+		writeSimpleProjectReadError(w, err, "project not found")
 		return
 	}
 	if !canEditSimpleProject(claims, current) {
@@ -1362,7 +1370,7 @@ func (s *Server) simpleProjectGalleryImage(w http.ResponseWriter, r *http.Reques
 		where gallery.public_id=$3 and (project.review_status='approved' or project.submitted_by=$4)`, projectType,
 		normalizeModSiteID(r.PathValue("siteId")), strings.ToLower(r.PathValue("publicId")), currentClaims(r).Subject).Scan(&objectKey, &contentType, &anonymousAllowed)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "project gallery image not found")
+		writeSimpleProjectReadError(w, err, "project gallery image not found")
 		return
 	}
 	s.redirectCatalogOSSAsset(anonymousPublicRasterRedirect(w, anonymousAllowed), r, objectKey, contentType)
@@ -1379,7 +1387,7 @@ func (s *Server) simpleProjectHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	item, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, claims.Subject, true)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "project not found")
+		writeSimpleProjectReadError(w, err, "project not found")
 		return
 	}
 	canEdit := canEditSimpleProject(claims, item)
@@ -1396,8 +1404,12 @@ func (s *Server) simpleProjectHistory(w http.ResponseWriter, r *http.Request) {
 	var published *int64
 	if item.PublishedRevisionID != nil {
 		var id int64
-		if s.db.QueryRow(r.Context(), `select id from content_revisions where public_id=$1`, *item.PublishedRevisionID).Scan(&id) == nil {
+		err = s.db.QueryRow(r.Context(), `select id from content_revisions where public_id=$1`, *item.PublishedRevisionID).Scan(&id)
+		if err == nil {
 			published = &id
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to read published revision")
+			return
 		}
 	}
 	items, err := contentRevisionHistoryPage(r.Context(), s.db, simpleProjectAggregate, item.PublicID, published, visibility, pageRequest)

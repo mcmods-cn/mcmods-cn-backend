@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -56,6 +58,38 @@ func TestSimpleProjectCatalogSchemaSQLSmokeIntegration(t *testing.T) {
 			}
 			if scanned > total || scanned > 24 {
 				t.Fatalf("smoke rows=%d total=%d", scanned, total)
+			}
+		})
+	}
+}
+
+func TestSimpleProjectReadsDistinguishStorageFailure(t *testing.T) {
+	pool, err := pgxpool.New(t.Context(), "postgres://unused@127.0.0.1:1/unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	server := &Server{db: pool}
+	for _, tc := range []struct {
+		name    string
+		method  string
+		handler http.HandlerFunc
+	}{
+		{"detail", http.MethodGet, server.simpleProjectItem},
+		{"editor", http.MethodGet, server.simpleProjectEditor},
+		{"revision", http.MethodPut, server.simpleProjectItem},
+		{"history", http.MethodGet, server.simpleProjectHistory},
+		{"gallery", http.MethodGet, server.simpleProjectGalleryImage},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(tc.method, "/", nil)
+			request.SetPathValue("projectType", "map")
+			request.SetPathValue("siteId", "sample")
+			request.SetPathValue("publicId", "testimage")
+			response := httptest.NewRecorder()
+			tc.handler(response, request)
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("project read with unavailable storage returned %d", response.Code)
 			}
 		})
 	}
