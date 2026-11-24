@@ -21,9 +21,17 @@ case "$CASE" in
   openssl x509 -in "$work/leaf.pem" -pubkey -noout | openssl pkey -pubin -outform DER 2>/dev/null | openssl dgst -sha256 -binary | base64 > "$work/spki";;
  *) exit 2;;
 esac
-cd "$BASE"; go run ./cmd/db-initialize; go test -c -o "$work/identity.test" ./internal/httpapi
+cd "$BASE"; go run ./cmd/db-initialize
+test_deadline=26m; compile_flags=()
+if test "${CREATOR_KIND:-}" = natural; then
+  # The ordinary authority window is 60 minutes. Only this optional service fixture's
+  # lifetime is held longer; its actual caller, permissions, code and wall clock stay intact.
+  python3 "$HARNESS/qa/creator-wall-clock.py" "$BASE" "$work"
+  compile_flags=(-overlay "$work/creator-overlay.json");test_deadline=80m
+fi
+go test "${compile_flags[@]}" -c -o "$work/identity.test" ./internal/httpapi
 cd "$BASE/internal/httpapi"
-go tool test2json -t -p mcmods-cn-backend/internal/httpapi "$work/identity.test" -test.v=test2json -test.count=1 -test.run "^$name$" -test.timeout=26m > "$work/go.private" 2>&1 & service=$!
+go tool test2json -t -p mcmods-cn-backend/internal/httpapi "$work/identity.test" -test.v=test2json -test.count=1 -test.run "^$name$" -test.timeout="$test_deadline" > "$work/go.private" 2>&1 & service=$!
 front=''; gateway=''; finished=''
 finish(){
   test -z "$front" || kill "$front" 2>/dev/null || true
@@ -70,6 +78,7 @@ wait "$service"; go_code=$?; finished=1; echo "$go_code" > "$work/go.exit"; set 
 jq -e -s --arg n "$name" 'any(.[];.Action=="pass" and .Test==$n) and all(.[];.Action!="skip" and .Action!="fail")' "$work/go.private" >/dev/null
 cp "$state/browser-result.json" "$pub/"; for file in "$state"/*.png "$state/backend-postconditions.json"; do test ! -f "$file" || cp "$file" "$pub/"; done
 if test "$CASE" = creator; then
- jq -e '.state=="STOPPED" and (.independentNativeReviewReceipts|length)==4' "$state/runtime.json" >/dev/null
- jq '{state,draftObservations,finalOwnedDatabaseFacts,privateProtocolObservations,reviewCount:(.independentNativeReviewReceipts|length)}' "$state/runtime.json" > "$pub/backend-postconditions.json"
+ expected=2; if test "${CREATOR_KIND:-}" = natural; then expected=4; fi
+ jq -e --argjson expected "$expected" '.state=="STOPPED" and (.independentNativeReviewReceipts|length)==$expected' "$state/runtime.json" >/dev/null
+ jq '{state,draftObservations,finalOwnedDatabaseFacts,privateProtocolObservations,independentNativeReviewReceipts,reviewCount:(.independentNativeReviewReceipts|length)}' "$state/runtime.json" > "$pub/backend-postconditions.json"
 fi

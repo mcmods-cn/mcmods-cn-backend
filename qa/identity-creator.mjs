@@ -10,6 +10,9 @@ const pin=(await fs.readFile(path.join(task,'spki'),'utf8')).trim();
 const b=await chromium.launch({args:['--ignore-certificate-errors-spki-list='+pin]});
 const context=await b.newContext({locale:'en-US',serviceWorkers:'block'});
 const origin=cfg.frontendOrigin;
+const track=process.env.CREATOR_KIND;
+assert.ok(['author','team','natural'].includes(track));
+const selected=cfg.profiles.filter(p=>track==='natural'||p.kind===track);assert.equal(selected.length,track==='natural'?2:1);
 await context.addCookies([{name:'mcmods-ui-locale',value:'en-US',url:origin}]);
 await context.route(u=>/^https?:$/.test(u.protocol)&&u.origin!==origin,r=>r.abort());
 const q=await context.newPage();const captures=[];
@@ -52,7 +55,7 @@ try{
  const waitUntil=Math.max(...initial.map(({src})=>{const u=new URL(src),date=u.searchParams.get('x-oss-date'),exp=Number(u.searchParams.get('x-oss-expires'));assert.ok(date&&exp===60);const s=date.replace(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/,'$1-$2-$3T$4:$5:$6Z');return Date.parse(s)+(exp+2)*1000;}));
  await sleep(Math.max(0,waitUntil-Date.now()));
  for(const [i,prof] of cfg.profiles.entries()){const status=await q.evaluate(async url=>(await fetch(url,{cache:'no-store',credentials:'same-origin'})).status,initial[i].src);assert.equal(status,403);await q.goto(origin+prof.editPath,{waitUntil:'domcontentloaded'});const renewed=await decoded();assert.notEqual(renewed.src,initial[i].src);journey.push({action:'initial-and-expired',kind:prof.kind,wallClockExpiredStatus:status,freshSignedBytes:[renewed.width,renewed.height]})}
- for(const [action,prof] of [...cfg.profiles.map(p=>['edit',p]),...cfg.profiles.map(p=>['create',p])]){
+ for(const [action,prof] of [...selected.map(p=>['edit',p]),...selected.map(p=>['create',p])]){
   // The standard upload policy permits five writes per rolling minute.
   // Each independent edit exercises presign, completion and draft preview signing.
   if(latestUploadWrite)await sleep(Math.max(0,latestUploadWrite+61000-Date.now()));
@@ -87,7 +90,29 @@ try{
    journey.push({action:'restored-draft',kind:prof.kind,fileId,presignStatus:preview.status(),unsignedPersistedReference:true,decoded:[256,256]});
   }
   step(phase+' submit pending creator change');
-  const [saved]=await Promise.all([response(action==='edit'?'PUT':'POST','/api/v1/creators'+(action==='edit'?'/'+prof.publicId:'')),f.locator('header button[type=submit]').click()]);assert.equal(saved.status(),action==='edit'?200:201);
+  async function submitCreator(){
+   const [r]=await Promise.all([response(action==='edit'?'PUT':'POST','/api/v1/creators'+(action==='edit'?'/'+prof.publicId:'')),f.locator('header button[type=submit]').click()]);
+   return r;
+  }
+  let saved=await submitCreator();
+  if(track==='natural'&&action==='create'&&prof.kind==='team'){
+   assert.equal(saved.status(),429);const body=await saved.json(),seconds=Number(saved.headers()['retry-after']);
+   assert.equal(body.code,'rate_limited');assert.equal(body.retryAfter,seconds);
+   assert.ok(Number.isInteger(seconds)&&seconds>60&&seconds<=3600);
+   const expectedDraft=saved.request().postDataJSON(),started=Date.now(),priorPage=q.url();
+   assert.equal(expectedDraft.avatarFileId,fileId);
+   step('same actor and draft await real Retry-After');
+   console.log('Waiting for the observed creator-write Retry-After:',seconds,'seconds');
+   await fs.writeFile(path.join(run,'rate-window.json'),JSON.stringify({observedUTC:new Date(started).toISOString(),httpStatus:429,code:body.code,retryAfter:seconds}),{mode:0o600});
+   await sleep(seconds*1000+1000);assert.ok(Date.now()-started>=seconds*1000);
+   assert.equal(q.url(),priorPage);
+   const current=await q.evaluate(async()=>{const r=await fetch('/api/v1/auth/me',{credentials:'include',cache:'no-store'});return {status:r.status,id:(await r.json()).data?.id}});
+   assert.equal(current.status,200);assert.equal(current.id,credentials.publicId);
+   step('same actor submit after expiry');saved=await submitCreator();assert.deepEqual(saved.request().postDataJSON(),expectedDraft);
+   journey.push({action:'ordinary-quota-retry',initial:429,retryAfterSeconds:seconds,actualWaitMs:Date.now()-started,
+    sameActor:true,sameDraft:true,sameDatabase:true,terminal:saved.status(),startedUTC:new Date(started).toISOString(),retriedUTC:new Date().toISOString()});
+  }
+  assert.equal(saved.status(),action==='edit'?200:201);
   const payload=saved.request().postDataJSON(),result=(await saved.json()).data;
   assert.equal(payload.avatarFileId,fileId);assert.ok(!new URL(payload.avatarUrl).search);assert.equal(result.reviewStatus,'pending');
   const creatorId=result.publicId||prof.publicId,revisionId=result.revisionId;assert.ok(creatorId&&revisionId);
@@ -98,9 +123,18 @@ try{
   const outcome=JSON.parse(await fs.readFile(receipt));assert.equal(outcome.status,'approved');assert.equal(outcome.publishedRevisionId,revisionId);assert.equal(outcome.temporarySignaturePersisted,false);
   step(phase+' view approved avatar');
   await q.goto(origin+'/'+base+'/'+creatorId,{waitUntil:'domcontentloaded'});const visible=await decoded();assert.deepEqual([visible.width,visible.height],[256,256]);
-  journey.push({action,kind:prof.kind,reviewStatus:'approved',publicId:creatorId,fileId,publishedRevisionId:revisionId,transport:[saved.status(),c.status()],dimensions:[visible.width,visible.height],stableReference:!new URL(payload.avatarUrl).search});
+  const guest=await b.newContext({serviceWorkers:'block'});
+  try {
+   await guest.route(u=>/^https?:$/.test(u.protocol)&&u.origin!==origin,r=>r.abort());
+   const detail=await guest.newPage();
+   const [dto]=await Promise.all([detail.waitForResponse(r=>new URL(r.url()).pathname==='/api/v1/creators/'+creatorId&&r.request().method()==='GET'),detail.goto(origin+'/'+base+'/'+creatorId,{waitUntil:'domcontentloaded'})]);
+   assert.equal(dto.status(),200);const guestDetail=(await dto.json()).data;assert.equal(guestDetail.creator.publicId,creatorId);
+   const signed=guestDetail.creator.avatarUrl;assert.ok(new URL(signed).search);
+   await detail.waitForFunction(src=>[...document.images].some(i=>i.currentSrc===src&&i.complete&&i.naturalWidth===256&&i.naturalHeight===256),signed,{timeout:45000});
+  }finally{await guest.close()}
+  journey.push({action,kind:prof.kind,anonymousApprovedDetail:200,anonymousDecoded:[256,256],reviewStatus:'approved',publicId:creatorId,fileId,publishedRevisionId:revisionId,transport:[saved.status(),c.status()],dimensions:[visible.width,visible.height],stableReference:!new URL(payload.avatarUrl).search});
  }
- await q.screenshot({path:path.join(run,'reviewed-team.png')});await fs.writeFile(path.join(run,'browser-result.json'),JSON.stringify({browser:b.version(),journey,requests:captures},null,2),{mode:0o600,flag:'wx'});
+ await q.screenshot({path:path.join(run,'reviewed-'+track+'.png')});await fs.writeFile(path.join(run,'browser-result.json'),JSON.stringify({browser:b.version(),track,journey,requests:captures},null,2),{mode:0o600,flag:'wx'});
  await fs.writeFile(path.join(run,'STOP'),'',{mode:0o600,flag:'wx'});console.log('PASS ordinary native author/team snapshots and signature renewal');
 }catch(err){
  const error=String(err.message).split('\n')[0].replace(/https?:\/\/[^ ]+/g,'[url]').slice(0,240);
