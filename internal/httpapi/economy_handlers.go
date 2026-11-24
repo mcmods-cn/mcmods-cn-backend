@@ -287,8 +287,9 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize check-ins and timezone edits while admitting wallet ledger foreign keys.
 	var timezone string
-	if err = tx.QueryRow(r.Context(), `select timezone from users where id=$1 for update`, userID).Scan(&timezone); err != nil {
+	if err = tx.QueryRow(r.Context(), `select timezone from users where id=$1 for no key update`, userID).Scan(&timezone); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load user timezone")
 		return
 	}
