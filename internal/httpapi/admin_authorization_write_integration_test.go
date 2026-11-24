@@ -64,13 +64,11 @@ func TestAdminAuthorizationWritesAreTransactionalAndImmediatelyEffectiveIntegrat
 	server.mux.HandleFunc("DELETE /api/v1/admin/roles/{code}", server.deleteRole)
 	server.handler = server.mux
 
-	var operatorID, targetID int64
+	var targetID int64
 	var targetPublicID string
 	var authVersion, permissionVersion int64
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified,status)
-		values('authorization_operator','authorization-operator@example.invalid','test-only',true,'active') returning id`).Scan(&operatorID); err != nil {
-		t.Fatal(err)
-	}
+	operatorClaims := createRoleGraphTestOperator(t, ctx, pool)
+	operatorID := operatorClaims.Subject
 	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified,status)
 		values('authorization_target','authorization-target@example.invalid','test-only',true,'active')
 		returning id,public_id,auth_version,permission_version`).Scan(&targetID, &targetPublicID, &authVersion, &permissionVersion); err != nil {
@@ -120,7 +118,6 @@ func TestAdminAuthorizationWritesAreTransactionalAndImmediatelyEffectiveIntegrat
 		t.Fatal("permission was present before the admin write")
 	}
 
-	operatorClaims := security.Claims{Subject: operatorID}
 	expiresAt := time.Now().UTC().Add(90 * time.Minute).Truncate(time.Second)
 	body := fmt.Sprintf(`{"permissions":[{"code":"group.authorization_manual","allow":true,"expiresAt":%q,"source":"manual"},{"code":"test.manual_allow","allow":true,"expiresAt":%q,"source":"manual"}]}`,
 		expiresAt.Format(time.RFC3339), expiresAt.Format(time.RFC3339))
@@ -305,6 +302,19 @@ func TestAdminAuthorizationWritesAreTransactionalAndImmediatelyEffectiveIntegrat
 	if !claimsAllow(resolvedDuringCacheFailure, "test.cache_failure") {
 		t.Fatalf("new permission was stale during cache outage: %#v", resolvedDuringCacheFailure.PermissionRules)
 	}
+}
+
+func createRoleGraphTestOperator(t *testing.T, ctx context.Context, db *pgxpool.Pool) security.Claims {
+	t.Helper()
+	cfg := config.Load()
+	id, _, token := createTEST044User(t, ctx, db, cfg, "role-graph-operator", "UTC")
+	grantTEST044Permissions(t, ctx, db, id, "permission.write")
+	actor, err := security.ParseToken(cfg.JWTSecret, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor.Subject = id
+	return actor
 }
 
 func invokeAdminAuthorizationRoute(

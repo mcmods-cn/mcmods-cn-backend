@@ -98,6 +98,16 @@ func TestAdminAuthorizationDatabaseFailuresAreNotEditableEmptyDataIntegration(t 
 		t.Fatal("role detail converted a nested permission scan error into an empty permission list")
 	}
 
+	// Restore the injected column type before resolving the writer's real session.
+	if _, err = pool.Exec(ctx, `update role_permissions set expires_at=null where role_id=$1`, roleID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `alter table role_permissions alter column expires_at type timestamptz
+		using (expires_at #>> '{}')::timestamptz`); err != nil {
+		t.Fatal(err)
+	}
+	writerContext := context.WithValue(ctx, claimsContextKey, createRoleGraphTestOperator(t, ctx, pool))
+
 	// A broken permission writer must not turn database detail into a caller
 	// error, or commit an apparently successful role without its grant.
 	if _, err = pool.Exec(ctx, `create function pg_temp.reject_permission_write() returns trigger as $$
@@ -110,7 +120,7 @@ func TestAdminAuthorizationDatabaseFailuresAreNotEditableEmptyDataIntegration(t 
 	write := httptest.NewRecorder()
 	server.createRole(write, httptest.NewRequest(http.MethodPost, "/api/v1/admin/roles", strings.NewReader(
 		`{"code":"unavailable_grant","name":"Test role","permissions":["test.write"]}`,
-	)).WithContext(ctx))
+	)).WithContext(writerContext))
 	if write.Code != http.StatusServiceUnavailable || strings.Contains(write.Body.String(), "private role database detail") {
 		t.Fatalf("role write failure returned HTTP %d: %s", write.Code, write.Body)
 	}
@@ -128,7 +138,7 @@ func TestAdminAuthorizationDatabaseFailuresAreNotEditableEmptyDataIntegration(t 
 	createResponse := httptest.NewRecorder()
 	createRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/roles", strings.NewReader(
 		`{"code":"injected_role","name":"Injected role","description":"","weight":1,"parents":[],"permissions":[],"permissionEntries":[]}`,
-	)).WithContext(ctx)
+	)).WithContext(writerContext)
 	server.createRole(createResponse, createRequest)
 	if createResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("non-unique role insert failure status=%d body=%s", createResponse.Code, createResponse.Body.String())

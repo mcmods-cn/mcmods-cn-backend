@@ -49,8 +49,7 @@ func (s *Server) updatePermissionDefaults(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = lockRoleGraphMutationTx(r.Context(), tx); err != nil {
-		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+	if !requireRoleGraphWriterTx(w, r, tx) {
 		return
 	}
 	for _, role := range []string{payload.RegisteredRole, payload.BannedRole} {

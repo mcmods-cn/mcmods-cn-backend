@@ -151,8 +151,7 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = lockRoleGraphMutationTx(r.Context(), tx); err != nil {
-		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+	if !requireRoleGraphWriterTx(w, r, tx) {
 		return
 	}
 
@@ -227,8 +226,7 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = lockRoleGraphMutationTx(r.Context(), tx); err != nil {
-		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+	if !requireRoleGraphWriterTx(w, r, tx) {
 		return
 	}
 
@@ -301,8 +299,7 @@ func (s *Server) deleteRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = lockRoleGraphMutationTx(r.Context(), tx); err != nil {
-		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+	if !requireRoleGraphWriterTx(w, r, tx) {
 		return
 	}
 

@@ -3,14 +3,26 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
 )
 
-func lockRoleGraphMutationTx(ctx context.Context, tx pgx.Tx) error {
-	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods-cn-role-graph'))`)
-	return err
+func requireRoleGraphWriterTx(w http.ResponseWriter, r *http.Request, tx pgx.Tx) bool {
+	if _, err := tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtext('mcmods-cn-role-graph'))`); err != nil {
+		writeError(w, http.StatusInternalServerError, "锁定权限组图失败")
+		return false
+	}
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return false
+	}
+	if !claimsAllow(actor, "permission.write") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return false
+	}
+	return true
 }
 
 func validateRoleGraphTx(ctx context.Context, tx pgx.Tx) error {
