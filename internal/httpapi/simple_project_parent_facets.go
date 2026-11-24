@@ -117,8 +117,8 @@ func decodeSimpleProjectParentFacetCursor(raw, scope string) (*simpleProjectPare
 	return &cursor, nil
 }
 
-const simpleProjectParentFacetOptionsSQL = `with parent_options as (
-	select distinct
+const simpleProjectParentFacetOptionsSQL = `with visible_refs as (
+	select ref.target_id is not null as resolved,
 		ref.target_type||':'||coalesce(nullif(parent_mod.slug,''),nullif(parent_pack.slug,''),nullif(parent_project.slug,''),ref.raw_identifier) facet_key,
 		coalesce(nullif(btrim(parent_mod.primary_name),''),nullif(btrim(parent_pack.primary_name),''),nullif(btrim(parent_project.primary_name),''),nullif(btrim(ref.raw_identifier),''),ref.target_type) facet_label
 	from simple_projects project
@@ -128,6 +128,10 @@ const simpleProjectParentFacetOptionsSQL = `with parent_options as (
 	left join simple_projects parent_project on ref.target_type=parent_project.project_type and parent_project.id=ref.target_id and parent_project.review_status='approved'
 	where project.project_type=$1 and (project.review_status='approved' or project.submitted_by=$2)
 	  and (ref.target_id is null or coalesce(parent_mod.id,parent_pack.id,parent_project.id) is not null)
+),
+parent_options as (
+ select facet_key,coalesce(min(facet_label) filter(where resolved),min(facet_label)) facet_label
+ from visible_refs group by facet_key
 )
 select facet_key,facet_label from parent_options
 where facet_key<>'' %s
@@ -137,7 +141,7 @@ func simpleProjectParentFacetPageSQL(request simpleProjectParentFacetRequest) (s
 	arguments := []any{request.ProjectType, request.ViewerID}
 	cursorPredicate := ""
 	if request.Cursor != nil {
-		cursorPredicate = `and (lower(facet_label),facet_key)>($3,$4)`
+		cursorPredicate = `and (lower(facet_label),facet_key)>(lower($3::text),$4)`
 		arguments = append(arguments, request.Cursor.Label, request.Cursor.Key)
 	}
 	arguments = append(arguments, request.Limit+1)
@@ -201,7 +205,7 @@ func (s *Server) loadSimpleProjectParentFacetPage(ctx context.Context, request s
 		page.NextCursor = encodeSimpleProjectParentFacetCursor(simpleProjectParentFacetCursor{
 			Version: simpleProjectParentFacetCursorVersion,
 			Scope:   request.Scope,
-			Label:   strings.ToLower(last.Label),
+			Label:   last.Label,
 			Key:     last.Key,
 		})
 	}
