@@ -78,3 +78,28 @@ func TestModContentLayoutPageEnforcesExactByteBudgetWithContinuation(t *testing.
 		t.Fatalf("budgeted envelope=%+v", envelope.Data)
 	}
 }
+
+func TestLayoutBudgetIncludesFinalNewlineAndPreservesLocalizedNames(t *testing.T) {
+	payload, _, err := encodeBudgetedModContentLayoutPage(map[string]any{}, nil, false, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exact, _, err := encodeBudgetedModContentLayoutPage(map[string]any{}, nil, false, len(payload)); err != nil || len(exact) != len(payload) {
+		t.Fatalf("exact budget produced %d bytes, err=%v", len(exact), err)
+	}
+	if _, _, err := encodeBudgetedModContentLayoutPage(map[string]any{}, nil, false, len(payload)-1); err == nil {
+		t.Fatal("accepted a response one byte larger than its budget")
+	}
+	name := strings.Repeat("石", 86)
+	raw, err := json.Marshal([]map[string]string{{"locale": "zh-CN", "name": name}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var compact []struct{ Name string }
+	if err := json.Unmarshal(compactModContentLocalizations(raw, []string{"zh-cn"}), &compact); err != nil {
+		t.Fatal(err)
+	}
+	if len(compact) != 1 || compact[0].Name != strings.Repeat("石", 85) {
+		t.Fatalf("compacted name=%v", compact)
+	}
+}

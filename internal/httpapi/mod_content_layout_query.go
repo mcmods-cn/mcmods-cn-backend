@@ -289,7 +289,7 @@ func encodeBudgetedModContentLayoutPage(data map[string]any, items []modContentL
 		if err != nil {
 			return nil, 0, err
 		}
-		if len(payload) <= budget {
+		if len(payload) < budget {
 			return append(payload, '\n'), len(items), nil
 		}
 		if len(items) <= 1 {
@@ -316,9 +316,7 @@ func compactModContentLocalizations(raw []byte, localeCandidates []string) []byt
 			continue
 		}
 		name, _ := value["name"].(string)
-		if len(name) > 256 {
-			name = name[:256]
-		}
+		name = truncateValidUTF8(name, 256)
 		result = append(result, map[string]any{"locale": locale, "name": name, "summary": "", "contentMarkdown": ""})
 	}
 	encoded, _ := json.Marshal(result)
