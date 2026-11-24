@@ -224,6 +224,14 @@ func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
 		writeAIConfigUnavailable(w)
 		return
 	}
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if !claimsAllow(actor, "ai.write") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
 	if update.Revision != current.revision() {
 		writeAPIError(w, http.StatusConflict, "AI_CONFIG_CONFLICT", "AI configuration changed since it was read", 0, nil)
 		return
@@ -250,21 +258,20 @@ func (s *Server) updateAIConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := s.sealSystemSetting(payload)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "AI 配置格式不正确")
+		writeAIConfigUnavailable(w)
 		return
 	}
-	actorID := currentClaims(r).Subject
 	var committed aiConfigSetting
 	err = tx.QueryRow(ctx, `insert into system_settings (key, value, updated_by, updated_at)
 		values ('ai.config', $1::jsonb, $2, now())
 		on conflict (key) do update
 		set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()
-		returning value`, raw, actorID).Scan(&committed.encrypted)
+		returning value`, raw, actor.Subject).Scan(&committed.encrypted)
 	if err != nil || tx.Commit(ctx) != nil {
 		writeError(w, http.StatusInternalServerError, "保存 AI 配置失败")
 		return
 	}
-	s.writeAppLog(ctx, "admin_operation", "info", "update_ai_config", "ai.config", actorID, r, http.StatusOK, 0, map[string]any{
+	s.writeAppLog(ctx, "admin_operation", "info", "update_ai_config", "ai.config", actor.Subject, r, http.StatusOK, 0, map[string]any{
 		"providers": len(payload.Providers),
 		"models":    len(payload.Models),
 	})

@@ -62,7 +62,8 @@ func TestOCT02AISettingsReadFailureCannotReplaceEncryptedConfigurationIntegratio
 }
 
 func TestOCT02AISettingsDefaultsAndSavingStayWithinOneConnectionIntegration(t *testing.T) {
-	owner := oct02AITestPool(t)
+	owner := newOCT02IsolatedDatabase(t, t.Context())
+	actor := newCurrentWriteTestActor(t, t.Context(), owner, "ai-save", "ai.write")
 	poolConfig := owner.Config()
 	poolConfig.MaxConns = 1
 	pool, err := pgxpool.NewWithConfig(context.Background(), poolConfig)
@@ -72,10 +73,6 @@ func TestOCT02AISettingsDefaultsAndSavingStayWithinOneConnectionIntegration(t *t
 	t.Cleanup(pool.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err = pool.Exec(ctx, `alter table system_settings add column updated_by bigint,
-	 add column updated_at timestamptz default now()`); err != nil {
-		t.Fatal(err)
-	}
 	server := &Server{db: pool, cfg: config.Config{SettingsEncryptionKey: strings.Repeat("fixture-default", 3)}}
 	response := httptest.NewRecorder()
 	server.getAIConfig(response, httptest.NewRequest(http.MethodGet, "/api/v1/admin/ai/config", nil).WithContext(ctx))
@@ -91,7 +88,7 @@ func TestOCT02AISettingsDefaultsAndSavingStayWithinOneConnectionIntegration(t *t
 			t.Fatal(err)
 		}
 		request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/ai/config", bytes.NewReader(body)).WithContext(
-			context.WithValue(ctx, claimsContextKey, security.Claims{Subject: 42}))
+			context.WithValue(ctx, claimsContextKey, actor))
 		response = httptest.NewRecorder()
 		server.updateAIConfig(response, request)
 		if response.Code != http.StatusOK {
@@ -239,7 +236,8 @@ func (barrier *oct02AISettingsReadBarrier) TraceQueryEnd(ctx context.Context, _ 
 }
 
 func TestOCT02AISettingsHiddenKeyMergeSerializesWithRotationIntegration(t *testing.T) {
-	owner := oct02AITestPool(t)
+	owner := newOCT02IsolatedDatabase(t, t.Context())
+	actor := newCurrentWriteTestActor(t, t.Context(), owner, "ai-key", "ai.write")
 	barrier := &oct02AISettingsReadBarrier{loaded: make(chan struct{}), resume: make(chan struct{})}
 	poolConfig := owner.Config()
 	poolConfig.ConnConfig.Tracer = barrier
@@ -257,10 +255,6 @@ func TestOCT02AISettingsHiddenKeyMergeSerializesWithRotationIntegration(t *testi
 			close(barrier.resume)
 		}
 	}()
-	if _, err = pool.Exec(ctx, `alter table system_settings add column updated_by bigint,
-	 add column updated_at timestamptz default now()`); err != nil {
-		t.Fatal(err)
-	}
 	server := &Server{db: pool, cfg: config.Config{SettingsEncryptionKey: strings.Repeat("fixture-rotation", 3)}}
 	initial := defaultAIConfig()
 	initial.Providers[0].APIKey = "synthetic-old-key"
@@ -286,7 +280,7 @@ func TestOCT02AISettingsHiddenKeyMergeSerializesWithRotationIntegration(t *testi
 			return
 		}
 		request := httptest.NewRequest(http.MethodPut, "/api/v1/admin/ai/config", bytes.NewReader(body)).WithContext(
-			context.WithValue(ctx, claimsContextKey, security.Claims{Subject: 42}))
+			context.WithValue(ctx, claimsContextKey, actor))
 		response := httptest.NewRecorder()
 		server.updateAIConfig(response, request)
 		output <- response.Code

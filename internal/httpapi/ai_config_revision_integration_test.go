@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 const aiConfigTestPath = "/api/v1/admin/ai/config"
@@ -108,6 +111,36 @@ func TestAIConfigurationPreservesReplacesAndClearsProviderKeysIntegration(t *tes
 	var tasks int
 	if err := f.db.QueryRow(f.ctx, `select count(*) from ai_tasks`).Scan(&tasks); err != nil || tasks != 0 {
 		t.Fatalf("configuration saves or retries queued AI requests: tasks=%d error=%v", tasks, err)
+	}
+}
+
+func TestAIConfigurationUsesCurrentWriteGrantAndReportsKeyFailureIntegration(t *testing.T) {
+	ctx := t.Context()
+	pool := newOCT02IsolatedDatabase(t, ctx)
+	editor := newCurrentWriteTestActor(t, ctx, pool, "ai-save-boundary", "ai.write")
+	reader := newCurrentWriteTestActor(t, ctx, pool, "ai-view-boundary", "ai.read")
+	server := &Server{db: pool}
+	update := aiConfigUpdate{aiConfigPayload: defaultAIConfig(), Revision: (aiConfigSetting{}).revision()}
+
+	for _, tc := range []struct {
+		name   string
+		actor  security.Claims
+		status int
+	}{{"read only", reader, http.StatusForbidden}, {"unavailable encryption key", editor, http.StatusServiceUnavailable}} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := httptest.NewRecorder()
+			server.updateAIConfig(out, newProjectHandlerRequest(t, ctx, tc.actor, http.MethodPut, aiConfigTestPath, update))
+			if out.Code != tc.status {
+				t.Fatalf("save status = %d, want %d", out.Code, tc.status)
+			}
+			if tc.status == http.StatusServiceUnavailable {
+				assertAIConfigErrorCode(t, out.Body.Bytes(), "AI_SETTINGS_UNAVAILABLE")
+			}
+		})
+	}
+	var stored bool
+	if err := pool.QueryRow(ctx, `select exists(select 1 from system_settings where key='ai.config')`).Scan(&stored); err != nil || stored {
+		t.Fatalf("an unsuccessful save changed storage: present=%t error=%v", stored, err)
 	}
 }
 
