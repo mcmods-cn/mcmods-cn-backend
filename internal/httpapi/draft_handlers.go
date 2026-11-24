@@ -123,7 +123,7 @@ type resolvedUserDraftAuthority struct {
 	Status           string
 }
 
-const userDraftSummaryQuery = `select draft.id,draft.public_id,draft.draft_key,draft.project_key,draft.project_title,
+const userDraftSummaryColumns = `draft.id,draft.public_id,draft.draft_key,draft.project_key,draft.project_title,
 	draft.kind,draft.title,draft.edit_url,draft.target_url,
 	case
 		when draft.submitted_at is null then 'draft'
@@ -134,19 +134,16 @@ const userDraftSummaryQuery = `select draft.id,draft.public_id,draft.draft_key,d
 		else 'rejected'
 	end,
 	coalesce(request.resolved_at,draft.submitted_at,draft.updated_at),draft.submitted_at,
-	draft.expires_at,draft.created_at,draft.updated_at
-	from user_drafts draft
+	draft.expires_at,draft.created_at,draft.updated_at`
+
+const userDraftReviewTables = ` from user_drafts draft
 	left join change_requests request on request.id=draft.change_request_id
 	left join minecraft_servers server on draft.review_target_type='server' and server.id=draft.review_target_id`
 
-type draftSummaryScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanUserDraftSummary(row draftSummaryScanner, item *userDraftSummary) error {
-	return row.Scan(&item.internalID, &item.ID, &item.DraftKey, &item.ProjectKey, &item.ProjectTitle, &item.Kind, &item.Title,
+func (item *userDraftSummary) scanDestinations() []any {
+	return []any{&item.internalID, &item.ID, &item.DraftKey, &item.ProjectKey, &item.ProjectTitle, &item.Kind, &item.Title,
 		&item.EditURL, &item.TargetURL, &item.Status, &item.StatusAt, &item.SubmittedAt,
-		&item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt)
+		&item.ExpiresAt, &item.CreatedAt, &item.UpdatedAt}
 }
 
 func (s *Server) userDrafts(w http.ResponseWriter, r *http.Request) {
@@ -265,7 +262,7 @@ func loadUserDraftPage(ctx context.Context, queryer userDraftQueryer, userID int
 		cursorAt = request.Cursor.StatusAt
 		cursorID = request.Cursor.ID
 	}
-	rows, err := queryer.Query(ctx, userDraftSummaryQuery+`
+	rows, err := queryer.Query(ctx, "select "+userDraftSummaryColumns+userDraftReviewTables+`
 		where draft.user_id=$1 and draft.expires_at>now()
 		  and (($2='active' and draft.submitted_at is null) or ($2='completed' and draft.submitted_at is not null))
 		  and ($3::timestamptz is null or
@@ -279,7 +276,7 @@ func loadUserDraftPage(ctx context.Context, queryer userDraftQueryer, userID int
 	items := make([]userDraftSummary, 0, request.Limit+1)
 	for rows.Next() {
 		var item userDraftSummary
-		if err = scanUserDraftSummary(rows, &item); err != nil {
+		if err = rows.Scan(item.scanDestinations()...); err != nil {
 			return nil, "", err
 		}
 		items = append(items, item)
@@ -313,7 +310,7 @@ func (s *Server) upsertActiveUserDraft(r *http.Request, userID int64, request up
 		returning id,public_id,draft_key,project_key,project_title,kind,title,edit_url,target_url,
 			'draft',updated_at,submitted_at,expires_at,created_at,updated_at`,
 		userID, request.DraftKey, request.ProjectKey, request.Kind, request.Title, request.EditURL, request.Payload, retentionSeconds)
-	if err := scanUserDraftSummary(row, &item); err != nil {
+	if err := row.Scan(item.scanDestinations()...); err != nil {
 		return userDraftSummary{}, err
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -431,12 +428,9 @@ func (s *Server) userDraftItem(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		var item userDraftDetail
-		row := s.db.QueryRow(r.Context(), userDraftSummaryQuery+`
+		row := s.db.QueryRow(r.Context(), "select "+userDraftSummaryColumns+",draft.payload"+userDraftReviewTables+`
 			where draft.public_id=$1 and draft.user_id=$2 and draft.expires_at>now()`, draftID, claims.Subject)
-		err := scanUserDraftSummary(row, &item.userDraftSummary)
-		if err == nil {
-			err = s.db.QueryRow(r.Context(), `select payload from user_drafts where public_id=$1 and user_id=$2`, draftID, claims.Subject).Scan(&item.Payload)
-		}
+		err := row.Scan(append(item.scanDestinations(), &item.Payload)...)
 		if err == pgx.ErrNoRows {
 			writeError(w, http.StatusNotFound, "draft not found")
 			return
@@ -558,19 +552,17 @@ func enforceUserDraftQuota(ctx context.Context, tx pgx.Tx, userID int64, draftKe
 		return err
 	}
 	var usage userDraftQuotaUsage
+	var incomingBytes int64
 	err := tx.QueryRow(ctx, `select
 		count(*) filter(where submitted_at is null),
 		count(*) filter(where submitted_at is not null),
 		coalesce(sum(octet_length(payload::text)),0),
 		coalesce(max(octet_length(payload::text)) filter(where submitted_at is null and draft_key=$2),0),
-		coalesce(bool_or(submitted_at is null and draft_key=$2),false)
-		from user_drafts where user_id=$1`, userID, draftKey).Scan(
-		&usage.Active, &usage.Completed, &usage.Bytes, &usage.ExistingBytes, &usage.HasExisting)
+		coalesce(bool_or(submitted_at is null and draft_key=$2),false),
+		octet_length($3::jsonb::text)
+		from user_drafts where user_id=$1`, userID, draftKey, payload).Scan(
+		&usage.Active, &usage.Completed, &usage.Bytes, &usage.ExistingBytes, &usage.HasExisting, &incomingBytes)
 	if err != nil {
-		return err
-	}
-	var incomingBytes int64
-	if err = tx.QueryRow(ctx, `select octet_length($1::jsonb::text)`, payload).Scan(&incomingBytes); err != nil {
 		return err
 	}
 	if incomingBytes > maximumDraftPayloadBytes {
