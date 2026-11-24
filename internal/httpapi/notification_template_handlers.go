@@ -474,9 +474,7 @@ func loadReviewConfig(ctx context.Context, db reviewConfigQueryRower) reviewConf
 	// Absence keeps the documented defaults. A failed/invalid read cannot prove
 	// that an administrator disabled moderation. Never partially apply JSON.
 	slog.Warn("review policy unavailable; moderation required", "error_class", fmt.Sprintf("%T", err))
-	config = defaultReviewConfig()
-	config.BlueprintCreate, config.ModContentSectionCreate, config.AITranslation = true, true, true
-	return config
+	return requireAllContentReviews()
 }
 
 func readReviewConfig(ctx context.Context, db reviewConfigQueryRower) (reviewConfig, error) {
@@ -499,7 +497,16 @@ func readReviewConfig(ctx context.Context, db reviewConfigQueryRower) (reviewCon
 }
 
 func defaultReviewConfig() reviewConfig {
+	cfg := requireAllContentReviews()
+	cfg.BlueprintCreate, cfg.BlueprintEdit = false, false
+	cfg.ModContentSectionCreate, cfg.AITranslation = false, false
+	return cfg
+}
+
+func requireAllContentReviews() reviewConfig {
 	return reviewConfig{
+		BlueprintCreate:         true,
+		BlueprintEdit:           true,
 		ServerCreate:            true,
 		ModCreate:               true,
 		ModEdit:                 true,
@@ -524,8 +531,8 @@ func defaultReviewConfig() reviewConfig {
 		CatalogCreate:           true,
 		CatalogEdit:             true,
 		CatalogDelete:           true,
-		ModContentSectionCreate: false,
-		AITranslation:           false,
+		ModContentSectionCreate: true,
+		AITranslation:           true,
 		TutorialCreate:          true,
 		TutorialEdit:            true,
 		IssueCreate:             true,
