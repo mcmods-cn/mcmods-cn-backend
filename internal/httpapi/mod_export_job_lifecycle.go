@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"os"
 	"time"
 
+	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"mcmods-cn-backend/internal/queue"
 )
@@ -78,9 +82,33 @@ func (s *Server) updateModExportJob(ctx context.Context, jobID, runToken, status
 	return nil
 }
 
+// Infrastructure errors can contain the storage endpoint, a local staging path
+// or backend details. Keep the original error for the worker; persist only
+// the user-facing message in the job, history and notification.
+func catalogImportFailureMessage(err error) string {
+	var operation *aliyunoss.OperationError
+	var service *aliyunoss.ServiceError
+	var client *aliyunoss.ClientError
+	var transport *url.Error
+	var file *os.PathError
+	var database *pgconn.PgError
+	var connection *pgconn.ConnectError
+	switch {
+	case errors.As(err, &operation), errors.As(err, &service), errors.As(err, &client), errors.As(err, &transport):
+		return "Object storage is unavailable. Retry the import or contact an administrator with the job ID."
+	case errors.As(err, &file):
+		return "The import worker could not access its temporary files. Contact an administrator with the job ID."
+	case errors.As(err, &database), errors.As(err, &connection):
+		return "The import worker could not save its data. Contact an administrator with the job ID."
+	default:
+		return err.Error()
+	}
+}
+
 func (s *Server) failModExportJob(jobID, runToken, code string, failure error) error {
 	var lastErr error
-	detail, _ := json.Marshal(map[string]string{"message": failure.Error()})
+	message := catalogImportFailureMessage(failure)
+	detail, _ := json.Marshal(map[string]string{"message": message})
 	for attempt := 0; attempt < 4; attempt++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
@@ -93,10 +121,10 @@ func (s *Server) failModExportJob(jobID, runToken, code string, failure error) e
 			if tag.RowsAffected() == 0 {
 				return nil
 			}
-			if _, err = tx.Exec(ctx, `insert into catalog_import_job_logs(job_id,level,stage,message) values($1,'error','failed',$2)`, jobID, failure.Error()); err != nil {
+			if _, err = tx.Exec(ctx, `insert into catalog_import_job_logs(job_id,level,stage,message) values($1,'error','failed',$2)`, jobID, message); err != nil {
 				return err
 			}
-			return enqueueModExportResultTx(ctx, tx, jobID, "failed", failure)
+			return enqueueModExportResultTx(ctx, tx, jobID, "failed", message)
 		})
 		cancel()
 		if err == nil {
@@ -157,8 +185,8 @@ func recoverStaleModExportJobsTx(ctx context.Context, tx pgx.Tx) (int, error) {
 }
 
 func (s *Server) markStalledModExportJob(ctx context.Context, jobID string, modID int64) (bool, error) {
-	failure := errors.New("The import worker stopped updating this job. Retry the import.")
-	detail, _ := json.Marshal(map[string]string{"message": failure.Error()})
+	const failure = "The import worker stopped updating this job. Retry the import."
+	detail, _ := json.Marshal(map[string]string{"message": failure})
 	updated := false
 	err := s.runModExportTransaction(ctx, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `update catalog_import_jobs

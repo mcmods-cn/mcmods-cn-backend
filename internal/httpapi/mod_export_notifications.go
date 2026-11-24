@@ -9,7 +9,7 @@ import (
 // Terminal job facts and their notification intent share the same transaction.
 // The fenced state transition calls this once; event redelivery retains the
 // committed event ID and the existing NotificationWorker deduplication.
-func enqueueModExportResultTx(ctx context.Context, tx pgx.Tx, jobID, status string, failure error) error {
+func enqueueModExportResultTx(ctx context.Context, tx pgx.Tx, jobID, status, failureMessage string) error {
 	var recipientID int64
 	var siteID, modName string
 	var skipped int
@@ -32,8 +32,8 @@ func enqueueModExportResultTx(ctx context.Context, tx pgx.Tx, jobID, status stri
 	if status == "failed" {
 		code = "mod_import_failure"
 		values["error"] = "未知错误"
-		if failure != nil {
-			values["error"] = failure.Error()
+		if failureMessage != "" {
+			values["error"] = failureMessage
 		}
 	}
 	return enqueueTemplatedNotificationTx(ctx, tx, "notification.direct", recipientID, 0, code, values, map[string]any{

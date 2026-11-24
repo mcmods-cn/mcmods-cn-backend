@@ -1343,7 +1343,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		if err := s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "mod-export-import-consumed"); err != nil {
 			return err
 		}
-		return enqueueModExportResultTx(ctx, tx, jobID, jobStatus, nil)
+		return enqueueModExportResultTx(ctx, tx, jobID, jobStatus, "")
 	})
 	if errors.Is(err, errCatalogImportPolicyCancel) {
 		return s.cancelCatalogImportForPolicy(ctx, jobID, runToken, err)

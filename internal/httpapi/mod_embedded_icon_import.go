@@ -515,7 +515,7 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		if err := s.tombstoneOSSFileTx(ctx, tx, sourceFileID, "catalog-import-consumed"); err != nil {
 			return err
 		}
-		return enqueueModExportResultTx(ctx, tx, jobID, "ready", nil)
+		return enqueueModExportResultTx(ctx, tx, jobID, "ready", "")
 	}); err != nil {
 		if errors.Is(err, errCatalogImportPolicyCancel) {
 			return s.cancelCatalogImportForPolicy(ctx, jobID, runToken, err)
