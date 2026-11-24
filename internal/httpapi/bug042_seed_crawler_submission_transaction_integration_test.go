@@ -65,6 +65,10 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 		}
 	}()
 
+	// These single-connection fixtures install current DDL without production seeds.
+	if _, err = pool.Exec(ctx, "insert into seed_crawler_configs(id) values(true)"); err != nil {
+		t.Fatal(err)
+	}
 	actor := seedAuthorizedAutomationFixture(t, ctx, pool, "project.create", "project.create.mod", "project.create.plugin", "content.no-review")
 	actorID := actor.Subject
 	worker := NewSeedCrawlerWorker(loaded, pool)

@@ -233,10 +233,12 @@ func governanceAutomationSchemaStatements() []string {
 			last_error text not null default '',
 			created_at timestamptz not null default now(),
 			updated_at timestamptz not null default now(),
+			drafted_at timestamptz,
 			unique(external_project_id),
 			check(status in ('candidate','submitting','failed','existing','draft','submitted')),
 			check(project_type in ('mod','plugin','shader_pack','resource_pack'))
 		)`,
+		`create index idx_seed_crawler_candidates_drafted_at on seed_crawler_candidates(drafted_at) where drafted_at is not null`,
 		`create index idx_seed_crawler_candidates_first_seen_run on seed_crawler_candidates(first_seen_run_id)`,
 		`create index idx_seed_crawler_candidates_last_seen_run on seed_crawler_candidates(last_seen_run_id)`,
 		`create index idx_seed_crawler_candidates_downloads on seed_crawler_candidates(downloads desc,id desc)`,

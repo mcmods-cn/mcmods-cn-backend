@@ -39,6 +39,7 @@ func NewSeedCrawlerWorker(cfg config.Config, db *pgxpool.Pool) *SeedCrawlerWorke
 
 var errSeedCrawlerLeaseOwnershipLost = errors.New("seed crawler lease ownership lost")
 var errSeedCrawlerHeartbeatStopped = errors.New("seed crawler heartbeat stopped")
+var errSeedCrawlerDailyImportLimit = errors.New("seed crawler daily import limit reached")
 
 type seedCrawlerRunLease struct {
 	ID    int64
@@ -393,8 +394,8 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 	if err != nil {
 		return nil, err
 	}
-	var importedToday int
-	if err = worker.server.db.QueryRow(ctx, `select count(*) from seed_crawler_candidates where status in ('draft','submitted') and updated_at>=current_date`).Scan(&importedToday); err != nil {
+	importedToday, _, err := seedCrawlerDraftsToday(ctx, worker.server.db)
+	if err != nil {
 		return nil, fmt.Errorf("count today's seed crawler imports: %w", err)
 	}
 	remaining := max(0, cfg.DailyLimit-importedToday)
@@ -450,18 +451,29 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 			}
 			status, processErr := worker.createSeedDraft(ctx, candidateID, actor, projectType, hit, cfg)
 			if processErr != nil {
+				if errors.Is(processErr, errSeedCrawlerDailyImportLimit) {
+					return stats, nil
+				}
 				if errors.Is(processErr, errSeedCrawlerLeaseOwnershipLost) {
 					return stats, processErr
 				}
 				stats["failed"]++
 				if _, updateErr := worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='failed',last_error=$2,updated_at=now()
-					where id=$1 and status not in ('submitted','existing')`, candidateID, truncateRunes(processErr.Error(), 2000)); updateErr != nil {
+					where id=$1 and status not in ('draft','submitted','existing')`, candidateID, truncateRunes(processErr.Error(), 2000)); updateErr != nil {
 					return stats, errors.Join(processErr, fmt.Errorf("record failed seed crawler candidate %d: %w", candidateID, updateErr))
 				}
 				continue
 			}
-			stats[status]++
-			remaining--
+			switch status {
+			case "draft":
+				stats["drafts"]++
+				remaining--
+			case "submitted":
+				stats["submitted"]++
+				remaining--
+			case "duplicates":
+				stats["duplicates"]++
+			}
 		}
 	}
 	if stats["providerSucceeded"] == 0 && stats["providerFailed"] > 0 {
@@ -580,7 +592,7 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 		return "", fmt.Errorf("check existing seed crawler project: %w", err)
 	}
 	if exists {
-		if _, err = worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='existing',last_error='',updated_at=now() where id=$1`, candidateID); err != nil {
+		if _, err = worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='existing',last_error='',updated_at=now() where id=$1 and status not in ('draft','submitted')`, candidateID); err != nil {
 			return "", fmt.Errorf("record existing seed crawler candidate: %w", err)
 		}
 		return "duplicates", nil
@@ -651,6 +663,13 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 	if _, err = authorizeAutomationProject(ctx, tx, actor.Subject, "", true, false); err != nil {
 		return "", err
 	}
+	staged, err := stageSeedCrawlerCandidateTx(ctx, tx, candidateID, nextStatus)
+	if err != nil {
+		return "", err
+	}
+	if !staged {
+		return "duplicates", nil
+	}
 	var draftID string
 	err = tx.QueryRow(ctx, `insert into user_drafts(user_id,draft_key,project_key,project_title,kind,title,edit_url,payload,expires_at)
 		values($1,$2,$3,$4,'seed_crawler_import',$4,$5,$6::jsonb,now()+interval '3 years')
@@ -658,13 +677,6 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 		actor.Subject, "seed-crawler:"+hit.ProjectID, projectType+":"+hit.ProjectID, hit.Title, editURL, finalPayload).Scan(&draftID)
 	if err != nil {
 		return "", fmt.Errorf("save seed crawler draft stage: %w", err)
-	}
-	command, err := tx.Exec(ctx, `update seed_crawler_candidates set status=$2,last_error='',updated_at=now() where id=$1`, candidateID, nextStatus)
-	if err != nil {
-		return "", fmt.Errorf("record seed crawler draft stage: %w", err)
-	}
-	if command.RowsAffected() != 1 {
-		return "", errors.New("seed crawler candidate disappeared while saving draft")
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return "", fmt.Errorf("commit seed crawler draft stage: %w", err)
@@ -676,6 +688,51 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 		return "", err
 	}
 	return "submitted", nil
+}
+
+const seedCrawlerDraftsTodaySQL = `select count(*),statement_timestamp() from seed_crawler_candidates
+	where drafted_at>=date_trunc('day',statement_timestamp()) and drafted_at<date_trunc('day',statement_timestamp())+interval '1 day'`
+
+func seedCrawlerDraftsToday(ctx context.Context, query databaseQuery) (int, time.Time, error) {
+	var count int
+	var at time.Time
+	err := query.QueryRow(ctx, seedCrawlerDraftsTodaySQL).Scan(&count, &at)
+	return count, at, err
+}
+
+// The singleton config lock serializes the daily limit across instances. The
+// caller commits the first-draft date and the corresponding draft together.
+func stageSeedCrawlerCandidateTx(ctx context.Context, tx pgx.Tx, candidateID int64, nextStatus string) (bool, error) {
+	var limit int
+	if err := tx.QueryRow(ctx, `select daily_limit from seed_crawler_configs where id for no key update`).Scan(&limit); err != nil {
+		return false, fmt.Errorf("lock seed crawler daily limit: %w", err)
+	}
+	var status string
+	var previouslyDrafted bool
+	if err := tx.QueryRow(ctx, `select status,drafted_at is not null from seed_crawler_candidates where id=$1 for update`, candidateID).Scan(&status, &previouslyDrafted); err != nil {
+		return false, fmt.Errorf("lock seed crawler candidate: %w", err)
+	}
+	switch status {
+	case "draft", "submitted", "existing":
+		return false, nil
+	}
+	var firstDraftAt *time.Time
+	if !previouslyDrafted {
+		used, at, err := seedCrawlerDraftsToday(ctx, tx)
+		if err != nil {
+			return false, fmt.Errorf("count daily seed crawler drafts: %w", err)
+		}
+		if used >= limit {
+			return false, errSeedCrawlerDailyImportLimit
+		}
+		firstDraftAt = &at
+	}
+	_, err := tx.Exec(ctx, `update seed_crawler_candidates set status=$2,last_error='',updated_at=now(),
+		drafted_at=coalesce(drafted_at,$3) where id=$1`, candidateID, nextStatus, firstDraftAt)
+	if err != nil {
+		return false, fmt.Errorf("record seed crawler draft stage: %w", err)
+	}
+	return true, nil
 }
 
 func (worker *SeedCrawlerWorker) translateSeedDraft(ctx context.Context, candidateID int64, raw []byte, budget int64) (map[string]any, error) {
