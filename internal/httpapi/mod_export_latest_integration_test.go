@@ -327,7 +327,7 @@ func TestLatestExporterCatalogImportIntegration(t *testing.T) {
 		if decodeErr != nil {
 			t.Fatal(decodeErr)
 		}
-		if err = queueExportJEIRecipeCollection(batch, catalogResourceIdentityResolver{}, packageID, revisions, name, document); err != nil {
+		if err = queueExportJEIRecipeCollection(batch, catalogResourceIdentityResolver{}, packageID, revisions, name, document, categoryDocument.SchemaVersion == "mcmods-jei-categories/v6"); err != nil {
 			t.Fatal(err)
 		}
 		expectedRecipeCount += len(document.Recipes)
