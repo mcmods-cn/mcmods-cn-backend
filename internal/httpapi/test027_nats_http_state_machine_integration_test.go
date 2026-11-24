@@ -34,7 +34,7 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 	cfg.NATS = queue.NormalizeConfig(config.NATSConfig{
 		Enabled: true, URL: broker.ClientURL(), Username: "test027", Password: "test027-password",
 		SubjectPrefix: "test027", Realtime: true, OutboxEnabled: true,
-		JetStream: config.JetStreamConfig{Enabled: true, Stream: "TEST027_BASE", MaxDeliver: 9,
+		JetStream: config.JetStreamConfig{Enabled: true, Stream: "TEST027_BASE", NewStreamMaxBytes: 4 << 20, MaxDeliver: 9,
 			AckWait: 17 * time.Second, PublishTimeout: 3 * time.Second},
 	})
 	queueClient := queue.New(ctx, cfg.NATS)
@@ -167,8 +167,10 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 		assertNoBUG046RealtimeEvent(t, peerEvents, id+" duplicate")
 	}
 	assertDelivery(t, "before-persistence-failure")
+	// The successful swap at the end of this subtest remains active for the
+	// subsequent reconfiguration checks. Its broker belongs to the outer test.
+	candidateBroker := newTEST027Broker(t, true, false)
 	t.Run("database rejection discards prepared candidate", func(t *testing.T) {
-		candidateBroker := newTEST027Broker(t, true, false)
 		candidate := test027NATSUpdate(cfg.NATS)
 		candidate.URL = natsPtr(candidateBroker.ClientURL())
 		candidate.JetStream.Stream = natsPtr("TEST027_DISCARDED")
@@ -203,6 +205,8 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 	t.Run("concurrent PUT and cleared secrets retain complete authority", func(t *testing.T) {
 		var wg sync.WaitGroup
 		failures := make(chan string, 2)
+		// BASE plus A and B reserve their own file-stream budgets. Size the
+		// test streams explicitly, independent of free space on the host.
 		for _, suffix := range []string{"A", "B"} {
 			candidate := test027NATSUpdate(cfg.NATS)
 			candidate.SubjectPrefix = natsPtr("test027" + suffix)
@@ -303,7 +307,7 @@ func newTEST027Broker(t *testing.T, jetStream, denyBroadcast bool) *natsserver.S
 		user.Permissions = &natsserver.Permissions{Subscribe: &natsserver.SubjectPermission{Deny: []string{"test027.realtime.>"}}}
 	}
 	broker, err := natsserver.NewServer(&natsserver.Options{Host: "127.0.0.1", Port: -1, NoLog: true, NoSigs: true,
-		JetStream: jetStream, StoreDir: t.TempDir(), Users: []*natsserver.User{user}})
+		JetStream: jetStream, JetStreamMaxStore: 32 << 20, StoreDir: t.TempDir(), Users: []*natsserver.User{user}})
 	if err != nil {
 		t.Fatal(err)
 	}
