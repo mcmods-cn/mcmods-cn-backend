@@ -37,9 +37,13 @@ func TestContentHistoryMergesOneHundredThousandRowsWithBoundedKeysetsIntegration
 		create index idx_content_revisions_history on content_revisions(aggregate_type,aggregate_key,created_at desc,public_id desc);
 		create temporary table change_requests(
 			proposed_revision_id bigint primary key,status text not null,reason text not null,submitted_by bigint,submitted_by_snapshot text not null);
+		create temporary table mods(id bigint primary key,review_status text not null);
+		insert into mods values(1,'approved');
+		create temporary table mod_content_versions(id bigint primary key,mod_id bigint not null,status text not null);
+		insert into mod_content_versions values(7,1,'active');
 		create temporary table catalog_import_revisions(
 			id text primary key,target_version_id bigint not null,revision_no bigint not null,status text not null,source_kind text not null,
-			source_namespace text not null,submitted_by bigint,submitted_by_snapshot text not null,is_active boolean not null,created_at timestamptz not null);
+			source_namespace text not null,submitted_by bigint,submitted_by_snapshot text not null,is_active boolean not null,created_at timestamptz not null,mod_id bigint not null,activated_at timestamptz not null);
 		create temporary table resource_import_snapshots(resource_id bigint not null,revision_id text not null,created_at timestamptz not null);
 		create index idx_resource_import_snapshots_history on resource_import_snapshots(resource_id,created_at desc,revision_id desc)`); err != nil {
 		t.Fatal(err)
@@ -59,7 +63,7 @@ func TestContentHistoryMergesOneHundredThousandRowsWithBoundedKeysetsIntegration
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `insert into catalog_import_revisions
-		select 'import-'||lpad(series::text,8,'0'),7,series,'ready','mcmods_exporter','minecraft',1,'history_user',series=50000,$1::timestamptz+(series*2+1)*interval '1 second'
+		select 'import-'||lpad(series::text,8,'0'),7,series,case when series=50000 then 'ready' else 'superseded' end,'mcmods_exporter','minecraft',1,'history_user',series=50000,$1::timestamptz+(series*2+1)*interval '1 second',1,$1::timestamptz
 		from generate_series(1,50000) series`, base); err != nil {
 		t.Fatal(err)
 	}

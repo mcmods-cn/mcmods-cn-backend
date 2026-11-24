@@ -113,19 +113,17 @@ func (s *Server) contentMetrics(w http.ResponseWriter, r *http.Request) {
 		Editors: []contentMetricEditor{}, Developers: []contentMetricDeveloper{}, Tutorials: []contentMetricReference{}, Issues: []contentMetricReference{},
 		News: []contentMetricReference{}, Discussions: []contentMetricReference{}, IncludesChildren: target.Type == "mod",
 	}
-	var lastEditedAt *time.Time
 	var hasMetrics bool
-	err = s.db.QueryRow(r.Context(), `select route.created_at,metrics.last_edited_at,
-		coalesce(metrics.edit_count,0),coalesce(metrics.direct_view_count,0),coalesce(metrics.child_view_count,0),
+	err = s.db.QueryRow(r.Context(), `select route.created_at,
+		coalesce(metrics.direct_view_count,0),coalesce(metrics.child_view_count,0),
 		coalesce(metrics.total_view_count,0),coalesce(metrics.updated_at,route.created_at),metrics.object_route_id is not null
 		from public_routes route left join content_route_metrics metrics on metrics.object_route_id=route.id
-		where route.id=$1`, target.RouteID).Scan(&response.CreatedAt, &lastEditedAt, &response.EditCount,
+		where route.id=$1`, target.RouteID).Scan(&response.CreatedAt,
 		&response.DirectViews, &response.ChildViews, &response.TotalViews, &response.StatisticsAsOf, &hasMetrics)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load content statistics")
 		return
 	}
-	response.LastEditedAt = lastEditedAt
 	if metricProjectTypes[target.Type] {
 		var heat float64
 		if scanErr := s.db.QueryRow(r.Context(), `select coalesce(heat_score,0) from content_popularity_stats
@@ -136,7 +134,7 @@ func (s *Server) contentMetrics(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if response.RecentEditors, err = s.loadRecentMetricEditors(r.Context(), target); err != nil {
+	if err = s.loadMetricEditHistory(r.Context(), target, &response); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load recent content editors")
 		return
 	}
@@ -400,33 +398,45 @@ func resolveMetricPageKey(ctx context.Context, queryer metricPageQueryer, target
 	return "version:" + publicID, nil
 }
 
-func (s *Server) loadRecentMetricEditors(ctx context.Context, target metricTarget) ([]contentMetricActor, error) {
+// The same visible edits supply the counts and the author list. Source withdrawal
+// therefore applies immediately even when the statistics worker has not run yet.
+func (s *Server) loadMetricEditHistory(ctx context.Context, target metricTarget, response *contentMetricsResponse) error {
 	rows, err := s.db.Query(ctx, `with actor_summary as (
 		select actor_id,max(created_at) occurred_at,count(*) count
-		from public_content_metric_edits
-		where entity_type=$1 and entity_id=$2 and actor_id is not null
-		group by actor_id
+		from public_content_metric_edits where entity_type=$1 and entity_id=$2 group by actor_id
+	), totals as (
+		select coalesce(sum(count),0)::bigint edit_count,max(occurred_at) last_edited_at from actor_summary
+	), recent as (
+		select account.public_id,account.username,account.avatar_url,summary.occurred_at,summary.count,summary.actor_id
+		from actor_summary summary join users account on account.id=summary.actor_id
+		order by summary.occurred_at desc,summary.actor_id desc limit 8
 	)
-	select account.public_id,account.username,account.avatar_url,summary.occurred_at,summary.count
-	from actor_summary summary join users account on account.id=summary.actor_id
-	order by summary.occurred_at desc,summary.actor_id desc limit 8`, target.Type, target.InternalID)
+	select totals.edit_count,totals.last_edited_at,coalesce(recent.public_id,''),coalesce(recent.username,''),
+		coalesce(recent.avatar_url,''),recent.occurred_at,coalesce(recent.count,0)
+	from totals left join recent on true order by recent.occurred_at desc,recent.actor_id desc`, target.Type, target.InternalID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 	items := make([]contentMetricActor, 0, 8)
 	for rows.Next() {
 		var item contentMetricActor
-		if err = rows.Scan(&item.ID, &item.Name, &item.AvatarURL, &item.OccurredAt, &item.Count); err != nil {
-			return nil, err
+		var occurredAt *time.Time
+		if err = rows.Scan(&response.EditCount, &response.LastEditedAt, &item.ID, &item.Name, &item.AvatarURL, &occurredAt, &item.Count); err != nil {
+			return err
 		}
-		item.URL = "/" + item.ID
-		items = append(items, item)
+		if occurredAt != nil {
+			item.OccurredAt = *occurredAt
+			item.URL = "/" + item.ID
+			items = append(items, item)
+		}
 	}
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	return s.resolveMetricActorAvatars(ctx, items)
+	rows.Close()
+	response.RecentEditors, err = s.resolveMetricActorAvatars(ctx, items)
+	return err
 }
 
 func (s *Server) resolveMetricActorAvatars(ctx context.Context, items []contentMetricActor) ([]contentMetricActor, error) {

@@ -25,7 +25,6 @@ func TestContentMetricsAttributeImportEditsOnPublicationIntegration(t *testing.T
 	}
 	metrics := func() contentMetricsResponse {
 		t.Helper()
-		exec("select refresh_content_route_metrics($1)", routeID)
 		return decodeTEST022Data[contentMetricsResponse](t, f.require(t, "", http.MethodGet,
 			"/api/v1/content-metrics/"+resource.PublicID, nil, http.StatusOK))
 	}
@@ -46,12 +45,35 @@ func TestContentMetricsAttributeImportEditsOnPublicationIntegration(t *testing.T
 			t.Fatalf("%s: stored total %d, recent editors %d; baseline %d/%d, additional %d", stage,
 				got.EditCount, editorCount(got), base.EditCount, editorCount(base), additional)
 		}
+		exec("select refresh_content_route_metrics($1)", routeID)
+		var rebuilt int64
+		if err := f.db.QueryRow(f.ctx, "select edit_count from content_route_metrics where object_route_id=$1", routeID).Scan(&rebuilt); err != nil || rebuilt != got.EditCount {
+			t.Fatalf("%s: rebuilt edit count %d, visible count %d, err %v", stage, rebuilt, got.EditCount, err)
+		}
 	}
 	revision := oct02CInsertPublishedExportRevision(t, f, version.PublicID)
+	historyContains := func(token string, want bool) {
+		t.Helper()
+		page := decodeTEST022Data[contentHistoryPage](t, f.require(t, token, http.MethodGet,
+			"/api/v1/mods/test013-mod/content-resources/"+resource.PublicID+"/history?version="+version.PublicID, nil, http.StatusOK))
+		for _, item := range page.Items {
+			if item.Origin == "import" && item.ID == revision {
+				if !want {
+					t.Fatal("resource history included an unpublished revision")
+				}
+				return
+			}
+		}
+		if want {
+			t.Fatal("resource history omitted the expected revision")
+		}
+	}
 	exec("update catalog_import_revisions set is_active=false,activated_at=null where id=$1", revision)
 	exec(`insert into resource_import_snapshots(id,resource_id,revision_id,registry) values($1,$2,$3,'advancements')`,
 		newExportID(), resourceID, revision)
 	assert("import ready for review", 0)
+	historyContains("", false)
+	historyContains(f.editor, true)
 	exec("delete from content_stats_refresh_queue where object_route_id=$1", routeID)
 	exec("update catalog_import_revisions set is_active=true,activated_at=now() where id=$1", revision)
 	var queued bool
@@ -60,8 +82,14 @@ func TestContentMetricsAttributeImportEditsOnPublicationIntegration(t *testing.T
 		t.Fatalf("publish queued the refresh: %t, %v", queued, err)
 	}
 	assert("published", 1)
+	historyContains("", true)
 	exec("update catalog_import_revisions set status='superseded',is_active=false where id=$1", revision)
 	assert("published contribution retained in history", 1)
+	historyContains("", true)
+	exec("update mods set review_status='pending' where id=$1", f.modID)
+	assert("source project suspended", 0)
+	exec("update mods set review_status='approved' where id=$1", f.modID)
+	assert("source project approved again", 1)
 	exec("update mod_content_versions set status='archived' where public_id=$1", version.PublicID)
 	assert("source version archived", 0)
 }

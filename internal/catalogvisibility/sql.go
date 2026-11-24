@@ -2,6 +2,14 @@ package catalogvisibility
 
 import "fmt"
 
+// PublishedImportHistorySQL is for a source row aliased as revision. Superseded
+// revisions retain their attribution while the source project and version are public.
+const PublishedImportHistorySQL = `revision.activated_at is not null and (
+	(revision.is_active and revision.status in ('ready','partial')) or revision.status='superseded')
+	and exists(select 1 from mods source join mod_content_versions version on version.mod_id=source.id
+		where source.id=revision.mod_id and source.review_status='approved'
+		and version.id=revision.target_version_id and version.status='active')`
+
 // Only code-owned SQL aliases and entity types are accepted here. This is a
 // predicate builder for public projections, not a substitute for route ACLs.
 func EntitySQL(alias, entityType string) string {

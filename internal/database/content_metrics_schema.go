@@ -1,5 +1,7 @@
 package database
 
+import "mcmods-cn-backend/internal/catalogvisibility"
+
 // contentMetricsSchemaStatements installs the shared, persisted statistics
 // projection used by both small catalog resources and top-level projects.
 // Writes only mark a numeric route dirty; the background worker coalesces
@@ -73,15 +75,10 @@ func contentMetricsSchemaStatements() []string {
 			where exists(select 1 from change_requests request
 				where request.proposed_revision_id=revision.id and request.status='approved')
 			union all
-			select 'resource',snapshot.resource_id,imported.submitted_by,imported.created_at
+			select 'resource',snapshot.resource_id,revision.submitted_by,revision.created_at
 			from resource_import_snapshots snapshot
-			join catalog_import_revisions imported on imported.id=snapshot.revision_id
-			join mods source on source.id=imported.mod_id and source.review_status='approved'
-			join mod_content_versions version on version.id=imported.target_version_id
-				and version.mod_id=source.id and version.status='active'
-			where imported.activated_at is not null and (
-				(imported.is_active and imported.status in ('ready','partial'))
-				or imported.status='superseded')`,
+			join catalog_import_revisions revision on revision.id=snapshot.revision_id
+			where ` + catalogvisibility.PublishedImportHistorySQL,
 		`create or replace function refresh_content_route_metrics(target_route_id bigint) returns void as $$
 		declare
 			target_type text; target_id bigint; route_created_at timestamptz;

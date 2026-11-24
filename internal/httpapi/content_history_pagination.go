@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"mcmods-cn-backend/internal/catalogvisibility"
 )
 
 const (
@@ -193,7 +195,7 @@ func importedResourceHistoryPageSQL(resourceID, versionID int64, includeUnpublis
 		join catalog_import_revisions revision on revision.id=snapshot.revision_id
 		left join users account on account.id=revision.submitted_by
 		where snapshot.resource_id=$1 and revision.target_version_id=$2
-		  and ($3 or revision.status in ('ready','partial','superseded'))
+		  and ($3 or (` + catalogvisibility.PublishedImportHistorySQL + `))
 		  and ($4::timestamptz is null or (snapshot.created_at,0,snapshot.revision_id)<($4::timestamptz,$5::integer,$6::text))
 		order by snapshot.created_at desc,snapshot.revision_id desc limit $7`
 	return query, []any{resourceID, versionID, includeUnpublished, cursorAt, cursorRank, cursorID, request.Limit + 1}
