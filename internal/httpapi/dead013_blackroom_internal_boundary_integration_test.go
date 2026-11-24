@@ -144,3 +144,59 @@ func TestDEAD013BlackroomHandlersUseDistinctPublicAndAdminQueries(t *testing.T) 
 		}
 	}
 }
+
+func TestBlackroomAvatarSnapshotsReflectCurrentFileAvailabilityIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	server := f.origin.Config.Handler.(*Server)
+	cfg := ossConfigPayload{Enabled: true, Region: "cn-hangzhou", Endpoint: "https://oss-cn-hangzhou.aliyuncs.com",
+		PublicEndpoint: "https://media.example.invalid", Bucket: "synthetic-media", AccessKeyID: "fixture", AccessKeySecret: "fixture"}
+	setting, err := server.sealSystemSetting(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, "insert into system_settings(key,value) values('oss.aliyun',$1) on conflict(key) do update set value=excluded.value", setting); err != nil {
+		t.Fatal(err)
+	}
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "ban.create", "ban.view_internal")
+	const key = "avatars/history.png"
+	storedURL := cfg.PublicEndpoint + "/" + key
+	var file int64
+	if err := f.db.QueryRow(f.ctx, `insert into oss_files(bucket,endpoint,object_key,source,status,scan_status,content_type,uploader_id)
+		values($1,$2,$3,'user','active','clean','image/png',$4) returning id`, cfg.Bucket, cfg.PublicEndpoint, key, f.userIDs[f.editor]).Scan(&file); err != nil {
+		t.Fatal(err)
+	}
+	var subject, ban string
+	if err := f.db.QueryRow(f.ctx, `update users set avatar_file_id=$2,avatar_url=$3 where id=$1 returning public_id`,
+		f.userIDs[f.editor], file, storedURL).Scan(&subject); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, f.reviewer, "POST", "/api/v1/admin/bans", map[string]string{"userId": subject, "reasonCode": "harassment"}, 201)
+	if err := f.db.QueryRow(f.ctx, `select public_id from ban_records where user_id=$1`, f.userIDs[f.editor]).Scan(&ban); err != nil {
+		t.Fatal(err)
+	}
+	for _, removed := range []bool{false, true} {
+		if removed {
+			if _, err := f.db.Exec(f.ctx, `update users set avatar_file_id=null,avatar_url='' where id=$1`, f.userIDs[f.editor]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var snapshot string
+		if err := f.db.QueryRow(f.ctx, `select avatar_snapshot from ban_records where public_id=$1`, ban).Scan(&snapshot); err != nil || snapshot != storedURL {
+			t.Fatalf("historical avatar changed, err=%v", err)
+		}
+		public := decodeTEST022Data[blackroomPage](t, f.require(t, "", "GET", "/api/v1/site-affairs/blackroom", nil, 200))
+		admin := decodeTEST022Data[adminBlackroomPage](t, f.require(t, f.reviewer, "GET", "/api/v1/admin/bans", nil, 200))
+		detail := decodeTEST022Data[blackroomListItem](t, f.require(t, "", "GET", "/api/v1/site-affairs/blackroom/"+ban, nil, 200))
+		if len(public.Items) != 1 || len(admin.Items) != 1 || detail.ID != ban {
+			t.Fatal("missing sanction after avatar visibility changed")
+		}
+		for name, url := range map[string]string{"public page": public.Items[0].AvatarURL, "admin page": admin.Items[0].AvatarURL, "public detail": detail.AvatarURL} {
+			if removed && url != "" {
+				t.Errorf("%s served a snapshot with no current binding", name)
+			}
+			if !removed && (!strings.Contains(url, "/"+key+"?") || !strings.Contains(strings.ToLower(url), "x-oss-signature")) {
+				t.Errorf("%s did not return an accessible URL for the currently published avatar", name)
+			}
+		}
+	}
+}
