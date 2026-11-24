@@ -526,10 +526,15 @@ func (worker *ProjectAutomationWorker) loadReleases(ctx context.Context, job pro
 				break
 			}
 			var response struct {
-				Data string `json:"data"`
+				Data *string `json:"data"`
 			}
-			_ = getProviderJSON(ctx, client, cfg.CurseForge.BaseURL+"/mods/"+url.PathEscape(job.ExternalID)+"/files/"+url.PathEscape(file.ID)+"/changelog", headers, &response)
-			result = append(result, projectAutomationRelease{ID: file.ID, Version: firstNonEmpty(file.VersionName, file.DisplayName, file.ID), Body: response.Data,
+			if err := getProviderJSON(ctx, client, cfg.CurseForge.BaseURL+"/mods/"+url.PathEscape(job.ExternalID)+"/files/"+url.PathEscape(file.ID)+"/changelog", headers, &response); err != nil {
+				return nil, fmt.Errorf("read CurseForge file changelog: %w", err)
+			}
+			if response.Data == nil {
+				return nil, errors.New("CurseForge file changelog response omitted its text")
+			}
+			result = append(result, projectAutomationRelease{ID: file.ID, Version: firstNonEmpty(file.VersionName, file.DisplayName, file.ID), Body: *response.Data,
 				PublishedAt: file.PublishedAt, GameVersions: file.GameVersions, Loaders: file.Loaders,
 				URL: "https://www.curseforge.com/minecraft/mc-mods/" + job.ExternalID + "/files/" + file.ID, Files: []providerProjectFile{file}})
 		}
