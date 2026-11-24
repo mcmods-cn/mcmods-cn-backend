@@ -235,7 +235,7 @@ func governanceAutomationSchemaStatements() []string {
 			updated_at timestamptz not null default now(),
 			drafted_at timestamptz,
 			unique(external_project_id),
-			check(status in ('candidate','submitting','failed','existing','draft','submitted')),
+			check(status in ('candidate','submitting','failed','existing','draft','submitted','draft_unavailable')),
 			check(project_type in ('mod','plugin','shader_pack','resource_pack'))
 		)`,
 		`create index idx_seed_crawler_candidates_drafted_at on seed_crawler_candidates(drafted_at) where drafted_at is not null`,

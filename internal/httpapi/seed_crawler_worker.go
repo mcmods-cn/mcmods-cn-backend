@@ -407,8 +407,10 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 	var retryTypes []string
 	if !dryRun {
 		rows, err := worker.server.db.Query(ctx, `select t from unnest($1::text[]) as t where exists (
-			select 1 from seed_crawler_candidates where project_type=t and downloads>$2
-			and drafted_at is not null and status in ('failed','submitting'))`, cfg.ProjectTypes, cfg.MinimumDownloads)
+			select 1 from seed_crawler_candidates candidate where project_type=t and downloads>$2 and drafted_at is not null
+			and (status in ('failed','submitting') or status='draft_unavailable' and exists (
+				select 1 from user_drafts draft where draft.user_id=$3 and draft.draft_key='seed-crawler:'||candidate.external_project_id
+					and draft.kind='seed_crawler_import' and draft.submitted_at is null and draft.expires_at>now())))`, cfg.ProjectTypes, cfg.MinimumDownloads, actor.Subject)
 		if err != nil {
 			return stats, err
 		}
@@ -486,7 +488,7 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 				}
 				stats["failed"]++
 				if _, updateErr := worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='failed',last_error=$2,updated_at=now()
-					where id=$1 and status not in ('draft','submitted','existing')`, candidate.ID, truncateRunes(processErr.Error(), 2000)); updateErr != nil {
+					where id=$1 and status not in ('draft','submitted','existing','draft_unavailable')`, candidate.ID, truncateRunes(processErr.Error(), 2000)); updateErr != nil {
 					return stats, errors.Join(processErr, fmt.Errorf("record failed seed crawler candidate %d: %w", candidate.ID, updateErr))
 				}
 				continue
@@ -498,6 +500,8 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 				stats["submitted"]++
 			case "duplicates":
 				stats["duplicates"]++
+			case "draft_unavailable":
+				stats["unavailableDrafts"]++
 			}
 			if !candidate.Drafted && (status == "draft" || status == "submitted") {
 				remaining--
@@ -525,7 +529,7 @@ func (worker *SeedCrawlerWorker) upsertSeedCrawlerCandidate(ctx context.Context,
 	err = worker.server.db.QueryRow(ctx, `insert into seed_crawler_candidates(first_seen_run_id,last_seen_run_id,external_project_id,project_type,downloads,payload)
 		select $1,$1,$2,$3,$4,$5::jsonb where $6 or exists (
 			select 1 from seed_crawler_candidates where external_project_id=$2 and project_type=$3
-			and drafted_at is not null and status in ('failed','submitting'))
+			and drafted_at is not null and status in ('failed','submitting','draft_unavailable'))
 		on conflict(external_project_id) do update set last_seen_run_id=excluded.last_seen_run_id,
 		downloads=excluded.downloads,payload=excluded.payload,updated_at=now()
 		returning id,status,drafted_at is not null`, runID, hit.ProjectID, projectType, hit.Downloads, payload, allowNew).Scan(&candidate.ID, &candidate.Status, &candidate.Drafted)
@@ -617,16 +621,24 @@ func seedModrinthURL(projectType, slug string) string {
 	return "https://modrinth.com/" + section + "/" + slug
 }
 
-func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateID int64, actor security.Claims, projectType string, hit seedModrinthHit, cfg seedCrawlerRuntimeConfig) (string, error) {
+func seedCrawlerProjectExists(ctx context.Context, query databaseQuery, projectType, externalID string) (bool, error) {
 	var exists bool
-	var err error
-	if projectType == "mod" {
-		err = worker.server.db.QueryRow(ctx, `select exists(select 1 from mods where modrinth_project_id=$1)`, hit.ProjectID).Scan(&exists)
-	} else {
-		err = worker.server.db.QueryRow(ctx, `select exists(select 1 from simple_projects where project_type=$1 and modrinth_project_id=$2)`, projectType, hit.ProjectID).Scan(&exists)
-	}
+	err := query.QueryRow(ctx, `select exists (
+		select 1 from project_external_sources source join public_routes route on route.id=source.project_route_id
+		where source.source_type='modrinth' and source.external_project_id=$2 and route.entity_type=$1)
+		or case when $1='mod' then exists(select 1 from mods where modrinth_project_id=$2)
+		else exists(select 1 from simple_projects where project_type=$1 and modrinth_project_id=$2) end`,
+		projectType, externalID).Scan(&exists)
 	if err != nil {
-		return "", fmt.Errorf("check existing seed crawler project: %w", err)
+		return false, fmt.Errorf("check existing seed crawler project: %w", err)
+	}
+	return exists, nil
+}
+
+func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateID int64, actor security.Claims, projectType string, hit seedModrinthHit, cfg seedCrawlerRuntimeConfig) (string, error) {
+	exists, err := seedCrawlerProjectExists(ctx, worker.server.db, projectType, hit.ProjectID)
+	if err != nil {
+		return "", err
 	}
 	if exists {
 		if _, err = worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='existing',last_error='',updated_at=now() where id=$1 and status not in ('draft','submitted')`, candidateID); err != nil {
@@ -722,22 +734,54 @@ func (worker *SeedCrawlerWorker) resumeSeedDraft(ctx context.Context, candidateI
 		return "", err
 	}
 	defer tx.Rollback(ctx)
-	nextStatus, err := prepareSeedDraftStageTx(ctx, tx, candidateID, actor.Subject, autoSubmit)
-	if err != nil || nextStatus == "duplicates" {
-		return nextStatus, err
+	if err = authorizeSeedDraftStageTx(ctx, tx, actor.Subject); err != nil {
+		return "", err
+	}
+	var currentStatus string
+	err = tx.QueryRow(ctx, `select status from seed_crawler_candidates where id=$1 and drafted_at is not null for update`,
+		candidateID).Scan(&currentStatus)
+	if err != nil {
+		return "", fmt.Errorf("lock previously drafted candidate: %w", err)
+	}
+	switch currentStatus {
+	case "draft", "submitted", "existing":
+		return "duplicates", nil
+	}
+	exists, err := seedCrawlerProjectExists(ctx, tx, projectType, hit.ProjectID)
+	if err != nil {
+		return "", err
 	}
 	var draftID string
 	var payload []byte
-	err = tx.QueryRow(ctx, `select public_id,payload-'importOrigin'-'externalProjectId' from user_drafts
-		where user_id=$1 and draft_key=$2 and kind='seed_crawler_import'
-		and submitted_at is null and expires_at>now() for update`, actor.Subject, "seed-crawler:"+hit.ProjectID).Scan(&draftID, &payload)
-	if err != nil {
-		return "", fmt.Errorf("read staged crawler draft: %w", err)
+	nextStatus := seedDraftStatus(autoSubmit)
+	message := ""
+	if exists {
+		nextStatus = "existing"
+	} else {
+		err = tx.QueryRow(ctx, `select public_id,payload-'importOrigin'-'externalProjectId' from user_drafts
+			where user_id=$1 and draft_key=$2 and kind='seed_crawler_import'
+			and submitted_at is null and expires_at>now() for update`, actor.Subject, "seed-crawler:"+hit.ProjectID).Scan(&draftID, &payload)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if currentStatus == "draft_unavailable" {
+				return "duplicates", nil
+			}
+			nextStatus = "draft_unavailable"
+			message = "saved draft is no longer active; restore it or link the project before retrying"
+		} else if err != nil {
+			return "", fmt.Errorf("read staged crawler draft: %w", err)
+		}
+	}
+	if _, err = tx.Exec(ctx, `update seed_crawler_candidates set status=$2,last_error=$3,updated_at=now() where id=$1`,
+		candidateID, nextStatus, message); err != nil {
+		return "", err
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return "", err
 	}
-	if !autoSubmit {
+	switch nextStatus {
+	case "existing":
+		return "duplicates", nil
+	case "draft_unavailable", "draft":
 		return nextStatus, nil
 	}
 	if _, err = worker.submitSeedDraft(ctx, candidateID, draftID, actor, projectType, hit.ProjectID, seedModrinthURL(projectType, hit.Slug), payload); err != nil {
@@ -756,17 +800,26 @@ func seedCrawlerDraftsToday(ctx context.Context, query databaseQuery) (int, time
 	return count, at, err
 }
 
-func prepareSeedDraftStageTx(ctx context.Context, tx pgx.Tx, candidateID, actorID int64, autoSubmit bool) (string, error) {
+func authorizeSeedDraftStageTx(ctx context.Context, tx pgx.Tx, actorID int64) error {
 	if err := lockSeedCrawlerRunLeaseTx(ctx, tx, actorID); err != nil {
-		return "", err
+		return err
 	}
-	if _, err := authorizeAutomationProject(ctx, tx, actorID, "", true, false); err != nil {
-		return "", err
-	}
-	nextStatus := "draft"
+	_, err := authorizeAutomationProject(ctx, tx, actorID, "", true, false)
+	return err
+}
+
+func seedDraftStatus(autoSubmit bool) string {
 	if autoSubmit {
-		nextStatus = "submitting"
+		return "submitting"
 	}
+	return "draft"
+}
+
+func prepareSeedDraftStageTx(ctx context.Context, tx pgx.Tx, candidateID, actorID int64, autoSubmit bool) (string, error) {
+	if err := authorizeSeedDraftStageTx(ctx, tx, actorID); err != nil {
+		return "", err
+	}
+	nextStatus := seedDraftStatus(autoSubmit)
 	staged, err := stageSeedCrawlerCandidateTx(ctx, tx, candidateID, nextStatus)
 	if err != nil {
 		return "", err
@@ -793,19 +846,20 @@ func stageSeedCrawlerCandidateTx(ctx context.Context, tx pgx.Tx, candidateID int
 	case "draft", "submitted", "existing":
 		return false, nil
 	}
-	var firstDraftAt *time.Time
-	if !previouslyDrafted {
-		used, at, err := seedCrawlerDraftsToday(ctx, tx)
-		if err != nil {
-			return false, fmt.Errorf("count daily seed crawler drafts: %w", err)
-		}
-		if used >= limit {
-			return false, errSeedCrawlerDailyImportLimit
-		}
-		firstDraftAt = &at
+	// A peer may have staged the draft while this instance fetched metadata.
+	// Only the resume path can use a previously charged candidate's saved input.
+	if previouslyDrafted {
+		return false, nil
 	}
-	_, err := tx.Exec(ctx, `update seed_crawler_candidates set status=$2,last_error='',updated_at=now(),
-		drafted_at=coalesce(drafted_at,$3) where id=$1`, candidateID, nextStatus, firstDraftAt)
+	used, at, err := seedCrawlerDraftsToday(ctx, tx)
+	if err != nil {
+		return false, fmt.Errorf("count daily seed crawler drafts: %w", err)
+	}
+	if used >= limit {
+		return false, errSeedCrawlerDailyImportLimit
+	}
+	_, err = tx.Exec(ctx, `update seed_crawler_candidates set status=$2,last_error='',updated_at=now(),
+		drafted_at=$3 where id=$1`, candidateID, nextStatus, at)
 	if err != nil {
 		return false, fmt.Errorf("record seed crawler draft stage: %w", err)
 	}

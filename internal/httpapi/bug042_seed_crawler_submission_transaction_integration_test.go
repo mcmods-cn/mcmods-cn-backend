@@ -218,8 +218,7 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	if _, err = pool.Exec(ctx, `drop trigger bug042_reject_candidate_completion on seed_crawler_candidates`); err != nil {
 		t.Fatal(err)
 	}
-	pluginStatus, pluginErr = worker.createSeedDraft(ctx, pluginCandidateID, actor, "plugin", pluginHit,
-		seedCrawlerRuntimeConfig{AIDailyTokenBudget: 0, AutoSubmitReview: true})
+	pluginStatus, pluginErr = worker.resumeSeedDraft(ctx, pluginCandidateID, actor, "plugin", pluginHit, true)
 	if pluginErr != nil || pluginStatus != "submitted" {
 		t.Fatalf("plugin retry status=%q err=%v", pluginStatus, pluginErr)
 	}
@@ -303,6 +302,48 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	used, _, err := seedCrawlerDraftsToday(ctx, pool)
 	if err != nil || used != 1 {
 		t.Fatalf("charged %d new drafts, want 1: %v", used, err)
+	}
+
+	beforeRetry = metadataRequests.Load()
+	if _, err = pool.Exec(ctx, `update user_drafts set expires_at=now()-interval '1 minute' where draft_key='seed-crawler:bug042-manual-external';
+		update seed_crawler_candidates set status='failed' where external_project_id='bug042-manual-external'`); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = worker.executeRun(ctx, runID, actor, false)
+	if err != nil || stats["unavailableDrafts"] != 1 || stats["failed"] != 0 {
+		t.Fatalf("expire staged draft: stats=%v err=%v", stats, err)
+	}
+	stats, err = worker.executeRun(ctx, runID, actor, false)
+	if err != nil || stats["providerSucceeded"] != 0 || stats["failed"] != 0 {
+		t.Fatalf("unavailable draft by itself restarted an exhausted run: stats=%v err=%v", stats, err)
+	}
+	if _, err = pool.Exec(ctx, `update user_drafts set expires_at=now()+interval '1 month' where draft_key='seed-crawler:bug042-manual-external'`); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = worker.executeRun(ctx, runID, actor, false)
+	if err != nil || stats["drafts"] != 1 || stats["failed"] != 0 {
+		t.Fatalf("restored own saved draft did not resume: stats=%v err=%v", stats, err)
+	}
+	if _, err = pool.Exec(ctx, `delete from user_drafts where draft_key='seed-crawler:bug042-manual-external';
+		update seed_crawler_candidates set status='failed' where external_project_id='bug042-manual-external'`); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = worker.executeRun(ctx, runID, actor, false)
+	if err != nil || stats["unavailableDrafts"] != 1 {
+		t.Fatalf("deleted saved draft: stats=%v err=%v", stats, err)
+	}
+	if _, err = pool.Exec(ctx, `insert into mods(project_code,slug,primary_name,review_status) values('manlink01','manual-link','Manual project','approved');
+		insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at)
+		select id,'modrinth','bug042-manual-external','https://modrinth.com/mod/bug042-manual',now() from public_routes where public_id='manlink01' and entity_type='mod';
+		update seed_crawler_configs set daily_limit=2 where id`); err != nil {
+		t.Fatal(err)
+	}
+	stats, err = worker.executeRun(ctx, runID, actor, false)
+	if err != nil || stats["failed"] != 0 || metadataRequests.Load() != beforeRetry {
+		t.Fatalf("manually linked project: stats=%v metadata requests=%d err=%v", stats, metadataRequests.Load()-beforeRetry, err)
+	}
+	if err = pool.QueryRow(ctx, `select status from seed_crawler_candidates where id=$1`, manualCandidateID).Scan(&candidateStatus); err != nil || candidateStatus != "existing" {
+		t.Fatalf("independently linked source = %q, want existing: %v", candidateStatus, err)
 	}
 
 }

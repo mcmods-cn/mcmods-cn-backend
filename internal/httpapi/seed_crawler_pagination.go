@@ -21,7 +21,7 @@ const (
 	seedCrawlerMaximumCursorBytes = 2048
 )
 
-var seedCrawlerCandidateStatuses = stringSet("candidate", "submitting", "failed", "existing", "draft", "submitted")
+var seedCrawlerCandidateStatuses = stringSet("candidate", "submitting", "failed", "existing", "draft", "submitted", "draft_unavailable")
 
 type seedCrawlerRunPageRequest struct {
 	Limit  int

@@ -117,8 +117,8 @@ func TestSeedCrawlerDailyImportsCountFirstCommittedDraftAcrossWorkers(t *testing
 		t.Fatal(err)
 	}
 	retry := begin()
-	if staged, err := stageSeedCrawlerCandidateTx(ctx, retry, first, "submitting"); err != nil || !staged {
-		t.Fatalf("retry of the same staged candidate: staged=%v err=%v", staged, err)
+	if staged, err := stageSeedCrawlerCandidateTx(ctx, retry, first, "submitting"); err != nil || staged {
+		t.Fatalf("a late initial writer must retain the first staged draft: staged=%v err=%v", staged, err)
 	}
 	if err := retry.Commit(ctx); err != nil {
 		t.Fatal(err)

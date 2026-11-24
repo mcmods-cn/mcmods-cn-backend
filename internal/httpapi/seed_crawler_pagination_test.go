@@ -24,8 +24,11 @@ func TestSeedCrawlerPaginationRejectsOffsetsInvalidFiltersAndUnscopedCursors(t *
 	if _, err := parseSeedCrawlerCandidatePageRequest(url.Values{"status": {"unknown"}}); err == nil {
 		t.Fatal("unknown candidate status was accepted")
 	}
-	if submitting, err := parseSeedCrawlerCandidatePageRequest(url.Values{"status": {"submitting"}}); err != nil || submitting.Status != "submitting" {
-		t.Fatalf("recoverable submitting status was rejected: request=%#v err=%v", submitting, err)
+	for _, status := range []string{"submitting", "draft_unavailable"} {
+		request, err := parseSeedCrawlerCandidatePageRequest(url.Values{"status": {status}})
+		if err != nil || request.Status != status {
+			t.Fatalf("candidate status %q was rejected: request=%#v err=%v", status, request, err)
+		}
 	}
 
 	first, err := parseSeedCrawlerRunPageRequest(url.Values{"limit": {"7"}})
