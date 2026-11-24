@@ -62,7 +62,7 @@ python3 -B tools/testing/isolated_environment.py run -- go run ./tools/testing/d
 并使专用测试URL与应用URL精确匹配。不要以RUN=0配合非空专用URL运行：旧opt-in测试
 可能因此被启用，再被schema安全守卫拒绝。
 
-验收原始上传字节的实际签名到期清理时，使用已启动的上述隔离环境，单独预留 15 分钟。测试等待默认 600 秒的签名有效期，并检查两个 Worker 处理同一删除意图的次数。命令中的 Go 超时要覆盖有效期和清理轮询。
+验收原始上传字节的实际签名到期清理时，在 Linux 测试进程中使用已启动的上述隔离环境，单独预留 15 分钟，并在输出中核对该用例名称及 PASS。测试等待默认 600 秒的签名有效期，并检查两个 Worker 处理同一删除意图的次数。命令中的 Go 超时要覆盖有效期和清理轮询。
 
 ```sh
 python3 -B tools/testing/isolated_environment.py run -- \
