@@ -241,6 +241,37 @@ func TestInitializeRollsBackAndSupportsExplicitAdminIntegration(t *testing.T) {
 	}
 }
 
+func TestInitializeStableAcrossCatalogDisplaySettingsIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	pool := newBaselineTestDatabase(t, ctx)
+	cfg := pool.Config()
+	cfg.MaxConns = 1
+	cfg.ConnConfig.RuntimeParams["IntervalStyle"] = "iso_8601"
+	cfg.ConnConfig.RuntimeParams["quote_all_identifiers"] = "on"
+	replica, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replica.Close()
+	if err := Initialize(ctx, replica); err != nil {
+		t.Fatal(err)
+	}
+	var style, quoting string
+	if err := replica.QueryRow(ctx, `select current_setting('IntervalStyle'), current_setting('quote_all_identifiers')`).Scan(&style, &quoting); err != nil || style != "iso_8601" || quoting != "on" {
+		t.Fatalf("initializer changed the pooled session display settings: %q, %q, %v", style, quoting, err)
+	}
+	if err := Initialize(ctx, pool); err != nil {
+		t.Fatalf("unchanged database rejected after only the session display settings changed: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `alter table notifications disable trigger trg_notifications_revision`); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(ctx, replica); err == nil || !strings.Contains(err.Error(), "catalog differs") {
+		t.Fatal("changed trigger no longer rejected with nondefault display settings")
+	}
+}
+
 func TestInitializeRejectsUnknownAndDriftedSchemasIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()

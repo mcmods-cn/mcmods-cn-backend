@@ -42,8 +42,11 @@ func initialize(ctx context.Context, db *pgxpool.Pool, bootstrapAdmin bool) erro
 		return fmt.Errorf("begin database initialization: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `select set_config('search_path',$1,true)`, applicationSearchPath); err != nil {
-		return fmt.Errorf("select application schema: %w", err)
+	// PostgreSQL deparses interval constants and identifiers using session
+	// display settings. Use one representation for installation and checks.
+	if _, err = tx.Exec(ctx, `select set_config('search_path',$1,true),
+		set_config('IntervalStyle','postgres',true), set_config('quote_all_identifiers','off',true)`, applicationSearchPath); err != nil {
+		return fmt.Errorf("set schema initialization session settings: %w", err)
 	}
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods-cn-schema-migrations'))`); err != nil {
 		return fmt.Errorf("lock database initialization: %w", err)

@@ -50,6 +50,8 @@ go test -race -p 1 ./internal/queue ./internal/querycache -count=1
 
 在已确认用途的 PostgreSQL 18.6 空库配置服务端环境，安装 schema 后再启动 API 与 Worker。安装 DDL、必需权限和禁用密码登录的系统身份共用一个事务。进程启动时用同一入口核对版本、DDL 定义指纹和实际 catalog 指纹。当前基线为 generation 171。外部更新日志和镜像下载分别以所属项目及供应商身份定键。项目换来源后仍保留自己的已发布内容和人工修订。版本或结构不符时拒绝启动。旧库用对应应用版本读取，只有已核实归属的开发库才可重建。[隔离环境重建](docs/testing-isolated-environment.md#重建任务自有环境)
 
+计算目录指纹时，安装事务使用 PostgreSQL 默认的间隔表示（`IntervalStyle=postgres`）和标识符引用方式（`quote_all_identifiers=off`）。此前用这两项默认值安装的 generation 171 可以直接复核。如果旧开发库使用其他格式写入了指纹，先用原版本确认实际结构和备份，再在已确认归属的空库初始化。保留旧库及其备份供核对。
+
 ```sh
 go run ./cmd/db-initialize
 # 通过私密环境注入 SEED_ADMIN_PASSWORD，可选设置 SEED_ADMIN_EMAIL，再运行一次。
