@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"path"
@@ -101,10 +102,12 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 	}
 	decision, err := s.antiAbuse.Evaluate(r.Context(), input)
 	if err != nil {
-		// Low-risk service errors fail soft so Redis, DNS, or security-log
-		// outages do not turn every authenticated write into a site-wide outage.
-		s.writeAppLog(context.Background(), "system", "warn", "anti_abuse_degraded", action, claims.Subject, r, http.StatusServiceUnavailable, 0, map[string]any{"error": err.Error()})
-		next.ServeHTTP(w, r)
+		// Evaluate handles optional signals itself. An unknown account restriction
+		// cannot authorize the pending write.
+		s.writeAppLog(context.Background(), "system", "warn", "anti_abuse_degraded", action, claims.Subject, r,
+			http.StatusServiceUnavailable, 0, map[string]any{"errorType": fmt.Sprintf("%T", err)})
+		writeAPIError(w, http.StatusServiceUnavailable, "anti_abuse_state_unavailable",
+			"安全状态暂时无法读取，请稍后重试", 1, nil)
 		return
 	}
 	if antiAbuseDecisionBlocks(decision.Outcome) {

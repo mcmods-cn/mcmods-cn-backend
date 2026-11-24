@@ -1,13 +1,8 @@
 package antiabuse
 
 import (
-	"context"
-	"strings"
 	"testing"
 	"time"
-
-	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/querycache"
 )
 
 func TestPolicyUsesTrustRestrictionAndPermissionForElevation(t *testing.T) {
@@ -140,57 +135,11 @@ func TestTrustAndRestrictionClassification(t *testing.T) {
 	}
 }
 
-func TestAccountRestrictionQueryFiltersBeforeAggregationAndScopesCacheByAction(t *testing.T) {
-	t.Parallel()
-	definition := strings.ToLower(strings.Join(strings.Fields(accountProfileSQL), " "))
-	for _, required := range []string{
-		"restriction.actions&&array[$4,'*']::text[]",
-		"filter(where mode not in ('challenge','moderation') and starts_at<=now())",
-		"filter(where mode='challenge' and starts_at<=now())",
-		"filter(where mode='moderation' and starts_at<=now())",
-	} {
-		if !strings.Contains(definition, required) {
-			t.Fatalf("account restriction query is missing %q", required)
-		}
-	}
-	if strings.Contains(definition, "limit 1") {
-		t.Fatal("account restriction query truncates active restrictions before matching the action")
-	}
-	service := &Service{cfg: config.AntiAbuseConfig{IPHashSecret: "test-only"}}
-	commentKey := service.accountCacheKey(42, "ip", "device", "comment.create")
-	messageKey := service.accountCacheKey(42, "ip", "device", "message.send")
-	if commentKey == messageKey || !strings.HasPrefix(commentKey, accountCacheKeyPrefix+"42:") {
-		t.Fatalf("account cache is not action-scoped: comment=%q message=%q", commentKey, messageKey)
-	}
-}
-
 func TestNetworkAndClientSignals(t *testing.T) {
 	if got := subnetForIP("192.0.2.44"); got != "192.0.2.0/24" {
 		t.Fatalf("IPv4 subnet = %q", got)
 	}
 	if !suspiciousUserAgent("python-requests/2.32") || suspiciousUserAgent("Mozilla/5.0 Firefox/141") {
 		t.Fatal("client signal classification is incorrect")
-	}
-}
-
-func TestAccountStateInvalidationOnlyRemovesTargetAccount(t *testing.T) {
-	ctx := context.Background()
-	cache := querycache.New(config.RedisConfig{})
-	service := New(context.Background(), config.AntiAbuseConfig{}, nil, cache)
-	targetPrefix := accountCacheKeyPrefix + "42:"
-	targetKeys := []string{targetPrefix + "ip-a:device-a", targetPrefix + "ip-b:device-b"}
-	otherKey := accountCacheKeyPrefix + "43:ip-a:device-a"
-	for _, key := range append(targetKeys, otherKey) {
-		cache.Set(ctx, key, []byte("cached"), time.Minute)
-	}
-
-	service.InvalidateAccountState(ctx, 42)
-	for _, key := range targetKeys {
-		if _, ok := cache.Get(ctx, key); ok {
-			t.Fatalf("target account cache key %q was not invalidated", key)
-		}
-	}
-	if _, ok := cache.Get(ctx, otherKey); !ok {
-		t.Fatal("invalidating one account removed another account's cache")
 	}
 }

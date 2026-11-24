@@ -30,7 +30,6 @@ import (
 const settingsKey = "anti_abuse.config"
 
 const (
-	accountCacheKeyPrefix            = "anti-abuse:account:v2:"
 	botRulesCacheKey                 = "anti-abuse:bot-rules:v2"
 	settingsCacheKey                 = "anti-abuse:settings"
 	successQueueCapacity             = 1024
@@ -183,7 +182,7 @@ func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, err
 	deviceHash := s.privateHash("device", input.DeviceID)
 	sessionHash := s.privateHash("session", input.SessionID)
 	profile, profileErr := s.account(ctx, input.UserID, ipHash, deviceHash, input.Action)
-	if profileErr != nil && !errors.Is(profileErr, pgx.ErrNoRows) {
+	if profileErr != nil {
 		return decision, profileErr
 	}
 	trust := classifyTrust(profile, settings, input.Now)
@@ -848,11 +847,7 @@ func (s *Service) applyAutomaticRestriction(ctx context.Context, input Evaluatio
 		restricted_until=greatest(anti_abuse_user_states.restricted_until,excluded.restricted_until),last_event_at=now(),updated_at=now()`, input.UserID, decision.RiskScore, endsAt); err != nil {
 		return err
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return err
-	}
-	s.InvalidateAccountState(ctx, input.UserID)
-	return nil
+	return tx.Commit(ctx)
 }
 
 type riskAggregateExecer interface {
@@ -885,16 +880,6 @@ func discardRiskAggregates(aggregates map[string]riskAggregate) uint64 {
 		delete(aggregates, key)
 	}
 	return dropped
-}
-
-// InvalidateAccountState centralizes the account-risk cache key. The suffix
-// varies by network and client signal, so invalidating one account intentionally
-// removes all of that account's short-lived variants without scanning others.
-func (s *Service) InvalidateAccountState(ctx context.Context, userID int64) {
-	if s == nil || s.cache == nil || userID <= 0 {
-		return
-	}
-	s.cache.InvalidatePrefix(ctx, accountCacheKeyPrefix+strconv.FormatInt(userID, 10)+":")
 }
 
 func (s *Service) InvalidateBotRules(ctx context.Context) {
@@ -1010,28 +995,26 @@ const accountProfileSQL = `select account.created_at,account.email_verified,acco
 	coalesce(state.trust_level,'normal'),coalesce(state.risk_score,0),coalesce(state.manually_trusted,false),
 	coalesce(state.challenge_required_until,'epoch'),coalesce(state.review_required_until,'epoch'),coalesce(state.restricted_until,'epoch'),
 	coalesce(restriction.hard_mode,''),coalesce(restriction.hard_end,'epoch'),
-	coalesce(restriction.challenge_end,'epoch'),coalesce(restriction.moderation_end,'epoch'),
-	coalesce(restriction.time_dependent,false)
+	coalesce(restriction.challenge_end,'epoch'),coalesce(restriction.moderation_end,'epoch')
 	from users account left join user_experience experience on experience.user_id=account.id
 	left join anti_abuse_user_states state on state.user_id=account.id
 	left join lateral (
 		with matching as (
-			select restriction.mode,restriction.starts_at,restriction.ends_at,coalesce(restriction.ends_at,now()+interval '100 years') effective_end
+			select restriction.mode,restriction.starts_at,coalesce(restriction.ends_at,now()+interval '100 years') effective_end
 			from anti_abuse_restrictions restriction
-			where restriction.lifted_at is null
+			where restriction.lifted_at is null and restriction.starts_at<=now()
 				and (restriction.ends_at is null or restriction.ends_at>now())
-				and (restriction.user_id=account.id or ($2<>'' and restriction.ip_hash=$2) or ($3<>'' and restriction.device_hash=$3))
+				and (restriction.user_id=account.id or (restriction.ip_hash<>'' and restriction.ip_hash=$2) or (restriction.device_hash<>'' and restriction.device_hash=$3))
 				and (restriction.mode in ('read_only','temporary_ban','permanent_ban')
 					or restriction.actions&&array[$4,'*']::text[])
 		)
 		select
 			(array_agg(mode order by case mode when 'permanent_ban' then 1 when 'temporary_ban' then 2 when 'read_only' then 3 else 4 end,starts_at desc)
-				filter(where mode not in ('challenge','moderation') and starts_at<=now()))[1] hard_mode,
+				filter(where mode not in ('challenge','moderation')))[1] hard_mode,
 			(array_agg(effective_end order by case mode when 'permanent_ban' then 1 when 'temporary_ban' then 2 when 'read_only' then 3 else 4 end,starts_at desc)
-				filter(where mode not in ('challenge','moderation') and starts_at<=now()))[1] hard_end,
-			max(effective_end) filter(where mode='challenge' and starts_at<=now()) challenge_end,
-			max(effective_end) filter(where mode='moderation' and starts_at<=now()) moderation_end,
-			bool_or(starts_at>now() or ends_at is not null) time_dependent
+				filter(where mode not in ('challenge','moderation')))[1] hard_end,
+			max(effective_end) filter(where mode='challenge') challenge_end,
+			max(effective_end) filter(where mode='moderation') moderation_end
 		from matching
 	) restriction on true
 	where account.id=$1`
@@ -1040,34 +1023,14 @@ func (s *Service) account(ctx context.Context, userID int64, ipHash, deviceHash,
 	if userID <= 0 {
 		return accountProfile{}, pgx.ErrNoRows
 	}
-	key := s.accountCacheKey(userID, ipHash, deviceHash, action)
-	raw, err := s.cache.GetOrLoadCacheableTTL(ctx, key, 0, func(loadCtx context.Context) ([]byte, bool, error) {
-		var profile accountProfile
-		var timeDependent bool
-		err := s.db.QueryRow(loadCtx, accountProfileSQL, userID, ipHash, deviceHash, action).Scan(&profile.CreatedAt, &profile.EmailVerified, &profile.Status, &profile.Level,
-			&profile.TrustLevel, &profile.RiskScore, &profile.ManuallyTrusted, &profile.ChallengeRequiredUntil, &profile.ReviewRequiredUntil,
-			&profile.RestrictedUntil, &profile.RestrictionMode, &profile.RestrictionEnd,
-			&profile.RestrictionChallengeEnd, &profile.RestrictionModerationEnd, &timeDependent)
-		if err != nil {
-			return nil, false, err
-		}
-		raw, err := json.Marshal(profile)
-		// A later request may see a different highest-priority rule without a write.
-		return raw, !timeDependent, err
-	})
-	if err != nil {
-		return accountProfile{}, err
-	}
+	// Committed restrictions, including IP and device rules, apply across instances.
 	var profile accountProfile
-	if err = json.Unmarshal(raw, &profile); err != nil {
-		return accountProfile{}, err
-	}
-	return profile, nil
-}
-
-func (s *Service) accountCacheKey(userID int64, ipHash, deviceHash, action string) string {
-	return accountCacheKeyPrefix + strconv.FormatInt(userID, 10) + ":" + truncate(ipHash, 16) + ":" +
-		truncate(deviceHash, 16) + ":" + s.privateHash("account-action", action)
+	err := s.db.QueryRow(ctx, accountProfileSQL, userID, ipHash, deviceHash, action).Scan(
+		&profile.CreatedAt, &profile.EmailVerified, &profile.Status, &profile.Level,
+		&profile.TrustLevel, &profile.RiskScore, &profile.ManuallyTrusted, &profile.ChallengeRequiredUntil,
+		&profile.ReviewRequiredUntil, &profile.RestrictedUntil, &profile.RestrictionMode, &profile.RestrictionEnd,
+		&profile.RestrictionChallengeEnd, &profile.RestrictionModerationEnd)
+	return profile, err
 }
 
 func classifyTrust(profile accountProfile, settings Settings, now time.Time) string {

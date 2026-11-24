@@ -8,8 +8,8 @@ The regression tests use a closed lazy pool for failed writes and a deliberately
 
 ## Timed rules and challenges
 
-A protected write obtains its current restriction from PostgreSQL when an applicable rule has a future start or a finite end. This lets an ongoing restriction take effect when a higher-priority ban ends. Ordinary stable account profiles retain the existing cache.
+Each protected write checks the current account, risk state and matching user, IP and device restrictions in one primary PostgreSQL query. Every instance sees changes committed before its query, including natural rule starts and ends. Failure to read this decision returns HTTP 503 with `anti_abuse_state_unavailable`. Redis and local counters still enforce rate limits.
 
 Crawler rules retain their precedence after caching. A matching temporary rule checks the PostgreSQL clock once per request. A permanent rule or an unmatched rule needs no extra clock query. Configure Turnstile with the final verification URL. Redirects produce the existing provider-unavailable result. A successful provider response can consume a challenge only before its database deadline.
 
-The account and crawler rule caches use new keys. Upgrade all API instances together for consistent behavior across requests. The old keys expire under their existing TTL. The change requires no database initialization.
+Upgrade API instances together to enforce the same policy on all protected writes. Older cached account profiles and crawler rules expire under their existing TTLs.

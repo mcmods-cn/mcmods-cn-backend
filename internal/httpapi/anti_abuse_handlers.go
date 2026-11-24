@@ -227,7 +227,6 @@ func (s *Server) adminUpdateAntiAbuseUserState(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "failed to update user risk state")
 		return
 	}
-	s.antiAbuse.InvalidateAccountState(r.Context(), userID)
 	s.writeAppLog(r.Context(), "admin_operation", "warn", "update_anti_abuse_user_state", r.PathValue("id"), currentClaims(r).Subject, r, http.StatusOK, 0, request)
 	writeJSON(w, http.StatusOK, map[string]bool{"updated": true})
 }
@@ -300,7 +299,6 @@ func (s *Server) adminAntiAbuseRestrictions(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "failed to create restriction")
 		return
 	}
-	s.antiAbuse.InvalidateAccountState(r.Context(), userID)
 	s.writeAppLog(r.Context(), "admin_operation", "warn", "create_anti_abuse_restriction", publicID, currentClaims(r).Subject, r, http.StatusCreated, 0, request)
 	writeJSON(w, http.StatusCreated, map[string]string{"id": publicID})
 }
@@ -313,19 +311,17 @@ func (s *Server) adminLiftAntiAbuseRestriction(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "a lift reason is required")
 		return
 	}
-	var userID int64
-	err := s.db.QueryRow(r.Context(), `update anti_abuse_restrictions set lifted_at=now(),lifted_by=$2,lift_reason=$3
-		where public_id=$1 and lifted_at is null returning user_id`,
-		strings.ToLower(r.PathValue("id")), currentClaims(r).Subject, strings.TrimSpace(request.Reason)).Scan(&userID)
+	result, err := s.db.Exec(r.Context(), `update anti_abuse_restrictions set lifted_at=now(),lifted_by=$2,lift_reason=$3
+		where public_id=$1 and lifted_at is null`,
+		strings.ToLower(r.PathValue("id")), currentClaims(r).Subject, strings.TrimSpace(request.Reason))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "active restriction was not found")
-		} else {
-			writeError(w, http.StatusInternalServerError, "failed to lift anti-abuse restriction")
-		}
+		writeError(w, http.StatusInternalServerError, "failed to lift anti-abuse restriction")
 		return
 	}
-	s.antiAbuse.InvalidateAccountState(r.Context(), userID)
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "active restriction was not found")
+		return
+	}
 	s.writeAppLog(r.Context(), "admin_operation", "warn", "lift_anti_abuse_restriction", r.PathValue("id"), currentClaims(r).Subject, r, http.StatusOK, 0, request)
 	writeJSON(w, http.StatusOK, map[string]bool{"lifted": true})
 }

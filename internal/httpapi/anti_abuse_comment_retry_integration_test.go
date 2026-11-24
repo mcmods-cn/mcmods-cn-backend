@@ -79,3 +79,21 @@ func TestCommentReceiptsSurviveUnavailableDetailProjectionIntegration(t *testing
 		t.Fatalf("unexpected pending receipt %+v", pending)
 	}
 }
+
+func TestCommentCreationWaitsForReadableRiskStateIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "comment.create")
+	if _, err := f.db.Exec(f.ctx, "alter table anti_abuse_restrictions rename to temporarily_unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	submission := createCommentRequest{Body: "Ordinary retry after receipt", IdempotencyKey: "state-retry"}
+	path := "/api/v1/comment-targets/mod/" + f.modCode + "/comments"
+	f.require(t, f.editor, http.MethodPost, path, submission, http.StatusServiceUnavailable)
+	if count := f.number(t, "select count(*) from comments where idempotency_key=$1", submission.IdempotencyKey); count != 0 {
+		t.Fatalf("comment persisted with unreadable account risk: %d", count)
+	}
+	if _, err := f.db.Exec(f.ctx, "alter table temporarily_unavailable rename to anti_abuse_restrictions"); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, f.editor, http.MethodPost, path, submission, http.StatusCreated)
+}
