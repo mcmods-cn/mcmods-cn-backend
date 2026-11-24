@@ -224,8 +224,11 @@ func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfig
 	}
 	// A cluster edit may reorder or remove peers. Restore a masked URL's own
 	// userinfo only for the same retained endpoint, never on an added peer.
-	byEndpoint := make(map[string]*url.Userinfo)
-	ambiguous := make(map[string]bool)
+	type previousLogin struct {
+		userinfo                         *url.Userinfo
+		ambiguous, hasPassword, hasToken bool
+	}
+	byEndpoint := make(map[string]previousLogin)
 	for _, old := range strings.Split(current.URL, ",") {
 		old = strings.TrimSpace(old)
 		if !strings.Contains(old, "://") {
@@ -236,13 +239,19 @@ func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfig
 			continue
 		}
 		key := natsCredentialDestination(old)
-		if previous, exists := byEndpoint[key]; exists && previous.String() != address.User.String() {
-			// The same endpoint appears under different identities. Its original
-			// list can round-trip exactly; an edited list must specify its login.
-			ambiguous[key] = true
-		} else {
-			byEndpoint[key] = address.User
+		previous, exists := byEndpoint[key]
+		if exists && previous.userinfo.String() != address.User.String() {
+			previous.ambiguous = true
 		}
+		previous.userinfo = address.User
+		if address.User != nil {
+			if value, password := address.User.Password(); password {
+				previous.hasPassword = previous.hasPassword || value != ""
+			} else {
+				previous.hasToken = previous.hasToken || address.User.Username() != ""
+			}
+		}
+		byEndpoint[key] = previous
 	}
 	servers := strings.Split(raw, ",")
 	for i, server := range servers {
@@ -256,13 +265,15 @@ func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfig
 			return "", errors.New("invalid NATS endpoint")
 		}
 		if !unchanged && address.User == nil {
-			key := natsCredentialDestination(server)
-			if ambiguous[key] {
-				if !payload.ClearPassword || !payload.ClearToken {
+			previous := byEndpoint[natsCredentialDestination(server)]
+			if previous.ambiguous {
+				retainPassword := previous.hasPassword && !payload.ClearPassword && (payload.Password == nil || *payload.Password == "")
+				retainToken := previous.hasToken && !payload.ClearToken && (payload.Token == nil || *payload.Token == "")
+				if retainPassword || retainToken {
 					return "", errNATSCredentialDecision
 				}
 			} else {
-				address.User = byEndpoint[key]
+				address.User = previous.userinfo
 			}
 		}
 		if address.User != nil {

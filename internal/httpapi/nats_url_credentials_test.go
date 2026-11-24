@@ -162,3 +162,17 @@ func TestNATSMaskedMultipleServersKeepTheirOwnCredentialsWhenReordered(t *testin
 		t.Fatalf("moving a retained endpoint changed its stored login: err=%v", err)
 	}
 }
+
+func TestNATSMaskedMultipleLoginsForOneServerRequireAChoiceWhenEdited(t *testing.T) {
+	current := config.NATSConfig{URL: "nats://first:first-password@broker.example,nats://second:second-password@broker.example"}
+	request := completeNATSUpdateRequest()
+	request.URL = natsPtr("nats://broker.example")
+	if _, err := request.config(current); err != errNATSCredentialDecision {
+		t.Fatalf("ambiguous login was retained: %v", err)
+	}
+	request.Username, request.Password = natsPtr("replacement"), natsPtr("new-password")
+	next, err := request.config(current)
+	if err != nil || next.Username != "replacement" || next.Password != "new-password" || next.URL != "nats://broker.example" {
+		t.Fatalf("explicit account replacement failed: %v", err)
+	}
+}
