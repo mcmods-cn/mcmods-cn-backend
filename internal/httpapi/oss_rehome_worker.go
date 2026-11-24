@@ -20,10 +20,7 @@ const (
 	ossRehomeBatchSize    = 2
 )
 
-var (
-	errOSSRehomeLeaseLost     = errors.New("OSS rehome job lease was lost")
-	errOSSRehomeNotReplayable = errors.New("OSS rehome job is not dead")
-)
+var errOSSRehomeLeaseLost = errors.New("OSS rehome job lease was lost")
 
 type ossRehomeJob struct {
 	ID          int64

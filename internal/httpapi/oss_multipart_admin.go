@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -11,8 +10,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 )
-
-var errOSSMultipartNotReplayable = errors.New("OSS multipart session is not dead")
 
 func (s *Server) adminOSSMultipartSessions(w http.ResponseWriter, r *http.Request) {
 	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
@@ -67,68 +64,64 @@ func (s *Server) adminReplayOSSMultipartSession(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "invalid OSS multipart session id")
 		return
 	}
-	var id int64
-	err := s.db.QueryRow(r.Context(), `select id from oss_multipart_sessions where public_id=$1`, publicID).Scan(&id)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "OSS job not found")
-		return
+	ctx := r.Context()
+	fail := func(err error) {
+		slog.Error("replay OSS multipart session", "id", publicID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to replay OSS multipart cleanup")
 	}
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to resolve OSS job")
+		fail(err)
 		return
 	}
-
-	err = s.replayOSSMultipartSessionWithRequest(r.Context(), id, currentClaims(r).Subject, r)
+	defer tx.Rollback(ctx)
+	var id int64
+	var status, failureClass, lastError string
+	var attempts, maxAttempts int
+	err = tx.QueryRow(ctx, `select id,status,attempts,max_attempts,failure_class,last_error
+		from oss_multipart_sessions where public_id=$1 for update`, publicID).
+		Scan(&id, &status, &attempts, &maxAttempts, &failureClass, &lastError)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "OSS multipart session not found")
 		return
 	}
-	if errors.Is(err, errOSSMultipartNotReplayable) {
+	if err != nil {
+		fail(err)
+		return
+	}
+	actor, ok := requireCurrentWritePermission(w, r, tx, "admin.config.write")
+	if !ok {
+		return
+	}
+	if status != "dead" {
 		writeError(w, http.StatusConflict, "OSS multipart session is not dead")
 		return
 	}
+	tag, err := tx.Exec(ctx, `update oss_multipart_sessions set status='cleanup_pending',attempts=0,next_attempt_at=now(),
+        locked_by='',lease_expires_at=null,last_error='',failure_class='',dead_at=null,replay_count=replay_count+1,last_replayed_at=now(),
+		last_replayed_by=$2,updated_at=now() where id=$1 and status='dead'`, id, actor.Subject)
 	if err != nil {
-		slog.Error("replay OSS multipart cleanup", "session_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to replay OSS multipart cleanup")
+		fail(err)
+		return
+	}
+	if tag.RowsAffected() != 1 {
+		writeError(w, http.StatusConflict, "OSS multipart session is not dead")
+		return
+	}
+	_, err = tx.Exec(ctx, `insert into app_logs(category,level,action,target,payload)
+		values('security','warning','oss_multipart_cleanup_replayed',$1::text,jsonb_build_object(
+			'actorUserId',$2::bigint,'attempts',$3::integer,'maxAttempts',$4::integer,
+        'failureClass',$5::text,'lastError',$6::text))`,
+		strconv.FormatInt(id, 10), actor.Subject, attempts, maxAttempts, failureClass, lastError)
+	if err == nil {
+		err = enqueueRequestActivityTx(r, tx)
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	if err != nil {
+		fail(err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"queued": true, "id": publicID})
-}
-
-func (s *Server) replayOSSMultipartSession(ctx context.Context, id, actorID int64) error {
-	return s.replayOSSMultipartSessionWithRequest(ctx, id, actorID, nil)
-}
-
-func (s *Server) replayOSSMultipartSessionWithRequest(ctx context.Context, id, actorID int64, request *http.Request) error {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	var status, failureClass, lastError string
-	var attempts, maxAttempts int
-	if err = tx.QueryRow(ctx, `select status,attempts,max_attempts,failure_class,last_error
-		from oss_multipart_sessions where id=$1 for update`, id).Scan(&status, &attempts, &maxAttempts, &failureClass, &lastError); err != nil {
-		return err
-	}
-	if status != "dead" {
-		return errOSSMultipartNotReplayable
-	}
-	if _, err = tx.Exec(ctx, `update oss_multipart_sessions set status='cleanup_pending',attempts=0,next_attempt_at=now(),
-		locked_by='',lease_expires_at=null,last_error='',failure_class='',dead_at=null,replay_count=replay_count+1,
-		last_replayed_at=now(),last_replayed_by=nullif($2,0),updated_at=now() where id=$1 and status='dead'`, id, actorID); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ctx, `insert into app_logs(category,level,action,target,payload)
-		values('security','warning','oss_multipart_cleanup_replayed',$1::text,jsonb_build_object(
-			'actorUserId',$2::bigint,'attempts',$3::integer,'maxAttempts',$4::integer,
-			'failureClass',$5::text,'lastError',$6::text))`, strconv.FormatInt(id, 10), actorID, attempts, maxAttempts, failureClass, lastError); err != nil {
-		return err
-	}
-	if request != nil {
-		if err = enqueueRequestActivityTx(request, tx); err != nil {
-			return err
-		}
-	}
-	return tx.Commit(ctx)
 }

@@ -16,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestOSSRehomeEnqueueGenerationAndLeaseSurviveRestartIntegration(t *testing.T) {
@@ -179,14 +178,15 @@ func TestOSSRehomeFailureBudgetDeadAlertAndGenerationRaceAreAtomicIntegration(t 
 }
 
 func TestOSSRehomeAdminReplayIsAuditedIntegration(t *testing.T) {
-	pool := openOSSRehomeStateTestDB(t)
+	pool := openOSSRecoveryStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	if _, err := pool.Exec(ctx, `insert into oss_rehome_jobs(id,mod_id,status,generation,attempts,max_attempts,last_error,failure_class,dead_at)
+	if _, err := pool.Exec(ctx, `insert into mods(id,project_code,slug,primary_name) values(1,'abc123def','rehome-replay','Rehome replay fixture');
+		insert into oss_rehome_jobs(id,mod_id,status,generation,attempts,max_attempts,last_error,failure_class,dead_at)
 		values(30,1,'dead',4,8,8,'permission denied','authorization',now())`); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{db: pool}
+	server := &Server{db: pool, cfg: config.Config{JWTSecret: "synthetic-oss-replay"}}
 	listRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/infrastructure/oss-rehomes?status=dead", nil)
 	listResponse := httptest.NewRecorder()
 	server.adminOSSRehomeJobs(listResponse, listRequest)
@@ -197,11 +197,8 @@ func TestOSSRehomeAdminReplayIsAuditedIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select public_id from oss_rehome_jobs where id=$1`, 30).Scan(&publicID); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-rehomes/"+publicID+"/replay", nil)
-	request.SetPathValue("id", publicID)
-	request = request.WithContext(context.WithValue(request.Context(), claimsContextKey, security.Claims{Subject: 7001}))
-	response := httptest.NewRecorder()
-	server.adminReplayOSSRehome(response, request)
+	replay := authorizedOSSReplay(t, ctx, server, "oss-rehomes", publicID, server.adminReplayOSSRehome)
+	response := replay()
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("replay response = %d/%s", response.Code, response.Body.String())
 	}
@@ -219,8 +216,7 @@ func TestOSSRehomeAdminReplayIsAuditedIntegration(t *testing.T) {
 	if err := json.Unmarshal(payload, &audit); err != nil || int64(audit["actorUserId"].(float64)) != 7001 || int64(audit["generation"].(float64)) != 4 {
 		t.Fatalf("replay audit = %#v/%v", audit, err)
 	}
-	conflict := httptest.NewRecorder()
-	server.adminReplayOSSRehome(conflict, request)
+	conflict := replay()
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("active replay = %d, want 409", conflict.Code)
 	}

@@ -16,11 +16,10 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestOSSMultipartSessionBindingAndIdempotentSettlementIntegration(t *testing.T) {
-	pool := openOSSMultipartStateTestDB(t)
+	pool := openOSSRecoveryStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	server := &Server{db: pool}
@@ -89,7 +88,7 @@ func TestOSSMultipartSessionBindingAndIdempotentSettlementIntegration(t *testing
 }
 
 func TestOSSMultipartCleanupWorkerRetriesDeadLettersAndRecoversLeasesIntegration(t *testing.T) {
-	pool := openOSSMultipartStateTestDB(t)
+	pool := openOSSRecoveryStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	sha := strings.Repeat("d", 64)
@@ -121,7 +120,7 @@ func TestOSSMultipartCleanupWorkerRetriesDeadLettersAndRecoversLeasesIntegration
 }
 
 func TestOSSMultipartDeadAlertFailureRollsBackStateIntegration(t *testing.T) {
-	pool := openOSSMultipartStateTestDB(t)
+	pool := openOSSRecoveryStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if _, err := pool.Exec(ctx, `insert into oss_multipart_sessions(id,owner_id,bucket,endpoint,region,object_key,upload_id,
@@ -142,7 +141,7 @@ func TestOSSMultipartDeadAlertFailureRollsBackStateIntegration(t *testing.T) {
 }
 
 func TestOSSMultipartDeadReplayIsAuditedIntegration(t *testing.T) {
-	pool := openOSSMultipartStateTestDB(t)
+	pool := openOSSRecoveryStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if _, err := pool.Exec(ctx, `insert into oss_multipart_sessions(id,owner_id,bucket,endpoint,region,object_key,upload_id,
@@ -150,7 +149,7 @@ func TestOSSMultipartDeadReplayIsAuditedIntegration(t *testing.T) {
 		values(30,101,'b','e','r','dead','upload-dead0001','a','x',1,$1,'c','s','dead',12,12,'denied','authorization',now()-interval '1 hour',now())`, strings.Repeat("e", 64)); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{db: pool}
+	server := &Server{db: pool, cfg: config.Config{JWTSecret: "synthetic-oss-replay"}}
 	list := httptest.NewRecorder()
 	server.adminOSSMultipartSessions(list, httptest.NewRequest(http.MethodGet, "/api/v1/admin/infrastructure/oss-multipart-sessions?status=dead", nil))
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"failureClass":"authorization"`) {
@@ -160,11 +159,8 @@ func TestOSSMultipartDeadReplayIsAuditedIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select public_id from oss_multipart_sessions where id=$1`, 30).Scan(&publicID); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-multipart-sessions/"+publicID+"/replay", nil)
-	request.SetPathValue("id", publicID)
-	request = request.WithContext(context.WithValue(request.Context(), claimsContextKey, security.Claims{Subject: 7001}))
-	response := httptest.NewRecorder()
-	server.adminReplayOSSMultipartSession(response, request)
+	replay := authorizedOSSReplay(t, ctx, server, "oss-multipart-sessions", publicID, server.adminReplayOSSMultipartSession)
+	response := replay()
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("replay = %d/%s", response.Code, response.Body.String())
 	}
@@ -177,15 +173,14 @@ func TestOSSMultipartDeadReplayIsAuditedIntegration(t *testing.T) {
 	if err := json.Unmarshal(payload, &audit); err != nil || int64(audit["actorUserId"].(float64)) != 7001 || audit["failureClass"] != "authorization" {
 		t.Fatalf("audit = %#v/%v", audit, err)
 	}
-	conflict := httptest.NewRecorder()
-	server.adminReplayOSSMultipartSession(conflict, request)
+	conflict := replay()
 	if conflict.Code != http.StatusConflict {
 		t.Fatalf("second replay = %d", conflict.Code)
 	}
 }
 
 func TestOSSMultipartCleanupPlansUsePartialIndexesIntegration(t *testing.T) {
-	pool := openOSSMultipartStateTestDB(t)
+	pool := openOSSRecoveryStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if _, err := pool.Exec(ctx, `insert into oss_multipart_sessions(owner_id,bucket,endpoint,region,object_key,upload_id,
@@ -239,7 +234,34 @@ func TestOSSMultipartCleanupPlansUsePartialIndexesIntegration(t *testing.T) {
 	}
 }
 
-func openOSSMultipartStateTestDB(t *testing.T) *pgxpool.Pool {
+// Run the real route prerequisite with a live session. A temporarily unavailable
+// permission store after admission must leave the dead job available for retry.
+func authorizedOSSReplay(t *testing.T, ctx context.Context, server *Server, route, publicID string, handler http.HandlerFunc) func() *httptest.ResponseRecorder {
+	t.Helper()
+	grantTEST044Permissions(t, ctx, server.db, 7001, "admin.config.write")
+	token := mintTEST048Token(t, ctx, server.db, server.cfg, 7001)
+	path := "/api/v1/admin/infrastructure/" + route + "/" + publicID + "/replay"
+	request := func(next http.HandlerFunc) *httptest.ResponseRecorder {
+		return performTEST044Request(ctx, server.requirePermission("admin.config.write", next), token, http.MethodPost, path, "", map[string]string{"id": publicID})
+	}
+	result := request(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := server.db.Exec(ctx, `alter table auth_sessions rename column revoked_at to unavailable_replay_timestamp`); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := server.db.Exec(ctx, `alter table auth_sessions rename column unavailable_replay_timestamp to revoked_at`); err != nil {
+				t.Fatal(err)
+			}
+		}()
+		handler(w, r)
+	})
+	if result.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unavailable permission store = %d/%s", result.Code, result.Body.String())
+	}
+	return func() *httptest.ResponseRecorder { return request(handler) }
+}
+
+func openOSSRecoveryStateTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to run PostgreSQL integration tests")
