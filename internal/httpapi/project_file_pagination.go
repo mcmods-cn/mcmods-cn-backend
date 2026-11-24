@@ -431,7 +431,10 @@ func modrinthVersionProjectFiles(version modrinthProjectVersion, providerProject
 	for index, file := range version.Files {
 		sha1 := canonicalProjectFileDigest(file.Hashes["sha1"], 40)
 		sha512 := canonicalProjectFileDigest(file.Hashes["sha512"], 128)
-		id := firstNonEmpty(sha1, sha512)
+		id := sha1
+		if id == "" {
+			id = sha512
+		}
 		if id == "" || !validProviderDownloadURL(file.URL) {
 			continue
 		}
