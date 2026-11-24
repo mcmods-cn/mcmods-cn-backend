@@ -190,7 +190,6 @@ func catalogSchemaStatements() []string {
 			data jsonb not null default '{}'::jsonb,
 			unique(model_snapshot_id,variant_id)
 		)`,
-		`create index idx_block_entity_model_variants_snapshot on block_entity_model_variants(model_snapshot_id,variant_id)`,
 		`create table catalog_tags (
 			entity_id bigint primary key references catalog_entities(id) on delete cascade,
 			registry text not null,
