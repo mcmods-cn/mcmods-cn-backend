@@ -179,11 +179,29 @@ func TestOSSDeletionReplayAndCompletedKeyReuseAreAuditedIntegration(t *testing.T
 	}
 	assertOSSDeletionState(t, ctx, pool, 21, "pending", 0, "", 0)
 
+	if _, err = pool.Exec(ctx, `insert into oss_object_deletion_outbox(id,bucket,endpoint,region,object_key,status,dead_at,updated_at)
+		values(24,'bucket','oss.example','region','undated','dead',null,now()+interval '1 hour'),
+		      (25,'bucket','oss.example','region','same-time','dead',(select dead_at from oss_object_deletion_outbox where id=22),now())`); err != nil {
+		t.Fatal(err)
+	}
+
 	listRequest := httptest.NewRequest(http.MethodGet, "/api/v1/admin/infrastructure/oss-deletions?status=dead", nil)
 	listResponse := httptest.NewRecorder()
 	server.adminOSSDeletionJobs(listResponse, listRequest)
 	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), `"failureClass":"authorization"`) {
 		t.Fatalf("dead deletion list = %d/%s", listResponse.Code, listResponse.Body.String())
+	}
+
+	var list struct {
+		Data struct {
+			Items []struct{ ObjectKey string } `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(listResponse.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if items := list.Data.Items; len(items) != 3 || items[0].ObjectKey != "same-time" || items[1].ObjectKey != "dead" || items[2].ObjectKey != "undated" {
+		t.Fatalf("dead job order = %v; want newest timestamp, descending id at ties, then missing timestamps", items)
 	}
 
 	var publicID string
@@ -263,6 +281,9 @@ func TestOSSDeletionRecoveryAndAdminPlansUsePartialIndexesIntegration(t *testing
 		id,bucket,endpoint,region,object_key,status,attempts,max_attempts,locked_at,dead_at) values
 		(200001,'bucket','oss.example','region','exhausted','processing',12,12,now()-interval '10 minutes',null),
 		(200002,'bucket','oss.example','region','dead-plan','dead',12,12,null,now());
+		insert into oss_object_deletion_outbox(id,bucket,endpoint,region,object_key,status,attempts,max_attempts,dead_at)
+		select 300000+value,'bucket','oss.example','region','dead-'||value,'dead',12,12,now()-make_interval(secs=>value)
+		from generate_series(1,5000) value;
 		analyze oss_object_deletion_outbox`); err != nil {
 		t.Fatal(err)
 	}
@@ -273,10 +294,10 @@ func TestOSSDeletionRecoveryAndAdminPlansUsePartialIndexesIntegration(t *testing
 	if !strings.Contains(strings.ToLower(exhaustedPlan), "idx_oss_object_deletion_outbox_exhausted") {
 		t.Fatalf("exhausted recovery plan missed partial index:\n%s", exhaustedPlan)
 	}
-	deadPlan := explainOSSDeletionPlan(t, ctx, pool, `select id from oss_object_deletion_outbox
-		where status='dead' order by dead_at desc nulls last,id desc limit 50`)
-	if !strings.Contains(strings.ToLower(deadPlan), "idx_oss_object_deletion_outbox_dead") {
-		t.Fatalf("dead admin plan missed partial index:\n%s", deadPlan)
+	query, args := ossDeletionPageQuery("dead", 50)
+	deadPlan := explainOSSDeletionPlan(t, ctx, pool, query, args...)
+	if !strings.Contains(deadPlan, "Index Scan using idx_oss_object_deletion_outbox_dead") || strings.Contains(deadPlan, "Sort Key:") {
+		t.Fatalf("dead admin page must read the newest jobs directly in index order:\n%s", deadPlan)
 	}
 }
 
@@ -318,9 +339,9 @@ func openOSSDeletionStateTestDB(t *testing.T) *pgxpool.Pool {
 	return fixture.Pool
 }
 
-func explainOSSDeletionPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string) string {
+func explainOSSDeletionPlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, args ...any) string {
 	t.Helper()
-	rows, err := pool.Query(ctx, "explain (analyze,buffers,format text) "+query)
+	rows, err := pool.Query(ctx, "explain (analyze,buffers,format text) "+query, args...)
 	if err != nil {
 		t.Fatal(err)
 	}

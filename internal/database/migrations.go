@@ -489,7 +489,7 @@ func baselineSchemaStatements() []string {
 		`create index idx_oss_object_deletion_outbox_pending
 			on oss_object_deletion_outbox(next_attempt_at,id) where status in ('pending','processing')`,
 		`create index idx_oss_object_deletion_outbox_dead
-			on oss_object_deletion_outbox(dead_at desc,id desc) where status='dead'`,
+			on oss_object_deletion_outbox(dead_at desc nulls last,id desc) where status='dead'`,
 		`create index idx_oss_object_deletion_outbox_exhausted
 			on oss_object_deletion_outbox(updated_at,id)
 			where status in ('pending','processing') and attempts>=max_attempts`,

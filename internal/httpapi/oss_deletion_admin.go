@@ -11,6 +11,16 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+func ossDeletionPageQuery(status string, limit int) (string, []any) {
+	const projection = `select public_id,(select public_id from oss_files where id=oss_file_id),bucket,object_key,reason,status,attempts,max_attempts,
+		failure_class,left(last_error,1000),created_at,updated_at,deleted_at,dead_at,replay_count,last_replayed_at,(select public_id from users where id=last_replayed_by)
+		from oss_object_deletion_outbox`
+	if status == "dead" {
+		return projection + ` where status='dead' order by dead_at desc nulls last,id desc limit $1`, []any{limit}
+	}
+	return projection + ` where status=$1 order by updated_at desc,id desc limit $2`, []any{status, limit}
+}
+
 func (s *Server) adminOSSDeletionJobs(w http.ResponseWriter, r *http.Request) {
 	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
 	if status == "" {
@@ -21,10 +31,8 @@ func (s *Server) adminOSSDeletionJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit := boundedLimit(r.URL.Query().Get("limit"), 50, 100)
-	rows, err := s.db.Query(r.Context(), `select public_id,(select public_id from oss_files where id=oss_file_id),bucket,object_key,reason,status,attempts,max_attempts,
-		failure_class,left(last_error,1000),created_at,updated_at,deleted_at,dead_at,replay_count,last_replayed_at,(select public_id from users where id=last_replayed_by)
-		from oss_object_deletion_outbox where status=$1
-		order by case when status='dead' then dead_at else updated_at end desc nulls last,id desc limit $2`, status, limit)
+	query, args := ossDeletionPageQuery(status, limit)
+	rows, err := s.db.Query(r.Context(), query, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load OSS deletion jobs")
 		return
