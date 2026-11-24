@@ -77,7 +77,7 @@ PostgreSQL 18.6 上，131 条待解析 Mod 关系原需 268 次 SQL，已有目�
 
 前端评论和 Markdown 编辑器的选区由一次 React 提交负责。旧版在全选后把 45 个字符缩为 36 个，原来的末行进入了重载后的草稿。旧版在满 10,000 个码点的评论开头加粗时还会删掉原文末字，插入贴纸则会超过上限。现在编辑器会保留原稿与选区，正文可以缩短后再提交。第一次打开评论线程时，保存收到 503 后可重新打开同一身份的草稿；遇到版本冲突则显示当前内容，等待用户重新编辑。真实 Chromium 在 `c0a445b` 的发行镜像上验证这些操作，错误响应由受控 API 提供。原来只匹配源码字符串的修订测试已换成观察实际请求版本和 409 后再次保存的行为测试。[前后截图和键盘操作](https://github.com/mcmods-cn/mcmods-cn-frontend/blob/7fd7923/docs/ui/README.md#评论上限与编辑失败) · [前端发行镜像](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45406883177)
 
-保留期专项在 PostgreSQL 18.6 和受控 OSS 上等待真实十分钟。有效下载票据期间没有删除操作。到期后两个 Worker 合计删除原对象一次，保留了审计身份。完整数据库门会条件跳过这项长测试；专项结果单列。复跑 `TestAuditGR001DefaultTicketRealExpiryRemovesOriginalPrivateBytesIntegration` 时按[测试环境说明](testing-isolated-environment.md)准备隔离资源。早先的同包旅程还观测到一次原始导入事件被投递两次，业务只产生一份导入修订和一笔配额。该次要求单次投递的运行退出 1。发行检查需要分别核对 stream 序号、数据库尝试、最终修订、通知和配额。[队列交付及恢复](queue-recovery.md)
+保留期专项在 PostgreSQL 18.6 和受控 OSS 上等待真实十分钟。上传票据有效期间，原始上传对象仍可读，针对该对象键的 DELETE 请求为零。到期后两个 Worker 合计删除该原始键一次，并保留了审计身份。完整数据库门会条件跳过这项长测试；专项结果单列。复跑 `TestAuditGR001DefaultTicketRealExpiryRemovesOriginalPrivateBytesIntegration` 时按[测试环境说明](testing-isolated-environment.md)准备隔离资源。早先的同包旅程还观测到一次原始导入事件被投递两次，业务只产生一份导入修订和一笔配额。该次要求单次投递的运行退出 1。发行检查需要分别核对 stream 序号、数据库尝试、最终修订、通知和配额。[队列交付及恢复](queue-recovery.md)
 
 逐文件记录包含三个固定 Git SHA、每份文件的 Git blob、SHA-256、分类、连续阅读区间或格式核验依据。条目保留实际阅读者的职责与调用链记录。将三仓完整 Git 克隆放在同一目录，打开下列命令所在的后端仓库。命令会重新读取记录中的 Git 对象并检查区间，输出中单列运行验证。[逐文件记录](audit/current-review.json.gz) · [核对工具](../tools/audit/review_snapshot.py)
 
