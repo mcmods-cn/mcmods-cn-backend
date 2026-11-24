@@ -350,38 +350,13 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	reviewRequired := catalogMutationReviewRequired(loadReviewConfig(r.Context(), s.db), "create") &&
-		!catalogMutationBypassesReview(claims)
-	if antiAbuseModerationRequired(r) {
-		reviewRequired = true
-	}
 	releaseTextureWorker, acquired := acquireMinecraftTextureProcessing(r.Context())
 	if !acquired {
 		writeError(w, http.StatusTooManyRequests, "texture processing service is busy")
 		return
 	}
 	defer releaseTextureWorker()
-	assetLimit, err := s.userSkinAssetLimit(r.Context(), claims.Subject)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to inspect skin library limit")
-		return
-	}
-	var assetCount int
-	if err = s.db.QueryRow(r.Context(), `select count(*) from skin_assets where owner_id=$1 and status='active'`, claims.Subject).Scan(&assetCount); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to inspect skin library limit")
-		return
-	}
-	if assetCount >= assetLimit {
-		writeError(w, http.StatusForbidden, "skin library asset limit reached")
-		return
-	}
-	var recentCreates int
-	if err = s.db.QueryRow(r.Context(), `select count(*) from skin_assets where owner_id=$1 and created_at>=now()-interval '24 hours'`, claims.Subject).Scan(&recentCreates); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to inspect skin library creation rate")
-		return
-	}
-	if recentCreates >= maximumSkinAssetCreatesPerDay {
-		writeError(w, http.StatusTooManyRequests, "skin library daily creation limit reached")
+	if !checkWebSkinCreationCapacity(w, r, s.db, claims.Subject, skinAssetLimit(claims.PermissionRules)) {
 		return
 	}
 	file, err := resolveTrustedRasterOSSFilePublicID(r.Context(), s.db, request.FileID, ossRasterBindingScope{UploaderID: claims.Subject})
@@ -408,21 +383,31 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "account is unavailable")
 		return
 	}
-	if err = tx.QueryRow(r.Context(), `select count(*) from skin_assets where owner_id=$1 and status='active'`, claims.Subject).Scan(&assetCount); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to inspect skin library limit")
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
 		return
 	}
-	if assetCount >= assetLimit {
-		writeError(w, http.StatusForbidden, "skin library asset limit reached")
+	if !claimsAllow(claims, "skin.library.upload") {
+		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	if err = tx.QueryRow(r.Context(), `select count(*) from skin_assets where owner_id=$1 and created_at>=now()-interval '24 hours'`, claims.Subject).Scan(&recentCreates); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to inspect skin library creation rate")
+	if !checkWebSkinCreationCapacity(w, r, tx, claims.Subject, skinAssetLimit(claims.PermissionRules)) {
 		return
 	}
-	if recentCreates >= maximumSkinAssetCreatesPerDay {
-		writeError(w, http.StatusTooManyRequests, "skin library daily creation limit reached")
+	// Source lookup before decoding protects the read. Hold its current record
+	// through publication as the scan decision or object can change during I/O.
+	currentFile, err := resolveTrustedRasterOSSFilePublicID(r.Context(), tx, request.FileID, ossRasterBindingScope{UploaderID: claims.Subject})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, errOSSFileNotBindable) {
+		writeError(w, http.StatusInternalServerError, "failed to check texture file")
 		return
+	}
+	if err != nil || currentFile.ID != file.ID || currentFile.ObjectKey != file.ObjectKey {
+		writeError(w, http.StatusBadRequest, "texture file is invalid or unavailable")
+		return
+	}
+	reviewRequired := catalogMutationReviewRequired(loadReviewConfig(r.Context(), tx), "create") && !catalogMutationBypassesReview(claims)
+	if antiAbuseModerationRequired(r) {
+		reviewRequired = true
 	}
 	blob, pendingTextureUpload, err := persistSanitizedMinecraftTextureTx(r.Context(), tx, storageClient, storageConfig, texture)
 	if err != nil {
@@ -457,6 +442,30 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 	}
 	pendingTextureUpload = nil
 	writeJSON(w, http.StatusCreated, skinAssetJSON(record, claims))
+}
+
+// Keep the inventory and daily budgets in one snapshot. The daily count also
+// includes creations that were subsequently deleted.
+func readSkinCreationUsage(ctx context.Context, db databaseQuery, userID int64) (active, recent int, err error) {
+	err = db.QueryRow(ctx, `select
+		(select count(*) from skin_assets where owner_id=$1 and status='active'),
+		(select count(*) from skin_assets where owner_id=$1 and created_at>=statement_timestamp()-interval '24 hours')`, userID).Scan(&active, &recent)
+	return
+}
+
+func checkWebSkinCreationCapacity(w http.ResponseWriter, r *http.Request, db databaseQuery, userID int64, limit int) bool {
+	active, recent, err := readSkinCreationUsage(r.Context(), db, userID)
+	switch {
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "failed to inspect skin library usage")
+	case active >= limit:
+		writeError(w, http.StatusForbidden, "skin library asset limit reached")
+	case recent >= maximumSkinAssetCreatesPerDay:
+		writeError(w, http.StatusTooManyRequests, "skin library daily creation limit reached")
+	default:
+		return true
+	}
+	return false
 }
 
 func persistSkinAssetCreationTx(

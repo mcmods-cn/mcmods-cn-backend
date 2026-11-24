@@ -236,13 +236,8 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilInternalError(w)
 		return
 	}
-	var preflightAssetCount int
-	if err = s.db.QueryRow(r.Context(), `select count(*) from skin_assets where owner_id=$1 and status='active'`, userID).Scan(&preflightAssetCount); err != nil {
-		writeYggdrasilInternalError(w)
-		return
-	}
-	var preflightRecentCreates int
-	if err = s.db.QueryRow(r.Context(), `select count(*) from skin_assets where owner_id=$1 and created_at>=now()-interval '24 hours'`, userID).Scan(&preflightRecentCreates); err != nil {
+	preflightAssetCount, preflightRecentCreates, err := readSkinCreationUsage(r.Context(), s.db, userID)
+	if err != nil {
 		writeYggdrasilInternalError(w)
 		return
 	}
@@ -336,12 +331,8 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 		where owner_id=$1 and blob_hash=$2 and kind=$3 and model=$4 and status='active' and review_status='approved'
 		order by id desc limit 1 for update`, userID, texture.Hash, kind, model).Scan(&assetID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		var assetCount, recentCreates int
-		if err = tx.QueryRow(r.Context(), `select count(*) from skin_assets where owner_id=$1 and status='active'`, userID).Scan(&assetCount); err != nil {
-			writeYggdrasilInternalError(w)
-			return
-		}
-		if err = tx.QueryRow(r.Context(), `select count(*) from skin_assets where owner_id=$1 and created_at>=now()-interval '24 hours'`, userID).Scan(&recentCreates); err != nil {
+		assetCount, recentCreates, usageErr := readSkinCreationUsage(r.Context(), tx, userID)
+		if usageErr != nil {
 			writeYggdrasilInternalError(w)
 			return
 		}
