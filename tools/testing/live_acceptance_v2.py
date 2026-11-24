@@ -220,8 +220,11 @@ def sql(record, database, text):
 
 
 def source_files():
-    return {str(path.relative_to(BE)): fingerprint(path) for path in BE.rglob('*.go')
-            if '.git' not in path.parts and 'vendor' not in path.parts}
+    sources = {str(path.relative_to(BE)): fingerprint(path) for path in BE.rglob('*.go')
+               if '.git' not in path.parts and 'vendor' not in path.parts}
+    for name in ('go.mod', 'go.sum'):
+        sources[name] = fingerprint(BE / name)
+    return sources
 
 
 def frontend_sync():
@@ -264,7 +267,7 @@ def build_current():
     before = source_files()
     with (SCOPE / 'build.private.log').open('w') as output:
         result = subprocess.run(['go', 'build', '-p', '1', '-o', str(SCOPE / 'backend-current'), '.'],
-                                cwd=BE, env=os.environ | {'GOMAXPROCS': '2'}, stdout=output,
+                                cwd=BE, env=os.environ | {'GOMAXPROCS': '2', 'GOWORK': 'off'}, stdout=output,
                                 stderr=subprocess.STDOUT, timeout=180)
     if result.returncode or before != source_files():
         raise RuntimeError('current Go build failed or source changed while compiling')
@@ -388,7 +391,7 @@ def prepare():
     record['environment_sha256'] = fingerprint(SCOPE/'environment.json')
     private_json(SCOPE/'scope.json',record)
     build_current()
-    init_env = os.environ | environment | {'GOMAXPROCS': '2'}
+    init_env = os.environ | environment | {'GOMAXPROCS': '2', 'GOWORK': 'off'}
     with (SCOPE / 'initialize.private.log').open('w') as output:
         result = subprocess.run(['go', 'run', '-p', '1', './cmd/db-initialize', '--bootstrap-admin'], cwd=BE, env=init_env,
                                 stdout=output, stderr=subprocess.STDOUT, timeout=180)
@@ -719,7 +722,7 @@ def cleanup():
         temporary.chmod(0o600)
         with (SCOPE/'namespace-cleanup.private.log').open('w') as output:
             completed=subprocess.run(['go','run','-p','1',str(temporary),str(SCOPE/'environment.json')],
-                cwd=BE,env=os.environ|{'GOMAXPROCS':'2'},stdout=output,stderr=subprocess.STDOUT,timeout=60)
+                cwd=BE,env=os.environ|{'GOMAXPROCS':'2', 'GOWORK':'off'},stdout=output,stderr=subprocess.STDOUT,timeout=60)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

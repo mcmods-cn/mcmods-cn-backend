@@ -97,7 +97,7 @@ npm run dev -- --hostname 127.0.0.1 --port 3001
 这项测试使用实际 API、session cookie 和持久化；常规 `test:browser` 使用受控 API fixture，边界不同。
 浏览器二进制应通过项目 Playwright 1.62.1 安装；设置与安装位置一致的 `PLAYWRIGHT_BROWSERS_PATH`。
 
-在支持 pidfd 的 Linux 上可用配套驱动统一管理账号旅程。为前端从提交导出独立副本，保留原 `package-lock.json`，解包时排除 `.env*`。在副本运行 `npm ci`，并安装 Playwright 所需的 Chromium。后端源、前端源和本次运行目录各自独立。[驱动入口](../tools/testing/live_acceptance_v2.py)
+在支持 pidfd 的 Linux 上可用 Python 3.10+ 运行账号旅程驱动。驱动使用当前后端模块独立构建，以 Go 源文件、`go.mod` 和 `go.sum` 的哈希判断专属二进制能否复用。为前端从提交导出独立副本，保留原 `package-lock.json`，解包时排除 `.env*`。在副本运行 `npm ci`，并安装 Playwright 所需的 Chromium。后端源、前端源和本次运行目录各自独立。[驱动入口](../tools/testing/live_acceptance_v2.py)
 
 ```sh
 frontend="$(cd ../mcmods-cn-frontend && pwd)"

@@ -155,6 +155,24 @@ class AcceptanceGuardTest(unittest.TestCase):
             live.copy_guard(self.parent)
         self.assertEqual(json.loads(marker.read_text()), value)
 
+    def test_backend_module_inputs_change_the_prepared_source_receipt(self):
+        source = self.root / "backend-source"
+        source.mkdir()
+        (source / "main.go").write_text("package main\n")
+        (source / "go.mod").write_text("module example.invalid/fixture\ngo 1.21\n")
+        (source / "go.sum").write_text("")
+        with mock.patch.object(live, "BE", source):
+            baseline = live.source_files()
+            for filename in ("go.mod", "go.sum"):
+                with self.subTest(filename=filename):
+                    module_file = source / filename
+                    original = module_file.read_bytes()
+                    module_file.write_bytes(original + b"\n")
+                    current = live.source_files()
+                    self.assertNotEqual(baseline, current)
+                    self.assertEqual(current["main.go"], baseline["main.go"])
+                    module_file.write_bytes(original)
+
     def test_frontend_components_are_copied_and_fingerprinted_from_a_fresh_source(self):
         live.SCOPE.mkdir()
         component = live.FE / "components" / "skin" / "Canvas.tsx"
