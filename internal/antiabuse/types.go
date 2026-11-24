@@ -1,6 +1,11 @@
 package antiabuse
 
-import "time"
+import (
+	"context"
+	"time"
+
+	"mcmods-cn-backend/internal/querycache"
+)
 
 type Outcome string
 
@@ -75,6 +80,16 @@ const (
 	ContentClassCreatorTeamRoleMetadata
 )
 
+// ContentReservation lets a conditional writer release only its own duplicate
+// claim after rejecting the write. Rate limits and recorded fingerprints remain.
+type ContentReservation struct {
+	lease *querycache.ThrottleLease
+}
+
+func (r *ContentReservation) Release(ctx context.Context) error {
+	return r.lease.Release(ctx)
+}
+
 type Evaluation struct {
 	UserID    int64
 	SessionID string
@@ -98,6 +113,8 @@ type Evaluation struct {
 	Administrator    bool
 	CrawlerClass     CrawlerClass
 	Now              time.Time
+
+	ConditionalContent *ContentReservation
 }
 
 type Decision struct {

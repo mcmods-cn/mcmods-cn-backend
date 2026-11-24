@@ -459,7 +459,20 @@ func (s *Service) duplicateRisk(ctx context.Context, input Evaluation, normalize
 	// across instances; the bounded local cache is the single-instance fallback.
 	if strings.TrimSpace(input.IdempotencyKey) == "" {
 		claimKey := s.privateHash("content-claim", strconv.FormatInt(input.UserID, 10)+":"+input.Action+":"+exact)
-		if !s.cache.ClaimThrottle(ctx, "anti-abuse:content-claim:"+claimKey, 30*time.Second) {
+		key := "anti-abuse:content-claim:" + claimKey
+		const window = 30 * time.Second
+		var claimed bool
+		if reservation := input.ConditionalContent; reservation != nil {
+			var err error
+			reservation.lease, claimed, err = s.cache.ClaimThrottleLease(ctx, key, window)
+			if err != nil {
+				// Without an owner token we can still reserve the content until expiry.
+				claimed = s.cache.ClaimThrottle(ctx, key, window)
+			}
+		} else {
+			claimed = s.cache.ClaimThrottle(ctx, key, window)
+		}
+		if !claimed {
 			return 100, []string{"concurrent_exact_duplicate"}, true, nil
 		}
 	}

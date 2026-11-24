@@ -26,12 +26,16 @@ const (
 
 type antiAbuseResponseRecorder struct {
 	http.ResponseWriter
-	status int
+	status                int
+	onPreconditionFailure func()
 }
 
 func (r *antiAbuseResponseRecorder) WriteHeader(status int) {
 	if r.status == 0 {
 		r.status = status
+		if r.onPreconditionFailure != nil && (status == http.StatusConflict || status == http.StatusPreconditionRequired) {
+			r.onPreconditionFailure()
+		}
 	}
 	r.ResponseWriter.WriteHeader(status)
 }
@@ -100,6 +104,11 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 		ChallengeProof: r.Header.Get("X-Anti-Abuse-Challenge"), IdempotencyKey: submissionKey, Administrator: claimsAllow(claims, "admin.*"),
 		CrawlerClass: crawlerClassFromRequest(r), Now: time.Now(),
 	}
+	// This route emits 409/428 before its revision can commit. Permit an
+	// immediate retry of the same draft after the editor compares revisions.
+	if r.Pattern == updateCreatorRoute {
+		input.ConditionalContent = &antiabuse.ContentReservation{}
+	}
 	decision, err := s.antiAbuse.Evaluate(r.Context(), input)
 	if err != nil {
 		// Evaluate handles optional signals itself. An unknown account restriction
@@ -133,6 +142,17 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 		r = r.WithContext(context.WithValue(r.Context(), antiAbuseModerationContextKey, true))
 	}
 	recorder := &antiAbuseResponseRecorder{ResponseWriter: w}
+	if reservation := input.ConditionalContent; reservation != nil {
+		recorder.onPreconditionFailure = func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 3*time.Second)
+			defer cancel()
+			if err := reservation.Release(ctx); err != nil {
+				s.writeAppLog(ctx, "system", "warn", "anti_abuse_claim_release_failed", action, claims.Subject, r,
+					0, 0, map[string]any{"errorType": fmt.Sprintf("%T", err)})
+			}
+		}
+		input.ConditionalContent = nil
+	}
 	next.ServeHTTP(recorder, r)
 	if recorder.status >= 200 && recorder.status < 400 {
 		s.antiAbuse.EnqueueSuccess(input, decision)

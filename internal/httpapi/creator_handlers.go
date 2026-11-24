@@ -435,6 +435,8 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"publicId": publicID, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID, "reviewStatus": status})
 }
 
+const updateCreatorRoute = "PUT /api/v1/creators/{publicId}"
+
 func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.TrimSpace(strings.ToLower(r.PathValue("publicId")))
 	var request struct {

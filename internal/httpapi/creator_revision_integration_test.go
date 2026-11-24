@@ -97,26 +97,40 @@ func TestCreatorProfileEditUsesTheRevisionReadByTheEditorIntegration(t *testing.
 	if string(auditOSS001CreatorWriteFacts(t, f, id)) != string(before) || read(f.otherEditor) != a.Revision {
 		t.Fatal("a missing or stale baseline changed the published profile or revision log")
 	}
-	f.require(t, f.otherEditor, http.MethodPut, path, update("Explicitly compared draft", a.Revision), http.StatusOK)
+	f.require(t, f.otherEditor, http.MethodPut, path, update("Other draft", a.Revision), http.StatusOK)
 }
 
 func TestCreatorProfileEditWaitsForFirstPublicationIntegration(t *testing.T) {
 	f := newAuditFixGRFixture(t)
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "creator.create")
 	created := decodeTEST022Data[struct {
-		PublicID string `json:"publicId"`
-		Status   string `json:"reviewStatus"`
+		PublicID   string `json:"publicId"`
+		RevisionID string `json:"revisionId"`
+		Status     string `json:"reviewStatus"`
 	}](t, f.require(t, f.editor, http.MethodPost, "/api/v1/creators", map[string]any{
 		"kind": "author", "name": "Unpublished author", "defaultLocale": "en-US",
 	}, http.StatusCreated))
 	if created.Status != "pending" {
 		t.Fatal("expected an unpublished profile")
 	}
+	// The initial proposal closed without a publication. The next publishing
+	// transaction can now create a new revision after the waiting edit starts.
+	f.require(t, f.reviewer, http.MethodPatch, "/api/v1/content-revisions/"+created.RevisionID,
+		map[string]string{"status": "rejected", "note": "Needs additional evidence before first publication"}, http.StatusOK)
 	path := "/api/v1/creators/" + created.PublicID
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "creator.edit."+created.PublicID)
 	auditOSS001PublishFixturePermissions(t, f, f.editor)
 
-	publication, err := f.db.Begin(f.ctx)
+	// The ordinary import fixture has one application connection. Use its same
+	// schema on independent connections for the publisher and the lock observer.
+	cfg := f.db.Config()
+	cfg.MaxConns = 2
+	control, err := pgxpool.NewWithConfig(f.ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	publication, err := control.Begin(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +142,26 @@ func TestCreatorProfileEditWaitsForFirstPublicationIntegration(t *testing.T) {
 	waiter := auditCompletionAsyncJSON(f.test013Fixture, f.editor, http.MethodPut, path, map[string]any{
 		"kind": "author", "name": "Draft from before publication", "defaultLocale": "en-US", "baseRevisionId": "",
 	})
-	auditCompletionAwaitLocks(t, f.test013Fixture, 1)
+	waitCtx, cancel := context.WithTimeout(f.ctx, 5*time.Second)
+	defer cancel()
+	for {
+		var blocked bool
+		err := control.QueryRow(waitCtx, `select exists(select 1 from pg_stat_activity where datname=current_database()
+			and wait_event_type='Lock' and $1::int=any(pg_blocking_pids(pid)))`, publication.Conn().PgConn().PID()).Scan(&blocked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		select {
+		case result := <-waiter:
+			t.Fatalf("edit returned before the publication lock was observed: %d %v", result.status, result.err)
+		case <-waitCtx.Done():
+			t.Fatal(waitCtx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	revision, err := createContentRevisionTx(f.ctx, publication, createContentRevisionParams{
 		EntityType: "author", EntityID: creatorID, AggregateType: "creator", AggregateKey: created.PublicID,
 		Snapshot: []byte(`{"kind":"author","name":"First publication"}`), ActorID: f.userIDs[f.reviewer],

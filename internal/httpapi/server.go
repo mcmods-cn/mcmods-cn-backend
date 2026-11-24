@@ -244,7 +244,7 @@ func (s *Server) routes() []string {
 	s.mux.HandleFunc("POST /api/v1/creators", s.requirePermission("creator.create", s.createCreator))
 	s.mux.HandleFunc("POST /api/v1/creator-imports", s.requirePermission("creator.create", s.importCreator))
 	s.mux.HandleFunc("GET /api/v1/creators/{publicId}", s.optionalAuth(s.creatorDetail))
-	s.mux.HandleFunc("PUT /api/v1/creators/{publicId}", s.requireAuth(s.updateCreator))
+	s.mux.HandleFunc(updateCreatorRoute, s.requireAuth(s.updateCreator))
 	s.mux.HandleFunc("PUT /api/v1/creators/{publicId}/members", s.requireAuth(s.updateCreatorMembers))
 	s.mux.HandleFunc("POST /api/v1/creators/{publicId}/claims", s.requirePermission("creator.claim", s.claimCreator))
 	s.mux.HandleFunc("GET /api/v1/creator-roles", s.optionalAuth(s.creatorRoles))
