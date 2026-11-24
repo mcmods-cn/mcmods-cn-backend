@@ -836,11 +836,7 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	err = tx.QueryRow(r.Context(), `select id,target_type,target_public_id,reporter_id,target_actor_id,target_actor_role from reports
 		where public_id=$1 and status='in_review' and claimed_by=$2 for update`, r.PathValue("id"), claims.Subject).
 		Scan(&reportID, &targetType, &targetID, &reporterID, &targetActor.ID, &targetActor.Role)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, 409, "举报未由你领取、责任已转交或已经处理")
-		return
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 500, "读取举报失败")
 		return
 	}
@@ -848,10 +844,18 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	if request.DeleteTarget {
 		required = append(required, "report.action.delete")
 	}
+	if request.BanUserID != "" {
+		required = append(required, "report.action.ban")
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		if requireGovernancePermissions(w, r, tx, required...) {
+			writeError(w, http.StatusConflict, "举报未由你领取、责任已转交或已经处理")
+		}
+		return
+	}
 	var banTarget banSubject
 	var targetErr error
 	if request.BanUserID != "" {
-		required = append(required, "report.action.ban")
 		banTarget, targetErr = lockBanSubjectTx(r.Context(), tx, request.BanUserID, claims.Subject)
 		if targetErr != nil && !errors.Is(targetErr, errBanSubjectMissing) {
 			writeGovernanceActionError(w, targetErr)
