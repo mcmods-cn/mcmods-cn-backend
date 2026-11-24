@@ -401,17 +401,11 @@ func resolveMetricPageKey(ctx context.Context, queryer metricPageQueryer, target
 }
 
 func (s *Server) loadRecentMetricEditors(ctx context.Context, target metricTarget) ([]contentMetricActor, error) {
-	rows, err := s.db.Query(ctx, `with edit_events as (
-		select revision.created_by actor_id,revision.created_at
-		from content_revisions revision join change_requests request on request.proposed_revision_id=revision.id
-		where revision.entity_type=$1 and revision.entity_id=$2 and request.status='approved' and revision.created_by is not null
-		union all
-		select imported.submitted_by,imported.created_at
-		from resource_import_snapshots snapshot join catalog_import_revisions imported on imported.id=snapshot.revision_id
-		where $1='resource' and snapshot.resource_id=$2 and imported.status in ('ready','partial','superseded')
-		and imported.submitted_by is not null
-	), actor_summary as (
-		select actor_id,max(created_at) occurred_at,count(*) count from edit_events group by actor_id
+	rows, err := s.db.Query(ctx, `with actor_summary as (
+		select actor_id,max(created_at) occurred_at,count(*) count
+		from public_content_metric_edits
+		where entity_type=$1 and entity_id=$2 and actor_id is not null
+		group by actor_id
 	)
 	select account.public_id,account.username,account.avatar_url,summary.occurred_at,summary.count
 	from actor_summary summary join users account on account.id=summary.actor_id

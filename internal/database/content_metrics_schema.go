@@ -67,11 +67,25 @@ func contentMetricsSchemaStatements() []string {
 			end if;
 		end;
 		$$ language plpgsql`,
+		`create view public_content_metric_edits as
+			select revision.entity_type,revision.entity_id,revision.created_by actor_id,revision.created_at
+			from content_revisions revision
+			where exists(select 1 from change_requests request
+				where request.proposed_revision_id=revision.id and request.status='approved')
+			union all
+			select 'resource',snapshot.resource_id,imported.submitted_by,imported.created_at
+			from resource_import_snapshots snapshot
+			join catalog_import_revisions imported on imported.id=snapshot.revision_id
+			join mods source on source.id=imported.mod_id and source.review_status='approved'
+			join mod_content_versions version on version.id=imported.target_version_id
+				and version.mod_id=source.id and version.status='active'
+			where imported.activated_at is not null and (
+				(imported.is_active and imported.status in ('ready','partial'))
+				or imported.status='superseded')`,
 		`create or replace function refresh_content_route_metrics(target_route_id bigint) returns void as $$
 		declare
 			target_type text; target_id bigint; route_created_at timestamptz;
-			direct_views bigint; child_views bigint; manual_edits bigint; imported_edits bigint;
-			last_manual_edit timestamptz; last_import_edit timestamptz;
+			direct_views bigint; child_views bigint; public_edits bigint; last_public_edit timestamptz;
 		begin
 			select entity_type,internal_id,created_at into target_type,target_id,route_created_at
 			from public_routes where id=target_route_id;
@@ -88,26 +102,16 @@ func contentMetricsSchemaStatements() []string {
 				where binding.mod_id=target_id;
 			end if;
 
-			select count(*),max(revision.created_at) into manual_edits,last_manual_edit
-			from content_revisions revision
-			join change_requests request on request.proposed_revision_id=revision.id and request.status='approved'
-			where revision.entity_type=target_type and revision.entity_id=target_id;
-			imported_edits:=0;
-			last_import_edit:=null;
-			if target_type='resource' then
-				select count(distinct imported.id),max(imported.created_at)
-				into imported_edits,last_import_edit
-				from resource_import_snapshots snapshot
-				join catalog_import_revisions imported on imported.id=snapshot.revision_id
-				where snapshot.resource_id=target_id and imported.status in ('ready','partial','superseded');
-			end if;
+			select count(*),max(created_at) into public_edits,last_public_edit
+			from public_content_metric_edits
+			where entity_type=target_type and entity_id=target_id;
 
 			insert into content_route_metrics(
 				object_route_id,direct_view_count,child_view_count,total_view_count,edit_count,
 				created_at,last_edited_at,updated_at
 			) values(
-				target_route_id,direct_views,child_views,direct_views+child_views,manual_edits+imported_edits,
-				route_created_at,greatest(last_manual_edit,last_import_edit),now()
+				target_route_id,direct_views,child_views,direct_views+child_views,public_edits,
+				route_created_at,last_public_edit,now()
 			) on conflict(object_route_id) do update set
 				direct_view_count=excluded.direct_view_count,
 				child_view_count=excluded.child_view_count,
@@ -158,7 +162,6 @@ func contentMetricsSchemaStatements() []string {
 		`create or replace function enqueue_metrics_from_import_resolution() returns trigger as $$
 		declare route_id bigint;
 		begin
-			if new.status=old.status then return new; end if;
 			for route_id in
 				select distinct route.id from resource_import_snapshots snapshot
 				join public_routes route on route.entity_type='resource' and route.internal_id=snapshot.resource_id
@@ -170,8 +173,10 @@ func contentMetricsSchemaStatements() []string {
 			return new;
 		end;
 		$$ language plpgsql`,
-		`create trigger trg_catalog_import_revisions_metrics after update of status on catalog_import_revisions
-			for each row execute function enqueue_metrics_from_import_resolution()`,
+		`create trigger trg_catalog_import_revisions_metrics after update of status,is_active,activated_at
+			on catalog_import_revisions for each row when (
+				(old.status,old.is_active,old.activated_at) is distinct from (new.status,new.is_active,new.activated_at))
+			execute function enqueue_metrics_from_import_resolution()`,
 		`create index idx_content_unique_views_route_recent_user
 			on content_unique_views(object_route_id,last_seen_at desc,viewer_user_id)
 			where viewer_user_id is not null`,
