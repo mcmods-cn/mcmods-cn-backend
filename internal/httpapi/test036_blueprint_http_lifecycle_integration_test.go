@@ -471,6 +471,33 @@ func TestTEST036GoldenUploadNormalizeReviewConvertAndDownloadFullHTTPIntegration
 	}
 }
 
+func TestBlueprintDetailScopesProcessingNotesAndStorageMetadata(t *testing.T) {
+	f := newTEST036Fixture(t)
+	var publicID string
+	const note = "synthetic converter error"
+	if err := f.db.QueryRow(f.ctx, `insert into blueprints(owner_id,title,source_format,status,review_status,original_object_key,last_error)
+		values($1,'Detail projection','nbt','failed','approved','synthetic/original.nbt',$2) returning public_id`, f.userIDs[f.editor], note).Scan(&publicID); err != nil {
+		t.Fatal(err)
+	}
+	for _, viewer := range []struct {
+		name, token, expectedNote string
+	}{
+		{"visitor", "", ""}, {"other editor", f.otherEditor, ""}, {"owner", f.editor, note},
+	} {
+		t.Run(viewer.name, func(t *testing.T) {
+			data := decodeTEST022Data[map[string]any](t, f.require(t, viewer.token, http.MethodGet, "/api/v1/blueprints/"+publicID, nil, http.StatusOK))
+			if data["lastError"] != viewer.expectedNote || data["id"] != publicID || data["status"] != "failed" {
+				t.Fatalf("detail status=%v id=%v note=%v", data["status"], data["id"], data["lastError"])
+			}
+			for _, key := range []string{"originalObjectKey", "originalFileId"} {
+				if _, found := data[key]; found {
+					t.Fatalf("detail includes internal storage field %s", key)
+				}
+			}
+		})
+	}
+}
+
 func TestTEST036UnknownNBTStateCannotSilentlyPublishEmptyBlueprintFullHTTPIntegration(t *testing.T) {
 	f := newTEST036Fixture(t)
 	raw, _, err := encodeGzipNBT(map[string]any{

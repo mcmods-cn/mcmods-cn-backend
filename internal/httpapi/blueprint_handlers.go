@@ -583,15 +583,18 @@ func (s *Server) blueprintRequiredModsByID(ctx context.Context, blueprintIDs []i
 
 func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
-	var blueprintID, ownerID, originalFileID int64
-	var title, description, format, status, reviewStatus, originalKey, normalizedKey, coverKey, lastError, username, avatar string
+	claims := currentClaims(r)
+	admin := claimsAllow(claims, "admin.*")
+	var blueprintID, ownerID int64
+	var title, description, format, status, reviewStatus, normalizedKey, coverKey, lastError, username, avatar string
 	var sizeX, sizeY, sizeZ, paletteCount, entityCount, dataVersion int
 	var blockCount int64
 	var createdAt, updatedAt time.Time
-	err := s.db.QueryRow(r.Context(), `select b.id,b.owner_id,coalesce(b.original_file_id,0),b.title,b.description_markdown,b.source_format,b.status,b.review_status,b.original_object_key,
-		b.normalized_object_key,b.cover_object_key,b.size_x,b.size_y,b.size_z,b.block_count,b.palette_count,b.entity_count,b.data_version,b.last_error,b.created_at,b.updated_at,
-		u.username,u.avatar_url from blueprints b join users u on u.id=b.owner_id where b.public_id=$1 and b.status<>'deleted'`, publicID).
-		Scan(&blueprintID, &ownerID, &originalFileID, &title, &description, &format, &status, &reviewStatus, &originalKey, &normalizedKey, &coverKey, &sizeX, &sizeY, &sizeZ, &blockCount, &paletteCount, &entityCount, &dataVersion, &lastError, &createdAt, &updatedAt, &username, &avatar)
+	err := s.db.QueryRow(r.Context(), `select b.id,b.owner_id,b.title,b.description_markdown,b.source_format,b.status,b.review_status,
+		b.normalized_object_key,b.cover_object_key,b.size_x,b.size_y,b.size_z,b.block_count,b.palette_count,b.entity_count,b.data_version,case when b.owner_id=$2 or $3 then b.last_error else '' end,b.created_at,b.updated_at,
+		u.username,u.avatar_url from blueprints b join users u on u.id=b.owner_id where b.public_id=$1 and b.status<>'deleted'
+		and (b.review_status in ('not_required','approved') or b.owner_id=$2 or $3)`, publicID, claims.Subject, admin).
+		Scan(&blueprintID, &ownerID, &title, &description, &format, &status, &reviewStatus, &normalizedKey, &coverKey, &sizeX, &sizeY, &sizeZ, &blockCount, &paletteCount, &entityCount, &dataVersion, &lastError, &createdAt, &updatedAt, &username, &avatar)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "蓝图不存在")
 		return
@@ -604,11 +607,6 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 	avatar, err = s.resolveStoredOSSObjectAccessURL(r.Context(), avatar)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "failed to generate blueprint uploader avatar URL")
-		return
-	}
-	claims := currentClaims(r)
-	if reviewStatus != "not_required" && reviewStatus != "approved" && claims.Subject != ownerID && !claimsAllow(claims, "admin.*") {
-		writeError(w, http.StatusNotFound, "蓝图不存在")
 		return
 	}
 	variants, err := s.blueprintVariants(r.Context(), blueprintID)
@@ -638,9 +636,9 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": publicID, "title": title, "description": description, "sourceFormat": format, "status": status, "reviewStatus": reviewStatus, "lastError": lastError,
 		"size": []int{sizeX, sizeY, sizeZ}, "blockCount": blockCount, "paletteCount": paletteCount, "entityCount": entityCount, "dataVersion": dataVersion,
-		"createdAt": createdAt, "updatedAt": updatedAt, "canEdit": claims.Subject == ownerID || claimsAllow(claims, "admin.*"),
+		"createdAt": createdAt, "updatedAt": updatedAt, "canEdit": claims.Subject == ownerID || admin,
 		"uploader": map[string]any{"id": ownerID, "username": username, "avatarUrl": avatar},
-		"variants": variants, "materials": materials, "requiredMods": requiredModsByID[blueprintID], "assetRevisions": assetRevisions, "renderAvailable": normalizedKey != "", "originalFileId": originalFileID, "originalObjectKey": originalKey,
+		"variants": variants, "materials": materials, "requiredMods": requiredModsByID[blueprintID], "assetRevisions": assetRevisions, "renderAvailable": normalizedKey != "",
 		"coverUrl": blueprintCoverPath(publicID, updatedAt), "coverGenerated": strings.Contains(coverKey, "/cover/generated-"),
 	})
 }
@@ -1067,19 +1065,27 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 	}
 	format := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(request.Format)), ".")
 	if format != "nbt" && format != "schem" && format != "litematic" {
-		writeError(w, http.StatusBadRequest, "目前支持转换为 nbt 或 schem")
+		writeError(w, http.StatusBadRequest, "目前支持转换为 nbt、schem 或 litematic")
 		return
 	}
 	claims := currentClaims(r)
 	var blueprintID int64
-	if err := s.db.QueryRow(r.Context(), `select id from blueprints where public_id=$1 and status in ('ready','partial')
-		and (review_status in ('not_required','approved') or owner_id=$2 or $3)`, publicID, claims.Subject, claimsAllow(claims, "admin.*")).Scan(&blueprintID); err != nil {
+	var existingID *string
+	err := s.db.QueryRow(r.Context(), `select b.id, (select v.public_id from blueprint_variants v
+		where v.blueprint_id=b.id and v.format=$4 and v.status='ready' order by v.original desc,v.created_at,v.public_id limit 1)
+		from blueprints b where b.public_id=$1 and b.status in ('ready','partial')
+		and (b.review_status in ('not_required','approved') or b.owner_id=$2 or $3)`, publicID, claims.Subject, claimsAllow(claims, "admin.*"), format).Scan(&blueprintID, &existingID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "蓝图尚未准备完成")
 		return
 	}
-	var existingID string
-	if s.db.QueryRow(r.Context(), `select public_id from blueprint_variants where blueprint_id=$1 and format=$2 and status='ready' order by original desc,created_at limit 1`, blueprintID, format).Scan(&existingID) == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "variantId": existingID, "alreadyExists": true})
+	if err != nil {
+		logBlueprintReadFailure(publicID, "conversion", err)
+		writeError(w, http.StatusInternalServerError, "读取蓝图格式失败")
+		return
+	}
+	if existingID != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "variantId": *existingID, "alreadyExists": true})
 		return
 	}
 	jobID, err := s.enqueueBlueprintJob(r.Context(), blueprintID, claims.Subject, "convert", format, r)

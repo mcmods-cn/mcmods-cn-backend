@@ -76,6 +76,16 @@ func TestBlueprintDerivedReadFailuresAreObservableIntegration(t *testing.T) {
 	}
 
 	server := &Server{db: pool}
+	disconnected, cancelRead := context.WithCancel(ctx)
+	cancelRead()
+	conversion := httptest.NewRequest(http.MethodPost, "/api/v1/blueprints/arch019-blueprint/convert", strings.NewReader(`{"format":"nbt"}`)).WithContext(disconnected)
+	conversion.SetPathValue("publicId", "arch019-blueprint")
+	conversionResult := httptest.NewRecorder()
+	server.convertBlueprint(conversionResult, conversion)
+	if conversionResult.Code != http.StatusInternalServerError {
+		t.Fatalf("database read failed before conversion, got %d", conversionResult.Code)
+	}
+
 	if _, err = server.blueprintAssetRevisions(ctx, 1); err == nil {
 		t.Fatal("asset revision query failure was converted to an empty list")
 	}
