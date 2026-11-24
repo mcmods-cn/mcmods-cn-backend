@@ -197,7 +197,7 @@ func (s *Server) publicInlineOSSFile(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(), `select object_key,source from oss_files
 		where public_id=$1 and status='active' and scan_status in ('clean','trusted_generated')`, publicID).
 		Scan(&objectKey, &source)
-	if errors.Is(err, pgx.ErrNoRows) || !isPublicInlineOSSFileSource(source) {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !isPublicInlineOSSFileSource(source)) {
 		writeError(w, http.StatusNotFound, "public OSS file does not exist")
 		return
 	}

@@ -336,7 +336,7 @@ func (s *Server) simpleProjectIcon(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(), `select icon_url,coalesce(review_status='approved' or submitted_by=0,false) from simple_projects
 		where project_type=$1 and slug=$2 and (review_status='approved' or submitted_by=$3)`,
 		projectType, siteID, currentClaims(r).Subject).Scan(&iconURL, &parentAllowsAnonymous)
-	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && strings.TrimSpace(iconURL) == "") {
 		writeError(w, http.StatusNotFound, "project icon does not exist")
 		return
 	}

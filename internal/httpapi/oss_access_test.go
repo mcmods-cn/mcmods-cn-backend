@@ -2,9 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestResolveOSSObjectAccessLegacyESAModeUsesPresignedURL(t *testing.T) {
@@ -76,5 +80,33 @@ func TestResolveOSSObjectAccessPresigned(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(access.URL), "x-oss-signature") {
 		t.Fatalf("URL is not OSS-signed: %q", access.URL)
+	}
+}
+
+func TestPublicMediaReadFailureIsReported(t *testing.T) {
+	pool, err := pgxpool.New(t.Context(), "postgres://unused@127.0.0.1:1/unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	server := &Server{db: pool}
+	routes := http.NewServeMux()
+	routes.HandleFunc("GET /api/v1/mods/{siteId}/icon", server.publicModIcon)
+	routes.HandleFunc("GET /api/v1/modpacks/{siteId}/icon", server.modpackIcon)
+	routes.HandleFunc("GET /api/v1/content-projects/{projectType}/{siteId}/icon", server.simpleProjectIcon)
+	routes.HandleFunc("GET /api/v1/oss/files/{publicId}/content", server.publicInlineOSSFile)
+	for _, path := range []string{
+		"/api/v1/mods/sample/icon",
+		"/api/v1/modpacks/sample/icon",
+		"/api/v1/content-projects/map/sample/icon",
+		"/api/v1/oss/files/sample/content",
+	} {
+		t.Run(path, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			routes.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+			if response.Code != http.StatusInternalServerError || response.Header().Get("Location") != "" {
+				t.Fatalf("media lookup with unavailable storage returned %d, redirect %q", response.Code, response.Header().Get("Location"))
+			}
+		})
 	}
 }

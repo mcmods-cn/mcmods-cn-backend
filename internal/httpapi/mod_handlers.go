@@ -642,7 +642,7 @@ func (s *Server) publicProjectIcon(w http.ResponseWriter, r *http.Request, proje
 	var iconURL string
 	var parentAllowsAnonymous bool
 	err := s.db.QueryRow(r.Context(), query, siteID, currentClaims(r).Subject).Scan(&iconURL, &parentAllowsAnonymous)
-	if errors.Is(err, pgx.ErrNoRows) || strings.TrimSpace(iconURL) == "" {
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && strings.TrimSpace(iconURL) == "") {
 		writeError(w, http.StatusNotFound, projectKind+" icon does not exist")
 		return
 	}
