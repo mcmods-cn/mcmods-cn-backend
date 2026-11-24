@@ -24,6 +24,7 @@ import (
 const (
 	serverSettingsKey          = "server_catalog"
 	maxServerBodyMarkdownBytes = 100_000
+	maxServerProofTextBytes    = 10_000
 )
 
 type serverCatalogSettings struct {
@@ -560,7 +561,7 @@ func normalizeAndValidateServerRequest(request *createMinecraftServerRequest, se
 		return fmt.Errorf("列表简介不能超过 %d 个字符", settings.SummaryMaxLength)
 	}
 	if len(request.BodyMarkdown) > maxServerBodyMarkdownBytes {
-		return errors.New("正文介绍不能超过 100000 个字符")
+		return fmt.Errorf("正文介绍不能超过 %d 个 UTF-8 字节", maxServerBodyMarkdownBytes)
 	}
 	if len(request.MinecraftVersions) == 0 || len(request.Languages) == 0 {
 		return errors.New("请选择至少一个 Minecraft 版本和服务器语言")
@@ -571,8 +572,11 @@ func normalizeAndValidateServerRequest(request *createMinecraftServerRequest, se
 		return errors.New("请选择有效的服务器主标签")
 	}
 	if proofRequired {
-		if request.ProofText == "" || len(request.ProofText) > 10000 {
+		if request.ProofText == "" {
 			return errors.New("请填写有效的服主或管理成员证明说明")
+		}
+		if len(request.ProofText) > maxServerProofTextBytes {
+			return fmt.Errorf("服主或管理成员证明说明不能超过 %d 个 UTF-8 字节", maxServerProofTextBytes)
 		}
 		if len(uniquePublicIDs(request.ProofFileIDs)) == 0 {
 			return errors.New("请至少上传一份证明附件")
