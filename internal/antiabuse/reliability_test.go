@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -51,6 +52,7 @@ func (rows *botRuleRowsStub) Scan(destinations ...any) error {
 	*destinations[0].(*string) = value.Kind
 	*destinations[1].(*string) = value.Matcher
 	*destinations[2].(*string) = value.SecretHash
+	*destinations[3].(**time.Time) = value.ExpiresAt
 	return nil
 }
 

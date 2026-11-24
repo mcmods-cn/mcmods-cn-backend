@@ -12,9 +12,10 @@ import (
 )
 
 type botRule struct {
-	Kind       string `json:"kind"`
-	Matcher    string `json:"matcher"`
-	SecretHash string `json:"secretHash"`
+	Kind       string     `json:"kind"`
+	Matcher    string     `json:"matcher"`
+	SecretHash string     `json:"secretHash"`
+	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
 }
 
 type dnsCacheEntry struct {
@@ -36,28 +37,46 @@ func (s *Service) ClassifyCrawler(ctx context.Context, ip, userAgent, botToken s
 	if err != nil {
 		return SuspiciousBot, err
 	}
-	for _, rule := range rules {
-		if rule.Kind == "blocked_bot" || rule.Kind == "ip_block" {
-			if ruleMatches(rule.Matcher, ip, userAgentLower) {
-				return BlockedBot, nil
-			}
-		}
-	}
-	for _, rule := range rules {
-		if rule.Kind == "ip_allow" && ruleMatches(rule.Matcher, ip, userAgentLower) {
-			return AllowedBot, nil
-		}
-	}
+	var databaseTime time.Time
+	var hash string
 	if botToken != "" {
-		hash := tokenHash(botToken)
-		for _, rule := range rules {
-			if rule.SecretHash == hash && (rule.Kind == "allowed_bot" || rule.Kind == "monitoring_bot") && ruleMatches(rule.Matcher, ip, userAgentLower) {
-				if rule.Kind == "monitoring_bot" {
-					return MonitoringBot, nil
+		hash = tokenHash(botToken)
+	}
+	// The cached order puts denials before IP allowances, then token rules.
+	for _, rule := range rules {
+		var class CrawlerClass
+		switch rule.Kind {
+		case "blocked_bot", "ip_block":
+			class = BlockedBot
+		case "ip_allow":
+			class = AllowedBot
+		case "allowed_bot", "monitoring_bot":
+			if hash == "" || hash != rule.SecretHash {
+				continue
+			}
+			class = AllowedBot
+			if rule.Kind == "monitoring_bot" {
+				class = MonitoringBot
+			}
+		default:
+			continue
+		}
+		if !ruleMatches(rule.Matcher, ip, userAgentLower) {
+			continue
+		}
+		if rule.ExpiresAt != nil {
+			// Read the authoritative clock only for a matching temporary rule.
+			if databaseTime.IsZero() {
+				if err := s.db.QueryRow(ctx, "select clock_timestamp()").Scan(&databaseTime); err != nil {
+					s.botRuleLoadFailed.Add(1)
+					return SuspiciousBot, err
 				}
-				return AllowedBot, nil
+			}
+			if !databaseTime.Before(*rule.ExpiresAt) {
+				continue
 			}
 		}
+		return class, nil
 	}
 	known, suffixes := knownSearchCrawler(userAgentLower)
 	if known {
@@ -161,8 +180,9 @@ type botRuleQueryer interface {
 }
 
 func loadBotRules(ctx context.Context, queryer botRuleQueryer) ([]botRule, error) {
-	rows, err := queryer.Query(ctx, `select kind,matcher,secret_hash from anti_abuse_bot_rules
-		where enabled and (expires_at is null or expires_at>now()) order by id`)
+	rows, err := queryer.Query(ctx, `select kind,matcher,secret_hash,expires_at from anti_abuse_bot_rules
+		where enabled and (expires_at is null or expires_at>now())
+		order by case when kind in ('blocked_bot','ip_block') then 0 when kind='ip_allow' then 1 else 2 end, id`)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +190,7 @@ func loadBotRules(ctx context.Context, queryer botRuleQueryer) ([]botRule, error
 	values := make([]botRule, 0)
 	for rows.Next() {
 		var value botRule
-		if err = rows.Scan(&value.Kind, &value.Matcher, &value.SecretHash); err != nil {
+		if err = rows.Scan(&value.Kind, &value.Matcher, &value.SecretHash, &value.ExpiresAt); err != nil {
 			return nil, err
 		}
 		values = append(values, value)

@@ -30,7 +30,7 @@ const settingsKey = "anti_abuse.config"
 
 const (
 	accountCacheKeyPrefix            = "anti-abuse:account:"
-	botRulesCacheKey                 = "anti-abuse:bot-rules"
+	botRulesCacheKey                 = "anti-abuse:bot-rules:v2"
 	settingsCacheKey                 = "anti-abuse:settings"
 	successQueueCapacity             = 1024
 	successWorkerCount               = 2
