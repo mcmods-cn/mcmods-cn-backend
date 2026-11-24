@@ -73,23 +73,25 @@ func (worker *MaintenanceWorker) pruneWithTimeout(ctx context.Context, timeout t
 		prune(pruneCtx)
 		cancel()
 	}
+	// Claim only unlocked rows. A renewal or deletion may already be in progress
+	// while the preceding row version still looks expired.
 	for _, statement := range []string{
 		`update log_shares set status='expired' where id in (
 			select id from log_shares where expires_at<=now() and status in ('processing','ready')
-			order by expires_at,id limit $1
+			order by expires_at,id for update skip locked limit $1
 		)`,
 		`delete from log_share_entries where id in (
 			select entry.id from log_share_entries entry join log_shares share on share.id=entry.log_share_id
-			where share.status in ('expired','deleted','source_deleted') order by entry.id limit $1
+			where share.status in ('expired','deleted','source_deleted') order by entry.id for update of entry skip locked limit $1
 		)`,
 		`delete from user_drafts where id in (
-			select id from user_drafts where expires_at<=now() order by expires_at limit $1
+			select id from user_drafts where expires_at<=now() order by expires_at,id for update skip locked limit $1
 		)`,
 		`delete from yggdrasil_join_sessions where server_id in (
-			select server_id from yggdrasil_join_sessions where expires_at<=now() order by expires_at limit $1
+			select server_id from yggdrasil_join_sessions where expires_at<=now() order by expires_at,server_id for update skip locked limit $1
 		)`,
 		`delete from user_presence_sessions where session_hash in (
-			select session_hash from user_presence_sessions where last_active_at<now()-interval '1 day' order by last_active_at limit $1
+			select session_hash from user_presence_sessions where last_active_at<now()-interval '1 day' order by last_active_at,session_hash for update skip locked limit $1
 		)`,
 	} {
 		if ctx.Err() != nil {

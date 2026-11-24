@@ -105,6 +105,39 @@ func TestOPS020MaintenanceTimeoutDoesNotStarveBansAndTTLIntegration(t *testing.T
 	stop()
 	worker.pruneWithTimeout(stopped, time.Second)
 	assertOPS020MaintenanceState(t, ctx, pool, originalAuthVersion, 1)
+
+	t.Run("a draft being saved does not block expiry of other drafts", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `insert into user_drafts(user_id,draft_key,project_key,kind,edit_url,payload,expires_at)
+			select id,'ops020-saving','ops020','mod','/edit','{}',now()-interval '1 hour'
+			from users where username='ops020_future'`); err != nil {
+			t.Fatal(err)
+		}
+		saving, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer saving.Rollback(context.Background())
+		if _, err := saving.Exec(ctx, `update user_drafts set expires_at=now()+interval '1 day',
+			payload='{"saved":true}' where draft_key='ops020-saving'`); err != nil {
+			t.Fatal(err)
+		}
+
+		// Hold the write until this pass completes. Another expired row must
+		// already be gone while the renewed draft remains intact after commit.
+		worker.pruneWithTimeout(ctx, time.Second)
+		if err := saving.Commit(ctx); err != nil {
+			t.Fatal(err)
+		}
+		var saved, expired int
+		if err := pool.QueryRow(ctx, `select count(*) filter(where draft_key='ops020-saving'
+			and expires_at>now() and payload='{"saved":true}'::jsonb),
+			count(*) filter(where draft_key='ops020-cancelled') from user_drafts`).Scan(&saved, &expired); err != nil {
+			t.Fatal(err)
+		}
+		if saved != 1 || expired != 0 {
+			t.Fatalf("saved draft=%d, unclaimed expired drafts=%d", saved, expired)
+		}
+	})
 }
 
 func assertOPS020MaintenanceState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, authVersion int64, expiredDrafts int) {
