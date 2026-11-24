@@ -47,9 +47,6 @@ func infrastructureSchemaStatements() []string {
 		`drop trigger if exists trg_users_secure_auth_material on users`,
 		`create trigger trg_users_secure_auth_material before update of status,password_hash on users
 			for each row execute function secure_user_auth_material_change()`,
-		`alter table notifications add column if not exists source_event_id text`,
-		`create unique index if not exists uq_notifications_source_event on notifications(source_event_id)
-			where source_event_id is not null`,
 		`create table if not exists processed_events (
 			consumer text not null,
 			event_id text not null,

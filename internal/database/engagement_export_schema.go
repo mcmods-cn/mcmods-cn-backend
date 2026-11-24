@@ -201,7 +201,8 @@ func engagementExportSchemaStatements() []string {
 			check(status in ('pending','processing','completed','failed'))
 		)`,
 		`create index idx_project_update_notification_tasks_ready on project_update_notification_tasks(status,next_attempt_at,event_id)`,
-		`alter table notifications add column project_update_event_id bigint references project_update_events(id) on delete set null`,
+		`alter table notifications add constraint notifications_project_update_event_id_fkey
+			foreign key(project_update_event_id) references project_update_events(id) on delete set null`,
 		`create unique index uq_notifications_project_update_recipient on notifications(recipient_id,project_update_event_id) where project_update_event_id is not null`,
 		`create index idx_notifications_project_update_event on notifications(project_update_event_id) where project_update_event_id is not null`,
 	}

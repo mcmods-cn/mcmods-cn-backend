@@ -873,8 +873,13 @@ func baselineSchemaStatements() []string {
 			template_params jsonb not null default '{}'::jsonb,
 			data jsonb not null default '{}'::jsonb,
 			created_at timestamptz not null default now(),
-			updated_at timestamptz not null default now()
+			updated_at timestamptz not null default now(),
+			source_event_id text,
+			project_update_event_id bigint,
+			revision_xid xid8 not null default pg_current_xact_id()
 		)`,
+		`create unique index uq_notifications_source_event on notifications(source_event_id) where source_event_id is not null`,
+		`create index idx_notifications_broadcast_revision on notifications(revision_xid,id) include(updated_at) where recipient_id is null`,
 		`create index if not exists idx_notifications_recipient_page on notifications (recipient_id, updated_at desc, id desc)`,
 		`create index if not exists idx_notifications_recipient_kind_page on notifications (recipient_id, kind, updated_at desc, id desc)`,
 		`create index if not exists idx_notifications_recipient_id on notifications (recipient_id, id)`,
@@ -934,6 +939,7 @@ func baselineSchemaStatements() []string {
 			user_id bigint not null references users(id) on delete cascade,
 			read_at timestamptz,
 			created_at timestamptz not null default now(),
+			read_revision_xid xid8,
 			primary key (notification_id, user_id)
 		)`,
 		`create index if not exists idx_notification_receipts_user_read on notification_receipts (user_id, read_at)`,
@@ -941,7 +947,8 @@ func baselineSchemaStatements() []string {
 			user_id bigint primary key references users(id) on delete cascade,
 			max_notification_id bigint not null default 0 check(max_notification_id >= 0),
 			read_at timestamptz not null,
-			updated_at timestamptz not null default now()
+			updated_at timestamptz not null default now(),
+			visibility_snapshot pg_snapshot
 		)`,
 		`create table if not exists notification_actors (
 			notification_id bigint not null references notifications(id) on delete cascade,

@@ -1,24 +1,18 @@
 package database
 
-// NotificationVisibilitySchemaStatements installs transaction-based visibility.
+// notificationVisibilitySchemaStatements installs transaction-based visibility.
 // xid8 records the top-level transaction, including writes inside savepoints.
 // Snapshot visibility, rather than sequence allocation or statement time,
 // determines which notification revision a read-all request actually observed.
-func NotificationVisibilitySchemaStatements() []string {
+func notificationVisibilitySchemaStatements() []string {
 	return []string{
 		`create table if not exists realtime_connection_leases (
 		lease_id text primary key,user_id bigint not null references users(id) on delete cascade,
 		session_hash text not null,expires_at timestamptz not null)`,
 		`create index if not exists idx_realtime_connection_leases_expiry on realtime_connection_leases(expires_at)`,
-		`alter table notifications add column if not exists revision_xid xid8 not null default pg_current_xact_id()`,
-		`alter table notification_read_watermarks add column if not exists visibility_snapshot pg_snapshot`,
-		`create index if not exists idx_notifications_broadcast_revision on notifications(revision_xid,id) include(updated_at) where recipient_id is null`,
-		`alter table notification_receipts add column if not exists read_revision_xid xid8`,
 		`create or replace function stamp_notification_revision() returns trigger language plpgsql as $$
 		begin new.revision_xid := pg_current_xact_id(); return new; end $$`,
 		`create or replace trigger trg_notifications_revision before insert or update on notifications
 		for each row execute function stamp_notification_revision()`,
-		`update notification_receipts receipt set read_revision_xid=n.revision_xid
-		from notifications n where receipt.notification_id=n.id and receipt.read_at is not null and receipt.read_revision_xid is null`,
 	}
 }
