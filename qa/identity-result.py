@@ -23,5 +23,6 @@ if p.is_file():r['objectProtocolRequests']=re.findall(r'^object request (GET|HEA
 print('Named case',name,'Go exit',r['goExit'],'browser exit',r['browserExit'])
 (work/'identity-public'/'named-receipt.json').write_text(json.dumps(r,indent=2)+'\n')
 
-if (work/'provider-state'/'request-diagnostics.json').exists():
- (work/'identity-public'/'request-diagnostics.json').write_bytes((work/'provider-state'/'request-diagnostics.json').read_bytes())
+for filename in ('request-diagnostics.json','stage-diagnostics.json'):
+ p=work/'provider-state'/filename
+ if p.exists(): (work/'identity-public'/filename).write_bytes(p.read_bytes())
