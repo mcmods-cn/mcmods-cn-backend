@@ -1,6 +1,9 @@
 package antiabuse
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalizeContentRemovesUnicodeAndTrackingNoise(t *testing.T) {
 	left := NormalizeContent("  Ｈｅｌｌｏ\u200b **WORLD** https://example.test/a?utm_source=x&id=7#fragment ")
@@ -22,5 +25,34 @@ func TestSimilaritySeparatesNearAndUnrelatedContent(t *testing.T) {
 	}
 	if near < 800 {
 		t.Fatalf("minor edit similarity %d is too low for configurable near-duplicate detection", near)
+	}
+}
+
+func TestSimHashPreservesStoredFingerprints(t *testing.T) {
+	for _, sample := range []struct {
+		content string
+		want    uint64
+	}{
+		{"", 0x0000000000000000},
+		{"  ", 0xffffffffffffffff},
+		{"x", 0x44b026b74216712d},
+		{"ab", 0x6e7f7d2efee8afff},
+		{"abc", 0xe2ea41a92f3c793e},
+		{"abcdef", 0xd6eb9236ad79a2ae},
+		{"测试模组 和 资源", 0xa93dbc67e8f4a6ba},
+		{"ababbaba", 0x88bcfbeccc9d5fe1},
+		{"😃木😃木 😃", 0x30ae7bffffc57a9d},
+		{"abcd   abcd", 0xe9bf504aff31bcba},
+	} {
+		if got := SimHash(sample.content); got != sample.want {
+			t.Errorf("SimHash(%q) = %016x, want %016x", sample.content, got, sample.want)
+		}
+	}
+}
+func BenchmarkSimHash(b *testing.B) {
+	text := strings.Repeat("社区教程 提取 Minecraft 模组资源，包含 Forge 和 Fabric 的配置。 ", 70)
+	b.ReportAllocs()
+	for b.Loop() {
+		SimHash(text)
 	}
 }

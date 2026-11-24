@@ -8,7 +8,6 @@ import (
 	"math/bits"
 	"net/url"
 	"regexp"
-	"sort"
 	"strings"
 	"unicode"
 
@@ -65,17 +64,13 @@ func SimHash(normalized string) uint64 {
 	if len(runes) == 0 {
 		return 0
 	}
-	features := make([]string, 0, len(runes))
+	weights := [64]int{}
 	for index := range runes {
 		end := min(index+3, len(runes))
 		feature := strings.TrimSpace(string(runes[index:end]))
-		if feature != "" {
-			features = append(features, feature)
+		if feature == "" {
+			continue
 		}
-	}
-	sort.Strings(features)
-	weights := [64]int{}
-	for _, feature := range features {
 		sum := sha256.Sum256([]byte(feature))
 		value := binary.LittleEndian.Uint64(sum[:8])
 		for bit := 0; bit < 64; bit++ {
