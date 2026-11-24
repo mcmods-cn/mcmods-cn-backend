@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"fmt"
+	"net/http"
 	"slices"
 	"testing"
 	"time"
@@ -11,6 +12,14 @@ import (
 
 func TestCatalogPublicationWritesOrderedMembersInOneBatch(t *testing.T) {
 	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "content.write")
+	request := map[string]any{"canonicalId": "batch:source", "defaultLocale": "en-US",
+		"localizations": []catalogLocalizationEdit{{Locale: "en-US", Name: "Batch source"}}}
+	source := decodeTEST022Data[catalogEditResult](t, f.require(t, f.editor, http.MethodPost, "/api/v1/recipe-types", request, http.StatusAccepted))
+	var revisionID int64
+	if err := f.db.QueryRow(f.ctx, `select id from content_revisions where public_id=$1`, source.RevisionID).Scan(&revisionID); err != nil {
+		t.Fatal(err)
+	}
 	config := f.db.Config()
 	counter := &integrationQueryCounter{}
 	config.ConnConfig.Tracer = counter
@@ -49,10 +58,10 @@ func TestCatalogPublicationWritesOrderedMembersInOneBatch(t *testing.T) {
 			counter.queries.Store(0)
 			if kind == "tag" {
 				snapshot.Tag = &catalogTagEdit{Registry: "minecraft:item", CanonicalID: "batch:tag", MemberResourcePublicIDs: publicIDs[:n]}
-				err = publishCatalogTagTx(f.ctx, tx, snapshot, 10)
+				err = publishCatalogTagTx(f.ctx, tx, snapshot, revisionID)
 			} else {
 				snapshot.RecipeType = &catalogRecipeTypeEdit{CanonicalID: "batch:type", CatalystResourcePublicIDs: publicIDs[:n]}
-				err = publishCatalogRecipeTypeTx(f.ctx, tx, snapshot, 10, f.userIDs[f.editor])
+				err = publishCatalogRecipeTypeTx(f.ctx, tx, snapshot, revisionID, f.userIDs[f.editor])
 			}
 			if err != nil {
 				t.Fatal(err)
@@ -62,7 +71,7 @@ func TestCatalogPublicationWritesOrderedMembersInOneBatch(t *testing.T) {
 			var stored []string
 			if err = tx.QueryRow(f.ctx, fmt.Sprintf(`select coalesce(array_agg(entity.public_id order by member.ordinal),'{}'::text[])
 				from %s member join catalog_entities entity on entity.id=member.resource_id
-				where member.%s=$1 and member.published_revision_id=10`, table, column), id).Scan(&stored); err != nil {
+				where member.%s=$1 and member.published_revision_id=$2`, table, column), id, revisionID).Scan(&stored); err != nil {
 				t.Fatal(err)
 			}
 			if !slices.Equal(stored, publicIDs[:n]) {
