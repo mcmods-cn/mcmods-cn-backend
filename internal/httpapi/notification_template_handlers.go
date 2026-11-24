@@ -444,9 +444,9 @@ func (s *Server) getReviewConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateReviewConfig(w http.ResponseWriter, r *http.Request) {
-	var request reviewConfig
-	if decodeJSON(r, &request) != nil {
-		writeError(w, http.StatusBadRequest, "请求格式不正确")
+	var request map[string]*bool
+	if decodeJSON(r, &request) != nil || !completeReviewPolicy(request) {
+		writeError(w, http.StatusBadRequest, "请为每项审核设置指定是否需要审核")
 		return
 	}
 	raw, _ := json.Marshal(request)
@@ -460,6 +460,19 @@ func (s *Server) updateReviewConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, request)
+}
+
+func completeReviewPolicy(values map[string]*bool) bool {
+	fields := reflect.TypeFor[reviewConfig]()
+	if len(values) != fields.NumField() {
+		return false
+	}
+	for field := range fields.Fields() {
+		if values[field.Tag.Get("json")] == nil {
+			return false
+		}
+	}
+	return true
 }
 
 type reviewConfigQueryRower interface {
