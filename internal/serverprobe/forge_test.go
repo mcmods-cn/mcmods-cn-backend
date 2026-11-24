@@ -48,7 +48,7 @@ func TestParseForgeModData(t *testing.T) {
 	if truncated || len(mods) != 1 || mods[0].ModID != "example" || mods[0].Marker != "1.2.3" {
 		t.Fatalf("unexpected Forge result: truncated=%v mods=%#v", truncated, mods)
 	}
-	if len(mods[0].Channels) != 1 || mods[0].Channels[0].Resource != "example:main" {
+	if len(mods[0].Channels) != 1 || mods[0].Channels[0] != (forgeChannel{Path: "main", Version: "7", Required: true}) {
 		t.Fatalf("unexpected Forge channels: %#v", mods[0].Channels)
 	}
 }

@@ -15,7 +15,7 @@ import (
 const maxForgeStatusPayload = 4 << 20
 
 type forgeChannel struct {
-	Resource string
+	Path     string
 	Version  string
 	Required bool
 }
@@ -175,7 +175,7 @@ func parseForgeModData(data []byte, fmlNetworkVersion int) ([]forgeModMarker, bo
 	if err = binary.Read(reader, binary.BigEndian, &modCount); err != nil {
 		return nil, false, err
 	}
-	mods := make([]forgeModMarker, 0, modCount)
+	mods := make([]forgeModMarker, 0, min(int(modCount), 256))
 	for modIndex := 0; modIndex < int(modCount); modIndex++ {
 		flags, readErr := readVarInt(reader)
 		if readErr != nil {
@@ -211,7 +211,7 @@ func parseForgeModData(data []byte, fmlNetworkVersion int) ([]forgeModMarker, bo
 				return nil, false, channelErr
 			}
 			mod.Channels = append(mod.Channels, forgeChannel{
-				Resource: modID + ":" + path, Version: version, Required: required != 0,
+				Path: path, Version: version, Required: required != 0,
 			})
 		}
 		mods = append(mods, mod)
