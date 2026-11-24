@@ -290,22 +290,6 @@ func (s *Server) userOwnsBlueprintObject(ctx context.Context, ownerID int64, obj
 	return exists
 }
 
-func (s *Server) blueprintForExistingFile(ctx context.Context, fileID, ownerID int64) (map[string]any, error) {
-	if fileID <= 0 {
-		return nil, nil
-	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback(ctx)
-	blueprint, err := s.blueprintForExistingFileTx(ctx, tx, fileID, ownerID)
-	if err != nil {
-		return nil, err
-	}
-	return blueprint, tx.Commit(ctx)
-}
-
 func (s *Server) blueprintForExistingFileTx(ctx context.Context, tx pgx.Tx, fileID, ownerID int64) (map[string]any, error) {
 	if fileID <= 0 {
 		return nil, nil

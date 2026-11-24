@@ -90,31 +90,37 @@ func (s *Server) completedOSSUploadResponse(ctx context.Context, cfg ossConfigPa
 }
 
 func (s *Server) attachCompletedOSSUploadAssociations(ctx context.Context, response map[string]any, fileID, ownerID int64, source string) error {
-	blueprint, err := s.blueprintForExistingFile(ctx, fileID, ownerID)
-	if err != nil {
-		return err
-	}
-	if blueprint != nil {
-		response["blueprint"] = blueprint
-		response["blueprintId"] = blueprint["id"]
-	}
+	// The original registration committed the association. Replaying a file
+	// receipt may report the current blueprint, but must never recreate it or
+	// replace a cover the owner selected later.
 	if coverPublicID, ok := blueprintCoverPublicID(source); ok {
-		result, err := s.db.Exec(ctx, `update blueprints blueprint
-			set cover_file_id=$2,cover_object_key=file.object_key,updated_at=now()
-			from oss_files file
-			where blueprint.public_id=$1 and blueprint.owner_id=$3 and file.id=$2
-			  and file.uploader_id=$3 and file.status='active'
-			  and file.scan_status in ('clean','trusted_generated')
-			  and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`,
-			coverPublicID, fileID, ownerID)
+		var current bool
+		err := s.db.QueryRow(ctx, `select exists(select 1 from blueprints blueprint
+			join oss_files file on file.id=blueprint.cover_file_id and file.object_key=blueprint.cover_object_key
+			where blueprint.public_id=$1 and blueprint.owner_id=$3 and blueprint.status<>'deleted'
+			and file.id=$2 and file.uploader_id=$3 and file.status='active' and file.scan_status in ('clean','trusted_generated')
+			and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp'))`,
+			coverPublicID, fileID, ownerID).Scan(&current)
 		if err != nil {
 			return err
 		}
-		if result.RowsAffected() == 0 {
-			return errors.New("blueprint cover is not a trusted raster")
+		if current {
+			response["blueprintId"] = coverPublicID
 		}
-		response["blueprintId"] = coverPublicID
+		return nil
 	}
+	var publicID, status string
+	err := s.db.QueryRow(ctx, `select public_id,status from blueprints
+		where owner_id=$1 and original_file_id=$2 and status<>'deleted' order by created_at,id limit 1`,
+		ownerID, fileID).Scan(&publicID, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	response["blueprintId"] = publicID
+	response["blueprint"] = map[string]any{"id": publicID, "status": status}
 	return nil
 }
 
@@ -186,7 +192,7 @@ func (s *Server) bindOSSBlueprintCoverTx(ctx context.Context, tx pgx.Tx, coverPu
 	result, err := tx.Exec(ctx, `update blueprints blueprint
  set cover_file_id=$2,cover_object_key=file.object_key,updated_at=now()
  from oss_files file
- where blueprint.public_id=$1 and blueprint.owner_id=$3 and file.id=$2
+ where blueprint.public_id=$1 and blueprint.owner_id=$3 and blueprint.status<>'deleted' and file.id=$2
  and file.uploader_id=$3 and file.status='active'
  and file.scan_status in ('clean','trusted_generated')
  and lower(split_part(file.content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`, coverPublicID, fileID, ownerID)
