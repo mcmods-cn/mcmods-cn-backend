@@ -52,8 +52,6 @@ type projectEditorTarget struct {
 	InternalID int64
 	Type       string
 	PublicID   string
-	Name       string
-	URL        string
 }
 
 var projectEditorTargetTypes = map[string]struct{}{
@@ -69,25 +67,17 @@ func normalizeProjectEditorTargetType(value string) string {
 	return value
 }
 
-func (s *Server) projectEditorTargetByPublicID(ctx context.Context, projectType, publicID string) (projectEditorTarget, error) {
+func (s *Server) projectEditorRouteByPublicID(ctx context.Context, projectType, publicID string) (projectEditorTarget, error) {
 	projectType = normalizeProjectEditorTargetType(projectType)
 	publicID = strings.ToLower(strings.TrimSpace(publicID))
 	if _, ok := projectEditorTargetTypes[projectType]; !ok || !validCatalogPublicID(publicID) {
 		return projectEditorTarget{}, pgx.ErrNoRows
 	}
 	var target projectEditorTarget
-	err := s.db.QueryRow(ctx, `select id,internal_id,entity_type,public_id,canonical_path
+	err := s.db.QueryRow(ctx, `select id,internal_id,entity_type,public_id
 		from public_routes where entity_type=$1 and public_id=$2`, projectType, publicID).
-		Scan(&target.RouteID, &target.InternalID, &target.Type, &target.PublicID, &target.URL)
-	if err != nil {
-		return target, err
-	}
-	target.Name, err = s.projectEditorTargetName(ctx, target.Type, target.InternalID)
+		Scan(&target.RouteID, &target.InternalID, &target.Type, &target.PublicID)
 	return target, err
-}
-
-func (s *Server) projectEditorTargetName(ctx context.Context, projectType string, internalID int64) (string, error) {
-	return projectEditorTargetNameWithQueryer(ctx, s.db, projectType, internalID)
 }
 
 func projectEditorTargetNameWithQueryer(ctx context.Context, queryer revisionQuery, projectType string, internalID int64) (string, error) {
@@ -116,7 +106,10 @@ func projectEditorTargetNameWithQueryer(ctx context.Context, queryer revisionQue
 }
 
 func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Request) {
-	target, err := s.projectEditorTargetByPublicID(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
+	target, err := s.projectEditorRouteByPublicID(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
+	if err == nil {
+		_, err = projectEditorTargetNameWithQueryer(r.Context(), s.db, target.Type, target.InternalID)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
@@ -133,10 +126,6 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
-		return
-	}
-	if claimsAllow(claims, "project.edit."+target.PublicID) || claimsAllow(claims, "project.edit") {
-		writeError(w, http.StatusConflict, "you already have access to this project")
 		return
 	}
 	var request createProjectEditorApplicationRequest
@@ -163,6 +152,19 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 		return
 	} else if targetErr != nil {
 		writeError(w, http.StatusServiceUnavailable, "failed to check application target")
+		return
+	}
+
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if !claimsAllow(claims, "project.editor.apply") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if claimsAllow(claims, "project.edit."+target.PublicID) || claimsAllow(claims, "project.edit") {
+		writeError(w, http.StatusConflict, "you already have access to this project")
 		return
 	}
 
@@ -345,7 +347,7 @@ func (s *Server) reviewProjectEditorApplication(w http.ResponseWriter, r *http.R
 }
 
 func (s *Server) revokeProjectEditorAssignment(w http.ResponseWriter, r *http.Request) {
-	target, err := s.projectEditorTargetByPublicID(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
+	target, err := s.projectEditorRouteByPublicID(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project not found")
 		return

@@ -114,3 +114,35 @@ func TestAuditREM001HiddenEditorApplicationTargetsFullHTTPIntegration(t *testing
 		t.Fatalf("hidden target assignments=%d err=%v", count, err)
 	}
 }
+
+func TestProjectEditorCanRevokeAnAssignmentAfterTheProjectIsHiddenIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.editor.apply")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "project.editor.review")
+	applyPath := "/api/v1/projects/mod/" + f.modCode + "/editor-applications"
+	app := decodeTEST022Data[projectEditorApplicationResponse](t, f.require(t, f.otherEditor,
+		http.MethodPost, applyPath, map[string]string{"proofMarkdown": "Fixture contribution"}, http.StatusCreated))
+	f.require(t, f.reviewer, http.MethodPatch, "/api/v1/admin/project-editor-applications/"+app.ID,
+		map[string]string{"status": "approved"}, http.StatusOK)
+	tx, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(f.ctx)
+	if err := f.server.moderationHideTarget(f.ctx, tx, "mod", f.modCode); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, f.otherEditor, http.MethodGet, applyPath, nil, http.StatusNotFound)
+	path := "/api/v1/admin/project-editor-assignments/mod/" + f.modCode + "/" + app.UserID
+	f.require(t, f.otherEditor, http.MethodDelete, path, map[string]string{"reason": "Not a reviewer"}, http.StatusForbidden)
+	f.require(t, f.reviewer, http.MethodDelete, path, map[string]string{"reason": "Assignment ended"}, http.StatusOK)
+	if f.number(t, `select count(*) from project_editor_assignments assignment join project_editor_applications app on app.id=assignment.application_id where app.public_id=$1 and assignment.status='revoked'`, app.ID) != 1 {
+		t.Fatal("hidden project's assignment remained active")
+	}
+	if f.number(t, `select count(*) from permission_audit_logs where action='project_editor.revoke' and target_user_id=$1`, f.userIDs[f.otherEditor]) != 1 {
+		t.Fatal("missing revocation audit")
+	}
+}
