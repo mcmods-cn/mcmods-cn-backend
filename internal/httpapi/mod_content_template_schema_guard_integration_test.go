@@ -97,6 +97,15 @@ func TestTemplateSchemaGuardDistinguishesDisableDeleteAndReferencesIntegration(t
 	if err = validateModContentTemplateSchemaChangeTx(ctx, tx, templateID, current, removed); !errors.Is(err, errCatalogEditorReference) {
 		t.Fatalf("referenced entry type deletion error=%v", err)
 	}
+	var sectionLocked, unrelatedLocked bool
+	if err = tx.QueryRow(ctx, `select
+		exists (select 1 from pg_locks where pid=pg_backend_pid() and granted and mode='ShareRowExclusiveLock'
+			and relation='mod_content_sections'::regclass),
+		exists (select 1 from pg_locks where pid=pg_backend_pid() and granted and mode='ShareRowExclusiveLock'
+			and relation in ('mod_content_section_resources'::regclass,'mod_resource_version_details'::regclass))`).
+		Scan(&sectionLocked, &unrelatedLocked); err != nil || !sectionLocked || unrelatedLocked {
+		t.Fatalf("template deployment locks: sections=%t unrelated writes blocked=%t err=%v", sectionLocked, unrelatedLocked, err)
+	}
 	disabled := templateSchemaGuardFixture(true, "number")
 	if err = validateModContentTemplateSchemaChangeTx(ctx, tx, templateID, current, disabled); err != nil {
 		t.Fatalf("referenced entry type disable failed: %v", err)
