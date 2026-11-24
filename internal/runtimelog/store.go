@@ -3,6 +3,7 @@ package runtimelog
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"log/slog"
@@ -10,6 +11,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"mcmods-cn-backend/internal/database"
 )
 
 const (
@@ -56,11 +61,37 @@ func NewStore(capacity int) *Store {
 // It must run before the first application log line is written.
 func Install() {
 	output := io.MultiWriter(os.Stderr, processStore)
-	logger := slog.New(slog.NewTextHandler(output, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(slog.NewTextHandler(output, &slog.HandlerOptions{Level: slog.LevelInfo, ReplaceAttr: redactDatabaseError}))
 	slog.SetDefault(logger)
 	log.SetFlags(0)
 	log.SetPrefix("")
 	log.SetOutput(legacyLogBridge{logger: logger})
+}
+
+// PostgreSQL errors may include connection details, SQL or the offending data.
+func redactDatabaseError(_ []string, attr slog.Attr) slog.Attr {
+	if attr.Value.Kind() != slog.KindAny {
+		return attr
+	}
+	err, ok := attr.Value.Any().(error)
+	if !ok {
+		return attr
+	}
+	var statement *pgconn.PgError
+	var connection *pgconn.ConnectError
+	var configuration *pgconn.ParseConfigError
+	switch {
+	case errors.As(err, &statement):
+		err = statement
+	case errors.As(err, &connection):
+		err = connection
+	case errors.As(err, &configuration):
+		err = configuration
+	default:
+		return attr
+	}
+	attr.Value = slog.StringValue(database.RedactedError("database", err).Error())
+	return attr
 }
 
 type legacyLogBridge struct {
@@ -153,21 +184,23 @@ func (s *Store) appendLineLocked(payload []byte, truncated bool) {
 }
 
 func inferLevel(line string) string {
-	value := strings.ToLower(line)
-	for _, marker := range []string{"level=error", "level=warn", "level=info", "level=debug"} {
-		if !strings.Contains(value, marker) {
-			continue
-		}
-		switch marker {
-		case "level=error":
+	fields := line
+	if strings.HasPrefix(fields, "time=") {
+		_, fields, _ = strings.Cut(fields, " ")
+	}
+	header, _, _ := strings.Cut(fields, " ")
+	if value, ok := strings.CutPrefix(header, "level="); ok {
+		level, _, _ := strings.Cut(value, "+")
+		switch strings.ToUpper(level) {
+		case "ERROR":
 			return "error"
-		case "level=warn":
+		case "WARN":
 			return "warn"
-		default:
+		case "INFO", "DEBUG":
 			return "info"
 		}
 	}
-	return inferLegacyLevel(value)
+	return inferLegacyLevel(line)
 }
 
 func inferLegacyLevel(value string) string {

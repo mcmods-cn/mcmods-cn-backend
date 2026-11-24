@@ -1,6 +1,10 @@
 package runtimelog
 
 import (
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5/pgconn"
 	"log"
 	"log/slog"
 	"strings"
@@ -48,14 +52,19 @@ func TestBUG054InstallCapturesStructuredAndLegacyLogsWithAuthoritativeLevels(t *
 	})
 
 	Install()
-	slog.Info("structured runtime event", "error", "none", "attempt", 3)
+	slog.Info("structured runtime event", "error", "none", "attempt", 3, "sample", "level=error")
 	slog.Warn("retry scheduled", slog.Group("task", "kind", "outbox", "id", 54))
 	log.Print("legacy runtime event")
 	log.Print("legacy worker failed")
 
+	const fixtureDetail = "synthetic-private-connection-detail"
+	slog.Error("database request failed", slog.Group("request", "error", fmt.Errorf("wrapped: %w",
+		&pgconn.PgError{Code: "23514", Message: fixtureDetail})))
+	slog.Warn("pool setup failed", "error", pgconn.NewParseConfigError("postgres://"+fixtureDetail, fixtureDetail, nil))
+	slog.Warn("ordinary event", "error", errors.New("ordinary failure"))
 	entries := processStore.Entries()
-	if len(entries) != 4 {
-		t.Fatalf("captured entries = %d, want structured info/warn plus legacy logs: %#v", len(entries), entries)
+	if len(entries) != 7 {
+		t.Fatalf("captured entries = %d, want structured, legacy and diagnostic logs: %#v", len(entries), entries)
 	}
 	if entries[0].Level != "info" || !strings.Contains(entries[0].Line, "error=none") || !strings.Contains(entries[0].Line, "attempt=3") {
 		t.Errorf("structured info record lost its authoritative level or attributes: %#v", entries[0])
@@ -65,6 +74,10 @@ func TestBUG054InstallCapturesStructuredAndLegacyLogsWithAuthoritativeLevels(t *
 	}
 	if entries[2].Level != "info" || !strings.Contains(entries[2].Line, "legacy runtime event") {
 		t.Errorf("legacy standard log no longer shares the runtime pipeline: %#v", entries[2])
+	}
+	if strings.Contains(entries[4].Line+entries[5].Line, fixtureDetail) || !strings.Contains(entries[4].Line, "23514") ||
+		!strings.Contains(entries[5].Line, "ParseConfigError") || !strings.Contains(entries[6].Line, "ordinary failure") {
+		t.Error("PostgreSQL diagnostics should retain the stage and kind without driver-supplied details")
 	}
 	if entries[3].Level != "error" || !strings.Contains(entries[3].Line, "legacy worker failed") {
 		t.Errorf("legacy severity inference was lost by the slog bridge: %#v", entries[3])
