@@ -378,17 +378,11 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 	var pendingTextureUpload *pendingTextureUpload
 	defer func() { s.compensateUncommittedMinecraftTextureUpload(pendingTextureUpload) }()
 	defer tx.Rollback(r.Context())
-	var userStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&userStatus); err != nil || userStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
+	if !lockSkinAccount(w, r, tx, claims.Subject) {
 		return
 	}
-	claims, ok := requireCurrentWriteActor(w, r, tx)
+	claims, ok := requireCurrentWritePermission(w, r, tx, "skin.library.upload")
 	if !ok {
-		return
-	}
-	if !claimsAllow(claims, "skin.library.upload") {
-		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
 	if !checkWebSkinCreationCapacity(w, r, tx, claims.Subject, skinAssetLimit(claims.PermissionRules)) {
@@ -442,6 +436,23 @@ func (s *Server) createSkin(w http.ResponseWriter, r *http.Request) {
 	}
 	pendingTextureUpload = nil
 	writeJSON(w, http.StatusCreated, skinAssetJSON(record, claims))
+}
+
+// Serialize changes to one user's wardrobe, profiles and quotas before
+// locking individual assets and profiles. Authorization uses the live session
+// after those locks have been acquired.
+func lockSkinAccount(w http.ResponseWriter, r *http.Request, tx pgx.Tx, userID int64) bool {
+	var status string
+	err := tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, userID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && status != "active" {
+		writeError(w, http.StatusForbidden, "account is unavailable")
+		return false
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to check account status")
+		return false
+	}
+	return true
 }
 
 // Keep the inventory and daily budgets in one snapshot. The daily count also
@@ -582,9 +593,7 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var actorStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&actorStatus); err != nil || actorStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
+	if !lockSkinAccount(w, r, tx, claims.Subject) {
 		return
 	}
 	var record skinAssetRecord
@@ -605,6 +614,10 @@ func (s *Server) updateSkinDetail(w http.ResponseWriter, r *http.Request, public
 	}
 	if record.Status != "active" {
 		writeError(w, http.StatusNotFound, "skin asset was not found")
+		return
+	}
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
 		return
 	}
 	if claims.Subject != record.OwnerID && !isSkinAdmin(claims) {
@@ -813,9 +826,7 @@ func (s *Server) deleteSkin(w http.ResponseWriter, r *http.Request, publicID str
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var actorStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&actorStatus); err != nil || actorStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
+	if !lockSkinAccount(w, r, tx, claims.Subject) {
 		return
 	}
 	var assetID, ownerID int64
@@ -833,6 +844,10 @@ func (s *Server) deleteSkin(w http.ResponseWriter, r *http.Request, publicID str
 	}
 	if status != "active" {
 		writeError(w, http.StatusNotFound, "skin asset was not found")
+		return
+	}
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
 		return
 	}
 	if claims.Subject != ownerID && !isSkinAdmin(claims) {
@@ -966,9 +981,7 @@ func (s *Server) skinWardrobeItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var userStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, userID).Scan(&userStatus); err != nil || userStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
+	if !lockSkinAccount(w, r, tx, userID) {
 		return
 	}
 	var assetID, ownerID int64
@@ -981,6 +994,9 @@ func (s *Server) skinWardrobeItem(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load skin asset")
+		return
+	}
+	if _, ok := requireCurrentWriteActor(w, r, tx); !ok {
 		return
 	}
 	if status != "active" || (ownerID != userID && (reviewStatus != "approved" || visibility == "private")) {
@@ -1085,9 +1101,11 @@ func (s *Server) createPlayerProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var userStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&userStatus); err != nil || userStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
+	if !lockSkinAccount(w, r, tx, claims.Subject) {
+		return
+	}
+	claims, ok := requireCurrentWritePermission(w, r, tx, "skin.profile.create")
+	if !ok {
 		return
 	}
 	var count int
@@ -1170,9 +1188,7 @@ func (s *Server) updatePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var userStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&userStatus); err != nil || userStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
+	if !lockSkinAccount(w, r, tx, claims.Subject) {
 		return
 	}
 	var profileID, ownerID int64
@@ -1190,6 +1206,9 @@ func (s *Server) updatePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 	}
 	if status != "active" {
 		writeError(w, http.StatusNotFound, "player profile was not found")
+		return
+	}
+	if _, ok := requireCurrentWritePermission(w, r, tx, "skin.profile.write"); !ok {
 		return
 	}
 	if claims.Subject != ownerID {
@@ -1290,9 +1309,7 @@ func (s *Server) deletePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var userStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&userStatus); err != nil || userStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
+	if !lockSkinAccount(w, r, tx, claims.Subject) {
 		return
 	}
 	var profileID, ownerID int64
@@ -1310,6 +1327,9 @@ func (s *Server) deletePlayerProfile(w http.ResponseWriter, r *http.Request, pub
 	}
 	if status != "active" {
 		writeError(w, http.StatusNotFound, "player profile was not found")
+		return
+	}
+	if _, ok := requireCurrentWritePermission(w, r, tx, "skin.profile.write"); !ok {
 		return
 	}
 	if claims.Subject != ownerID {

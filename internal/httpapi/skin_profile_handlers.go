@@ -45,9 +45,7 @@ func (s *Server) setPlayerProfileTexture(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var userStatus string
-	if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, claims.Subject).Scan(&userStatus); err != nil || userStatus != "active" {
-		writeError(w, http.StatusForbidden, "account is unavailable")
+	if !lockSkinAccount(w, r, tx, claims.Subject) {
 		return
 	}
 	for index := range updates {
@@ -87,6 +85,9 @@ func (s *Server) setPlayerProfileTexture(w http.ResponseWriter, r *http.Request)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load player profile")
+		return
+	}
+	if _, ok := requireCurrentWritePermission(w, r, tx, "skin.profile.write"); !ok {
 		return
 	}
 	if profileVisibility != "private" {
@@ -246,14 +247,15 @@ func (s *Server) launcherCredential(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback(r.Context())
-		var status string
-		if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, userID).Scan(&status); err != nil || status != "active" {
-			writeError(w, http.StatusForbidden, "account is unavailable")
+		if !lockSkinAccount(w, r, tx, userID) {
 			return
 		}
 		accountUUID, err := ensureYggdrasilAccountTx(r.Context(), tx, userID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create launcher account identity")
+			return
+		}
+		if _, ok := requireCurrentWritePermission(w, r, tx, yggdrasilLoginPermission); !ok {
 			return
 		}
 		if _, err = tx.Exec(r.Context(), `delete from yggdrasil_join_sessions
@@ -286,9 +288,10 @@ func (s *Server) launcherCredential(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback(r.Context())
-		var status string
-		if err = tx.QueryRow(r.Context(), `select status from users where id=$1 for update`, userID).Scan(&status); err != nil || status != "active" {
-			writeError(w, http.StatusForbidden, "account is unavailable")
+		if !lockSkinAccount(w, r, tx, userID) {
+			return
+		}
+		if _, ok := requireCurrentWriteActor(w, r, tx); !ok {
 			return
 		}
 		var accountUserID int64

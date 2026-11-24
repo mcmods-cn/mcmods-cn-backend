@@ -391,27 +391,7 @@ func TestSkinCreationUsesReviewPolicyInForceAfterFileProcessing(t *testing.T) {
 	}
 	result := auditCompletionAsyncJSON(f.test013Fixture, f.editor, http.MethodPost, "/api/v1/skins",
 		skinAssetCreateRequest{FileID: file, Kind: "skin", Name: "Policy change", Visibility: "public"})
-	deadline := time.NewTimer(10 * time.Second)
-	defer deadline.Stop()
-	tick := time.NewTicker(10 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		var waiting bool
-		if err = f.db.QueryRow(f.ctx, `select exists(select 1 from pg_stat_activity where datname=current_database()
-			and $1::int=any(pg_blocking_pids(pid)))`, policyChange.Conn().PgConn().PID()).Scan(&waiting); err != nil {
-			t.Fatal(err)
-		}
-		if waiting {
-			break
-		}
-		select {
-		case <-tick.C:
-		case ended := <-result:
-			t.Fatalf("creation finished before policy change: %d %v", ended.status, ended.err)
-		case <-deadline.C:
-			t.Fatal("skin creation did not wait for the account row")
-		}
-	}
+	f.waitForAccountLock(t, policyChange, result)
 	if _, err = policyChange.Exec(f.ctx, `update system_settings set value=jsonb_set(value,'{catalogCreate}','true') where key=$1`, reviewConfigSettingKey); err != nil {
 		t.Fatal(err)
 	}
@@ -428,6 +408,68 @@ func TestSkinCreationUsesReviewPolicyInForceAfterFileProcessing(t *testing.T) {
 	}
 	f.pendingRevision(t, asset.PublicID)
 	f.require(t, "", http.MethodGet, "/api/v1/skins/"+asset.PublicID, nil, http.StatusNotFound)
+}
+
+func (f test039Fixture) waitForAccountLock(t *testing.T, locker pgx.Tx, result <-chan auditCompletionHTTPResult) {
+	t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var waiting bool
+		if err := f.db.QueryRow(f.ctx, `select exists(select 1 from pg_stat_activity where datname=current_database()
+			and $1::int=any(pg_blocking_pids(pid)))`, locker.Conn().PgConn().PID()).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case <-tick.C:
+		case ended := <-result:
+			t.Fatalf("request finished before the account lock was released: %d %v", ended.status, ended.err)
+		case <-deadline.C:
+			t.Fatal("request did not wait for the account row")
+		}
+	}
+}
+
+func TestPlayerProfileCreationUsesNewQuotaAfterAccountLock(t *testing.T) {
+	f := newTEST039Fixture(t)
+	userID := f.userIDs[f.editor]
+	grantTEST044Permissions(t, f.ctx, f.db, userID, "skin.profile.limit.1")
+	f.profile(t, f.editor, "FirstProfile", "private")
+	change, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer change.Rollback(f.ctx)
+	if _, err = change.Exec(f.ctx, "select id from users where id=$1 for no key update", userID); err != nil {
+		t.Fatal(err)
+	}
+	result := auditCompletionAsyncJSON(f.test013Fixture, f.editor, http.MethodPost, "/api/v1/users/me/player-profiles",
+		playerProfileCreateRequest{Name: "SecondProfile", Visibility: "private"})
+	f.waitForAccountLock(t, change, result)
+	// The operator raises the limit from one to the normal default before
+	// the pending submission acquires the account's quota lock.
+	tag, err := change.Exec(f.ctx, `delete from user_permissions grant_row using permissions permission
+		where grant_row.user_id=$1 and grant_row.permission_id=permission.id and permission.code='skin.profile.limit.1'`, userID)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("update profile quota: rows=%d err=%v", tag.RowsAffected(), err)
+	}
+	if err = change.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	out := <-result
+	if out.err != nil || out.status != http.StatusCreated {
+		t.Fatalf("profile creation after quota increase: %d %s %v", out.status, out.raw, out.err)
+	}
+	var profiles, defaults int
+	if err := f.db.QueryRow(f.ctx, `select count(*),count(*) filter(where is_default)
+		from player_profiles where user_id=$1 and status='active'`, userID).Scan(&profiles, &defaults); err != nil || profiles != 2 || defaults != 1 {
+		t.Fatalf("profiles=%d defaults=%d err=%v", profiles, defaults, err)
+	}
 }
 
 func TestTEST039ActualDerivedUploadRollbackUsesDurableCompensationAndFreshRetryFullHTTPIntegration(t *testing.T) {

@@ -52,6 +52,15 @@ func requireCurrentWriteActor(w http.ResponseWriter, r *http.Request, tx pgx.Tx)
 	return security.Claims{}, false
 }
 
+func requireCurrentWritePermission(w http.ResponseWriter, r *http.Request, tx pgx.Tx, permission string) (security.Claims, bool) {
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if ok && !claimsAllow(actor, permission) {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return security.Claims{}, false
+	}
+	return actor, ok
+}
+
 func writeCurrentWriteActorFailure(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
