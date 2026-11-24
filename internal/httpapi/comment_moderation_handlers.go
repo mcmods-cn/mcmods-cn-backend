@@ -118,7 +118,6 @@ func (s *Server) pendingComments(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reviewPendingComment(w http.ResponseWriter, r *http.Request) {
-	claims := currentClaims(r)
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("commentId")))
 	var request struct {
 		Status string `json:"status"`
@@ -150,6 +149,10 @@ func (s *Server) reviewPendingComment(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, 500, "failed to load comment review")
+		return
+	}
+	claims, active := requireCurrentReviewActor(w, r, tx)
+	if !active {
 		return
 	}
 	globalModerator := claimsAllow(claims, "comment.moderate")

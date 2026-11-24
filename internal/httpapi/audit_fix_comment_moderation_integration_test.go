@@ -129,3 +129,38 @@ func TestAuditFixCMP004PendingCommentReviewRecoveryAndAtomicDelivery(t *testing.
 	}
 	t.Log(fmt.Sprintf("controlled anti-abuse decision + real creation handler/PG; HTTP independent approve/reject/restore, denied and repeated reviews, author activity exactly once"))
 }
+
+func TestPendingCommentReviewUsesCurrentProjectGrant(t *testing.T) {
+	f := newTEST013Fixture(t)
+	s := f.origin.Config.Handler.(*Server)
+	var commentID string
+	if err := f.db.QueryRow(f.ctx, `insert into comments(target_type,target_id,author_id,body,status)
+		values('mod',$1,$2,'Synthetic pending comment','pending') returning public_id`, f.modID, f.userIDs[f.editor]).Scan(&commentID); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPatch, "/api/v1/comments/"+commentID+"/review", bytes.NewBufferString(`{"status":"rejected"}`)).WithContext(f.ctx)
+	request.SetPathValue("commentId", commentID)
+	request.Header.Set("Authorization", "Bearer "+f.denied)
+	recorder := httptest.NewRecorder()
+	scope := "project.comment.moderate." + f.modCode
+	s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		if claimsAllow(currentClaims(r), scope) {
+			t.Fatal("fixture unexpectedly starts with project moderation permission")
+		}
+		grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.denied], scope)
+		s.reviewPendingComment(w, r)
+	})(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("current project moderator review = %d %s", recorder.Code, recorder.Body.String())
+	}
+	var state string
+	var reviewer int64
+	if err := f.db.QueryRow(f.ctx, `select comment.status,audit.actor_id from comments comment
+		join audit_events audit on audit.aggregate_type='comment_moderation' and audit.aggregate_key=comment.public_id
+		and audit.action='comment.review.rejected' where comment.public_id=$1`, commentID).Scan(&state, &reviewer); err != nil {
+		t.Fatal(err)
+	}
+	if state != "hidden" || reviewer != f.userIDs[f.denied] {
+		t.Fatalf("review state=%s actor=%d", state, reviewer)
+	}
+}
