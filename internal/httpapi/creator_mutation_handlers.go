@@ -340,9 +340,14 @@ func (s *Server) creatorCollaborators(ctx context.Context, creatorID int64) ([]c
 		 and collaborator_binding.creator_id<>own_binding.creator_id
 		join creators collaborator on collaborator.id=collaborator_binding.creator_id
 		where own_binding.creator_id=$1 and own_binding.status='approved' and collaborator_binding.status='approved'
-		  and (own_binding.subject_type<>'mod' or exists(
-		    select 1 from mods shared_mod where shared_mod.id=own_binding.subject_id and shared_mod.review_status='approved'
-		  ))
+		  and (
+		    (own_binding.subject_type='mod' and exists(
+		      select 1 from mods shared where shared.id=own_binding.subject_id and shared.review_status='approved'))
+		    or (own_binding.subject_type='modpack' and exists(
+		      select 1 from modpacks shared where shared.id=own_binding.subject_id and shared.review_status='approved'))
+		    or exists(select 1 from simple_projects shared where shared.project_type=own_binding.subject_type
+		      and shared.id=own_binding.subject_id and shared.review_status='approved')
+		  )
 		  and collaborator.review_status='approved'
 		order by collaborator.name`, creatorID)
 	if err != nil {

@@ -151,3 +151,58 @@ func TestCreatorProfileEditWaitsForFirstPublicationIntegration(t *testing.T) {
 		t.Fatal("a waiting edit added a revision after its baseline changed")
 	}
 }
+
+func TestCreatorCollaborationsFollowPublishedProjectsIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	author := auditOSS001CreateReviewedCreator(t, f, "author")
+	team := auditOSS001CreateReviewedCreator(t, f, "team")
+	var packID, pluginID int64
+	var pack, plugin string
+	if err := f.db.QueryRow(f.ctx, `insert into modpacks(slug,primary_name,review_status,submitted_by)
+		values('fixture-pack','Fixture pack','approved',$1) returning id,public_id`, f.userIDs[f.editor]).Scan(&packID, &pack); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.QueryRow(f.ctx, `insert into simple_projects(project_type,slug,primary_name,review_status,submitted_by)
+		values('plugin','fixture-plugin','Fixture plugin','approved',$1) returning id,public_id`, f.userIDs[f.editor]).Scan(&pluginID, &plugin); err != nil {
+		t.Fatal(err)
+	}
+	for kind, projectID := range map[string]int64{"modpack": packID, "plugin": pluginID} {
+		if _, err := f.db.Exec(f.ctx, `insert into content_creator_bindings(subject_type,subject_id,creator_id,status)
+			select $1,$2,id,'approved' from creators where public_id=any($3::text[])`, kind, projectID, []string{author, team}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(want bool) {
+		t.Helper()
+		detail := decodeTEST022Data[struct {
+			Collaborators []creatorSummary `json:"collaborators"`
+		}](t, f.require(t, "", http.MethodGet, "/api/v1/creators/"+author, nil, http.StatusOK))
+		var found bool
+		for _, peer := range detail.Collaborators {
+			if peer.PublicID == team {
+				found = true
+			}
+		}
+		if found != want {
+			t.Fatalf("shared published project: collaborator present=%v, want %v", found, want)
+		}
+	}
+	check(true)
+	for _, project := range []struct {
+		kind, id           string
+		stillCollaborating bool
+	}{{"modpack", pack, true}, {"plugin", plugin, false}} {
+		tx, err := f.db.Begin(f.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = f.server.moderationHideTarget(f.ctx, tx, project.kind, project.id); err != nil {
+			_ = tx.Rollback(f.ctx)
+			t.Fatal(err)
+		}
+		if err = tx.Commit(f.ctx); err != nil {
+			t.Fatal(err)
+		}
+		check(project.stillCollaborating)
+	}
+}
