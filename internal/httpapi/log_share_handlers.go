@@ -390,32 +390,41 @@ func (s *Server) downloadLogShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "该日志不能下载")
 		return
 	}
+	if !share.Downloadable {
+		writeLogShareReadError(w, errors.New("sanitized log body unavailable"))
+		return
+	}
 	name := record.OriginalName
 	if strings.EqualFold(filepath.Ext(name), ".zip") || len(share.Entries) > 1 {
-		rows, queryErr := s.db.Query(r.Context(), `select left(safe_display_name,512),sanitized_text
+		rows, queryErr := s.db.Query(r.Context(), `select entry_index,sanitized_text
 			from log_share_entries where log_share_id=$1 and status='ready' and sanitized_text is not null order by entry_index`, record.ID)
 		if queryErr != nil {
-			writeError(w, http.StatusInternalServerError, "读取脱敏日志下载内容失败")
+			writeLogShareReadError(w, queryErr)
 			return
 		}
 		defer rows.Close()
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", contentDispositionAttachment(safeLogDownloadName(name, ".zip")))
 		writer := zip.NewWriter(w)
-		for rows.Next() {
-			var entryName, text string
-			if scanErr := rows.Scan(&entryName, &text); scanErr != nil {
-				_ = writer.Close()
-				return
+		for _, entry := range share.Entries {
+			var index int
+			var text string
+			if !rows.Next() || rows.Scan(&index, &text) != nil || index != entry.Index || int64(len(text)) != entry.ByteSize {
+				// A streamed response cannot change status. An interrupted transfer
+				// lets the client retry without treating a partial ZIP as complete.
+				panic(http.ErrAbortHandler)
 			}
-			part, createErr := writer.Create(entryName)
+			part, createErr := writer.Create(entry.Name)
 			if createErr != nil {
-				_ = writer.Close()
-				return
+				panic(http.ErrAbortHandler)
 			}
-			_, _ = io.WriteString(part, text)
+			if _, err = io.WriteString(part, text); err != nil {
+				panic(http.ErrAbortHandler)
+			}
 		}
-		_ = writer.Close()
+		if rows.Next() || rows.Err() != nil || writer.Close() != nil {
+			panic(http.ErrAbortHandler)
+		}
 		return
 	}
 	extension := strings.ToLower(filepath.Ext(name))

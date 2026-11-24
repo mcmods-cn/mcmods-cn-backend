@@ -209,19 +209,22 @@ func (s *Server) loadLogShareMetadata(ctx context.Context, code string, viewer s
 	if err != nil {
 		return publicLogShareResponse{}, logShareRecord{}, err
 	}
-	rows, err := s.db.Query(ctx, `select entry_index,left(safe_display_name,512),left(content_type,128),byte_size,line_count,left(checksum,128)
+	rows, err := s.db.Query(ctx, `select entry_index,left(safe_display_name,512),left(content_type,128),byte_size,line_count,left(checksum,128),sanitized_text is not null
 		from log_share_entries where log_share_id=$1 and status='ready' order by entry_index limit $2`, record.ID, maxLogArchiveFiles+1)
 	if err != nil {
 		return publicLogShareResponse{}, logShareRecord{}, err
 	}
 	defer rows.Close()
 	entries := make([]logShareEntryMetadata, 0)
+	downloadable := record.SourceType == "file"
 	for rows.Next() {
 		var entry logShareEntryMetadata
-		if err = rows.Scan(&entry.Index, &entry.Name, &entry.ContentType, &entry.ByteSize, &entry.LineCount, &entry.Checksum); err != nil {
+		var inline bool
+		if err = rows.Scan(&entry.Index, &entry.Name, &entry.ContentType, &entry.ByteSize, &entry.LineCount, &entry.Checksum, &inline); err != nil {
 			return publicLogShareResponse{}, logShareRecord{}, err
 		}
 		entries = append(entries, entry)
+		downloadable = downloadable && inline
 	}
 	if err = rows.Err(); err != nil {
 		return publicLogShareResponse{}, logShareRecord{}, err
@@ -232,7 +235,7 @@ func (s *Server) loadLogShareMetadata(ctx context.Context, code string, viewer s
 	response := publicLogShareResponse{
 		PublicCode: record.PublicCode, SourceType: record.SourceType, Title: record.Title, OriginalName: record.OriginalName,
 		Status: record.Status, RedactionVersion: record.RedactionVersion, RedactionCounts: record.RedactionCounts,
-		CreatedAt: record.CreatedAt, ExpiresAt: record.ExpiresAt, Downloadable: record.SourceType == "file", Entries: entries,
+		CreatedAt: record.CreatedAt, ExpiresAt: record.ExpiresAt, Downloadable: downloadable, Entries: entries,
 	}
 	return response, record, nil
 }
