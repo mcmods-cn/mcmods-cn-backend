@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -110,5 +112,66 @@ func assertLogShareChunkBudget(t *testing.T, response *httptest.ResponseRecorder
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil || envelope.Data.HasMore != hasMore || len([]rune(envelope.Data.Text)) > maxLogShareChunkRunes {
 		t.Fatalf("chunk decode/bounds: hasMore=%v runes=%d err=%v", envelope.Data.HasMore, len([]rune(envelope.Data.Text)), err)
+	}
+}
+
+func TestLogShareDownloadRequiresEveryReadyEntryIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	pool := newTEST018IsolatedDatabase(t, ctx)
+	var shareID int64
+	err := pool.QueryRow(ctx, `insert into log_shares(public_code,source_type,original_name,status,redaction_version,redaction_applied_version,expires_at)
+ values('complete-zip-test','file','report.zip','ready',$1,$1,now()+interval '1 day') returning id`, logRedactionVersion).Scan(&shareID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `insert into log_share_entries(log_share_id,entry_index,safe_display_name,sanitized_text,byte_size,status)
+ values($1,0,'one.log','one',3,'ready'),($1,1,'two.log','two',3,'ready')`, shareID); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{db: pool}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /s/{code}/download", s.downloadLogShare)
+	origin := httptest.NewServer(mux)
+	defer origin.Close()
+	get := func() ([]byte, int, error) {
+		r, err := http.NewRequestWithContext(ctx, http.MethodGet, origin.URL+"/s/complete-zip-test/download", nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		res, err := origin.Client().Do(r)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer res.Body.Close()
+		data, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+		return data, res.StatusCode, err
+	}
+	body, status, err := get()
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("complete download status %d: %v", status, err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil || len(zr.File) != 2 {
+		t.Fatalf("incomplete initial ZIP: %v", err)
+	}
+	for i, want := range []string{"one", "two"} {
+		file := zr.File[i]
+		r, err := file.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		text, err := io.ReadAll(r)
+		r.Close()
+		if err != nil || file.Name != want+".log" || string(text) != want {
+			t.Fatalf("entry %d: name=%s body=%q err=%v", i, file.Name, text, err)
+		}
+	}
+	if _, err = pool.Exec(ctx, "update log_share_entries set sanitized_text=null where log_share_id=$1 and entry_index=1", shareID); err != nil {
+		t.Fatal(err)
+	}
+	body, status, err = get()
+	if err == nil && status == http.StatusOK {
+		t.Fatalf("incomplete archive reported success with %d bytes", len(body))
 	}
 }
