@@ -867,6 +867,61 @@ func TestTEST036ExpiredLeaseRestartCompensatesActualUploadedArtifactIntegration(
 	}
 }
 
+func TestBlueprintConversionUsesTheVariantPublishedWhileAdmissionWaits(t *testing.T) {
+	f := newTEST036Fixture(t)
+	raw, _, err := encodeBlueprint(test036Document(), "nbt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	upload := f.upload(t, f.editor, "publishing.nbt", raw)
+	if err := f.worker("normalize").processJob(f.ctx, upload.jobID); err != nil {
+		t.Fatal(err)
+	}
+	var variantID string
+	if err := f.db.QueryRow(f.ctx, `update blueprint_variants set status='processing'
+		where blueprint_id=(select id from blueprints where public_id=$1) and format='nbt' and original returning public_id`,
+		upload.publicID).Scan(&variantID); err != nil {
+		t.Fatal(err)
+	}
+	publisher, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publisher.Rollback(f.ctx)
+	if _, err := publisher.Exec(f.ctx, `select id from blueprints where public_id=$1 for no key update`, upload.publicID); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the existing admission budget as well so that a caller which
+	// reads the variant before the publication commits also has to wait.
+	if _, err := publisher.Exec(f.ctx, `select pg_advisory_xact_lock(hashtextextended('blueprint-conversion-global',0))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.Exec(f.ctx, `update blueprint_variants set status='ready' where public_id=$1`, variantID); err != nil {
+		t.Fatal(err)
+	}
+	result := auditCompletionAsyncJSON(f.test013Fixture, f.editor, http.MethodPost, "/api/v1/blueprints/"+upload.publicID+"/convert", map[string]string{"format": "nbt"})
+	auditCompletionAwaitLocks(t, f.test013Fixture, 1)
+	if err := publisher.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	response := <-result
+	if response.err != nil || response.status != http.StatusOK {
+		t.Fatalf("expected the published variant, status=%d err=%v body=%s", response.status, response.err, response.raw)
+	}
+	data := decodeTEST022Data[struct {
+		VariantID     string
+		AlreadyExists bool
+	}](t, response.raw)
+	if !data.AlreadyExists || data.VariantID != variantID {
+		t.Fatalf("published variant %q, received %+v", variantID, data)
+	}
+	var extraJobs int
+	if err := f.db.QueryRow(f.ctx, `select count(*) from blueprint_jobs where operation='convert'
+		and blueprint_id=(select id from blueprints where public_id=$1)`, upload.publicID).Scan(&extraJobs); err != nil || extraJobs != 0 {
+		t.Fatalf("extra conversion jobs=%d, err=%v", extraJobs, err)
+	}
+}
+
 func TestTEST036PublicConversionConcurrentHTTPAdmissionAndDeduplication(t *testing.T) {
 	for _, mode := range []string{"per-user", "global", "same-operation"} {
 		t.Run(mode, func(t *testing.T) {
