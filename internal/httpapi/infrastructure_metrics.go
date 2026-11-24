@@ -307,19 +307,23 @@ func (s *Server) adminReplayDeadLetter(w http.ResponseWriter, r *http.Request) {
 	newEventID := eventID
 	if stage == "publish" {
 		tag, updateErr := tx.Exec(r.Context(), `update nats_outbox set status='pending',published_at=null,attempts=0,last_error='',
-			available_at=now(),locked_at=null,locked_by='',updated_at=now() where event_id=$1`, eventID)
-		if updateErr != nil || tag.RowsAffected() != 1 {
+			available_at=now(),locked_at=null,locked_by='',updated_at=now() where event_id=$1 and status='dead'`, eventID)
+		if updateErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to restore outbox event")
+			return
+		}
+		if tag.RowsAffected() != 1 {
 			writeError(w, http.StatusConflict, "original outbox event cannot be replayed")
 			return
 		}
 	} else {
-		var envelope queue.EventEnvelope
-		if json.Unmarshal(payload, &envelope) != nil || envelope.EventID == "" || envelope.SchemaVersion != 1 || envelope.AggregateType == "" || envelope.AggregateID == "" {
+		body, envelope, decodeErr := queue.UnwrapEvent(payload)
+		if decodeErr != nil || stage != "consumer:"+subject || envelope.EventID != eventID || envelope.EventType != eventType {
 			writeError(w, http.StatusConflict, "dead letter event schema is unsupported")
 			return
 		}
 		newEventID, err = queue.EnqueueTx(r.Context(), tx, subject, eventType, envelope.AggregateType, envelope.AggregateID,
-			envelope.TraceID, json.RawMessage(envelope.Payload))
+			envelope.TraceID, json.RawMessage(body))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to enqueue dead letter replay")
 			return

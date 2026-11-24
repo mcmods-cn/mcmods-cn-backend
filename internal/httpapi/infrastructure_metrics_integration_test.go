@@ -118,6 +118,66 @@ func TestAdminDeadLetterReplayRestoresPublishAndConsumerFailuresIntegration(t *t
 	assertDeadLetterReplayAudit(t, ctx, pool, consumerDeadLetterID, 1001, originalEnvelope.EventID, consumerPayload.Data.EventID)
 }
 
+func TestDeadLetterReplayKeepsUnrecoverableEvidenceIntegration(t *testing.T) {
+	pool := openDeadLetterReplayTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	server := &Server{db: pool}
+	event := queue.EventEnvelope{SchemaVersion: 1, OccurredAt: time.Now().UTC(), EventID: "original",
+		EventType: "test.consume", AggregateType: "test", AggregateID: "fixture", Payload: json.RawMessage(`{"item":"sample"}`)}
+	for _, test := range []struct {
+		name    string
+		prepare func(*queue.EventEnvelope)
+	}{
+		{"missing-time", func(e *queue.EventEnvelope) { e.OccurredAt = time.Time{} }},
+		{"missing-data", func(e *queue.EventEnvelope) { e.Payload = nil }},
+		{"different-event", func(e *queue.EventEnvelope) { e.EventID = "other" }},
+		{"different-type", func(e *queue.EventEnvelope) { e.EventType = "other" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			item := event
+			item.EventID = test.name
+			test.prepare(&item)
+			raw, err := json.Marshal(item)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var id int64
+			if err := pool.QueryRow(ctx, `insert into dead_letter_events(event_id,event_type,subject,payload,failure_stage,attempts,last_error)
+				values($1,'test.consume','note',$2::jsonb,'consumer:note',3,'fixture') returning id`, test.name, string(raw)).Scan(&id); err != nil {
+				t.Fatal(err)
+			}
+			if response := replayDeadLetter(t, server, id, 1001); response.Code != http.StatusConflict {
+				t.Fatalf("invalid envelope HTTP %d", response.Code)
+			}
+		})
+	}
+	if _, err := pool.Exec(ctx, `insert into nats_outbox(event_id,event_type,subject,aggregate_type,aggregate_id,payload,status,attempts,locked_by)
+		values('already-running','test.publish','note','test','run','{}','publishing',2,'current')`); err != nil {
+		t.Fatal(err)
+	}
+	var publishID int64
+	if err := pool.QueryRow(ctx, `insert into dead_letter_events(event_id,event_type,subject,payload,failure_stage,attempts,last_error)
+		values('already-running','test.publish','note','{}','publish',3,'fixture') returning id`).Scan(&publishID); err != nil {
+		t.Fatal(err)
+	}
+	if response := replayDeadLetter(t, server, publishID, 1001); response.Code != http.StatusConflict {
+		t.Fatalf("live publisher HTTP %d", response.Code)
+	}
+	var consistent bool
+	if err := pool.QueryRow(ctx, `select (select count(*)=1 from nats_outbox) and
+		exists(select 1 from nats_outbox where status='publishing' and attempts=2 and locked_by='current') and
+		not exists(select 1 from dead_letter_events where replayed_at is not null) and not exists(select 1 from app_logs)`).Scan(&consistent); err != nil || !consistent {
+		t.Fatalf("original work or fault evidence changed: consistent=%v err=%v", consistent, err)
+	}
+	if _, err := pool.Exec(ctx, `alter table nats_outbox rename column attempts to temporarily_unavailable`); err != nil {
+		t.Fatal(err)
+	}
+	if response := replayDeadLetter(t, server, publishID, 1001); response.Code != http.StatusInternalServerError {
+		t.Fatalf("storage failure HTTP %d", response.Code)
+	}
+}
+
 func replayDeadLetter(t *testing.T, server *Server, id, actor int64) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/dead-letters/replay", nil)
