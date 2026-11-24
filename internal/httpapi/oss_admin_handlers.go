@@ -1090,7 +1090,7 @@ func (s *Server) resolveUserOSSUploadCategory(r *http.Request, category, source 
 			return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
 		}
 		if candidate.projectType == "modpack" {
-			pack, err := s.modpackBySiteID(r.Context(), normalizeModSiteID(siteID), claims.Subject, true)
+			pack, err := modpackBySiteID(r.Context(), s.db, normalizeModSiteID(siteID), claims.Subject, true)
 			if err != nil {
 				return ossUserCategory(claims.Subject, normalizeOSSUserFileScope(category, source)), nil
 			}

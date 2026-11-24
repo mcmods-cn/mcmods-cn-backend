@@ -373,6 +373,13 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
 		return
 	}
+	mod, err := modByID(r.Context(), tx, modID, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取已创建模组失败")
+		return
+	}
+	mod.SubmissionRevisionID = createdRevision.RevisionPublicID
+	mod.ChangeRequestID = createdRevision.ChangeRequestPublicID
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "提交模组资料失败")
 		return
@@ -381,13 +388,6 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mod, err := s.modByID(r.Context(), modID, claims.Subject)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取已创建模组失败")
-		return
-	}
-	mod.SubmissionRevisionID = createdRevision.RevisionPublicID
-	mod.ChangeRequestID = createdRevision.ChangeRequestPublicID
 	writeJSON(w, http.StatusCreated, mod)
 }
 
@@ -669,6 +669,13 @@ func (s *Server) modEditorDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mod)
 }
 
+// Both pool-backed reads and mutation receipts use the same project
+// projection. The caller selects its reading transaction.
+type projectDetailReader interface {
+	databaseQuery
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }
@@ -828,8 +835,8 @@ func (s *Server) loadModListAssociations(ctx context.Context, mods []modResponse
 	return rows.Err()
 }
 
-func (s *Server) modByID(ctx context.Context, id int64, viewerID int64) (modResponse, error) {
-	row := s.db.QueryRow(
+func modByID(ctx context.Context, reader projectDetailReader, id int64, viewerID int64) (modResponse, error) {
+	row := reader.QueryRow(
 		ctx,
 		`select id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
@@ -842,7 +849,7 @@ func (s *Server) modByID(ctx context.Context, id int64, viewerID int64) (modResp
 	if err != nil {
 		return mod, err
 	}
-	err = s.loadModAssociations(ctx, &mod)
+	err = loadModAssociations(ctx, reader, &mod)
 	return mod, err
 }
 
@@ -860,7 +867,7 @@ func (s *Server) modBySiteID(ctx context.Context, siteID string, viewerID int64)
 	if err != nil {
 		return mod, err
 	}
-	err = s.loadModAssociations(ctx, &mod)
+	err = loadModAssociations(ctx, s.db, &mod)
 	return mod, err
 }
 
@@ -874,23 +881,23 @@ func (s *Server) modBySiteIDForEditor(ctx context.Context, siteID string) (modRe
 	if err != nil {
 		return mod, err
 	}
-	err = s.loadModAssociations(ctx, &mod)
+	err = loadModAssociations(ctx, s.db, &mod)
 	return mod, err
 }
 
-func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) error {
+func loadModAssociations(ctx context.Context, reader projectDetailReader, mod *modResponse) error {
 	if mod.SubmittedByInternal != nil {
-		if err := s.db.QueryRow(ctx, `select public_id from users where id=$1`, *mod.SubmittedByInternal).Scan(&mod.SubmittedBy); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if err := reader.QueryRow(ctx, `select public_id from users where id=$1`, *mod.SubmittedByInternal).Scan(&mod.SubmittedBy); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 	}
-	if err := s.db.QueryRow(ctx, `select default_locale from content_subjects where subject_id=$1 and subject_type='mod'`, mod.ID).Scan(&mod.DefaultLocale); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err := reader.QueryRow(ctx, `select default_locale from content_subjects where subject_id=$1 and subject_type='mod'`, mod.ID).Scan(&mod.DefaultLocale); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if mod.DefaultLocale == "" {
 		mod.DefaultLocale = "en-US"
 	}
-	rows, err := s.db.Query(ctx, `select id,identifier,is_primary,minecraft_version_min,minecraft_version_max,minecraft_versions
+	rows, err := reader.Query(ctx, `select id,identifier,is_primary,minecraft_version_min,minecraft_version_max,minecraft_versions
 		from mod_identifiers where mod_id=$1 order by is_primary desc,display_order,id`, mod.ID)
 	if err != nil {
 		return err
@@ -909,7 +916,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select locale,name,summary,content_markdown from content_localizations
+	rows, err = reader.Query(ctx, `select locale,name,summary,content_markdown from content_localizations
 		where subject_id=$1 and subject_type='mod' and review_status='approved' order by locale`, mod.ID)
 	if err != nil {
 		return err
@@ -928,7 +935,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
+	rows, err = reader.Query(ctx, `select gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
 		from mod_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id
 		where gallery.mod_id=$1 and file.status='active' order by gallery.display_order,gallery.id`, mod.ID)
 	if err != nil {
@@ -949,7 +956,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select link_type, url, note from mod_links where mod_id = $1 order by display_order, id`, mod.ID)
+	rows, err = reader.Query(ctx, `select link_type, url, note from mod_links where mod_id = $1 order by display_order, id`, mod.ID)
 	if err != nil {
 		return err
 	}
@@ -967,7 +974,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select loader, array_agg(minecraft_version order by minecraft_version desc) from mod_loader_compatibilities where mod_id=$1 group by loader order by loader`, mod.ID)
+	rows, err = reader.Query(ctx, `select loader, array_agg(minecraft_version order by minecraft_version desc) from mod_loader_compatibilities where mod_id=$1 group by loader order by loader`, mod.ID)
 	if err != nil {
 		return err
 	}
@@ -985,7 +992,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select tag from mod_tags where mod_id = $1 order by tag`, mod.ID)
+	rows, err = reader.Query(ctx, `select tag from mod_tags where mod_id = $1 order by tag`, mod.ID)
 	if err != nil {
 		return err
 	}
@@ -1003,7 +1010,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select creator.public_id,creator.kind,creator.name,creator.avatar_url,
+	rows, err = reader.Query(ctx, `select creator.public_id,creator.kind,creator.name,creator.avatar_url,
 		role.public_id,coalesce(role.name,author.role_snapshot),
 		coalesce((select jsonb_agg(jsonb_build_object(
 			'creatorId',member.public_id,'kind',member.kind,'name',member.name,'avatarUrl',member.avatar_url,
@@ -1040,7 +1047,7 @@ func (s *Server) loadModAssociations(ctx context.Context, mod *modResponse) erro
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `select relationship_group.id,relationship_group.label,relationship_group.loader,
+	rows, err = reader.Query(ctx, `select relationship_group.id,relationship_group.label,relationship_group.loader,
 		relationship_group.minecraft_versions,relationship_group.mod_version,
 		relationship.id,coalesce(relationship.relation_type,''),coalesce(relationship.related_mod_public_id,''),
 		coalesce(relationship.related_mod_site_id,''),coalesce(relationship.related_mod_name,''),

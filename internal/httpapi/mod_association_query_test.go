@@ -12,7 +12,7 @@ func TestModRelationshipGroupsLoadInOneOrderedQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(source)
-	start := strings.Index(content, "func (s *Server) loadModAssociations")
+	start := strings.Index(content, "func loadModAssociations(")
 	end := strings.Index(content, "func (s *Server) loadIncomingModRelationships")
 	if start < 0 || end <= start {
 		t.Fatal("Mod association loader inventory changed")

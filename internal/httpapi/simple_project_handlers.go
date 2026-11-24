@@ -301,7 +301,7 @@ func (s *Server) simpleProjectItem(w http.ResponseWriter, r *http.Request) {
 		s.createSimpleProjectRevision(w, r, projectType, siteID)
 		return
 	}
-	item, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, currentClaims(r).Subject, false)
+	item, err := simpleProjectBySiteID(r.Context(), s.db, projectType, siteID, currentClaims(r).Subject, false)
 	if err != nil {
 		writeSimpleProjectReadError(w, err, "project not found")
 		return
@@ -343,7 +343,7 @@ func (s *Server) simpleProjectIcon(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) simpleProjectEditor(w http.ResponseWriter, r *http.Request) {
-	item, err := s.simpleProjectBySiteID(r.Context(), normalizeSimpleProjectType(r.PathValue("projectType")),
+	item, err := simpleProjectBySiteID(r.Context(), s.db, normalizeSimpleProjectType(r.PathValue("projectType")),
 		normalizeModSiteID(r.PathValue("siteId")), currentClaims(r).Subject, true)
 	if err != nil {
 		writeSimpleProjectReadError(w, err, "project not found")
@@ -483,6 +483,14 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
 		return
 	}
+	item, err := simpleProjectBySiteID(r.Context(), tx, projectType, snapshot.SiteID, claims.Subject, true)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read created project")
+		return
+	}
+	item.CanEdit = canEditSimpleProject(claims, item)
+	item.SubmissionRevisionID = created.RevisionPublicID
+	item.ChangeRequestID = created.ChangeRequestPublicID
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit project")
 		return
@@ -491,20 +499,12 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		s.refreshProjectACLVersion(r.Context())) {
 		return
 	}
-	item, err := s.simpleProjectBySiteID(r.Context(), projectType, snapshot.SiteID, claims.Subject, true)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read created project")
-		return
-	}
-	item.CanEdit = canEditSimpleProject(claims, item)
-	item.SubmissionRevisionID = created.RevisionPublicID
-	item.ChangeRequestID = created.ChangeRequestPublicID
 	writeJSON(w, http.StatusCreated, item)
 }
 
 func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Request, projectType, siteID string) {
 	claims := currentClaims(r)
-	current, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, claims.Subject, true)
+	current, err := simpleProjectBySiteID(r.Context(), s.db, projectType, siteID, claims.Subject, true)
 	if err != nil {
 		writeSimpleProjectReadError(w, err, "project not found")
 		return
@@ -1080,8 +1080,8 @@ func (s *Server) loadSimpleProjectCatalogAssociations(ctx context.Context, items
 	return rows.Err()
 }
 
-func (s *Server) simpleProjectBySiteID(ctx context.Context, projectType, siteID string, viewerID int64, editor bool) (simpleProjectResponse, error) {
-	row := s.db.QueryRow(ctx, `select project.id,project.public_id,project.project_type,project.slug,project.default_locale,
+func simpleProjectBySiteID(ctx context.Context, reader projectDetailReader, projectType, siteID string, viewerID int64, editor bool) (simpleProjectResponse, error) {
+	row := reader.QueryRow(ctx, `select project.id,project.public_id,project.project_type,project.slug,project.default_locale,
 		project.abbreviation,project.minecraft_versions,project.loaders,project.categories,project.features,project.resolution,
 		project.performance,project.map_size,project.official_status,project.source_status,project.license,
 		project.curseforge_project_id,project.modrinth_project_id,project.icon_url,project.search_keywords,
@@ -1094,13 +1094,13 @@ func (s *Server) simpleProjectBySiteID(ctx context.Context, projectType, siteID 
 		return item, err
 	}
 	values := []simpleProjectResponse{item}
-	if err = s.loadSimpleProjectAssociations(ctx, values); err != nil {
+	if err = loadSimpleProjectAssociations(ctx, reader, values); err != nil {
 		return item, err
 	}
 	return values[0], nil
 }
 
-func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simpleProjectResponse) error {
+func loadSimpleProjectAssociations(ctx context.Context, reader projectDetailReader, items []simpleProjectResponse) error {
 	if len(items) == 0 {
 		return nil
 	}
@@ -1110,7 +1110,7 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 		byID[items[index].ID] = &items[index]
 		ids = append(ids, items[index].ID)
 	}
-	rows, err := s.db.Query(ctx, `select project_id,locale,name,summary,body_markdown from simple_project_localizations where project_id=any($1) order by project_id,locale`, ids)
+	rows, err := reader.Query(ctx, `select project_id,locale,name,summary,body_markdown from simple_project_localizations where project_id=any($1) order by project_id,locale`, ids)
 	if err != nil {
 		return err
 	}
@@ -1126,7 +1126,7 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select project_id,link_type,url,note from simple_project_links where project_id=any($1) order by project_id,display_order,id`, ids)
+	rows, err = reader.Query(ctx, `select project_id,link_type,url,note from simple_project_links where project_id=any($1) order by project_id,display_order,id`, ids)
 	if err != nil {
 		return err
 	}
@@ -1142,7 +1142,7 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select binding.subject_id,creator.public_id,creator.kind,creator.name,creator.avatar_url,
+	rows, err = reader.Query(ctx, `select binding.subject_id,creator.public_id,creator.kind,creator.name,creator.avatar_url,
 		coalesce(role.public_id,''),coalesce(role.name,binding.role_snapshot),coalesce((select jsonb_agg(jsonb_build_object(
 		'creatorId',member.public_id,'kind',member.kind,'name',member.name,'avatarUrl',member.avatar_url,
 		'roleId',member_role.public_id,'role',member_role.name,'title',membership.title) order by membership.display_order,membership.created_at)
@@ -1170,7 +1170,7 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select gallery.project_id,gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
+	rows, err = reader.Query(ctx, `select gallery.project_id,gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
 		from simple_project_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id and file.status='active'
 		where gallery.project_id=any($1) order by gallery.project_id,gallery.display_order,gallery.id`, ids)
 	if err != nil {
@@ -1189,7 +1189,7 @@ func (s *Server) loadSimpleProjectAssociations(ctx context.Context, items []simp
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select ref.project_id,coalesce(route.public_id,''),ref.target_type,ref.raw_identifier,
+	rows, err = reader.Query(ctx, `select ref.project_id,coalesce(route.public_id,''),ref.target_type,ref.raw_identifier,
 		coalesce(mod.slug,modpack.slug,target.slug,''),coalesce(mod.primary_name,modpack.primary_name,target.primary_name,ref.raw_identifier),
 		coalesce(mod.icon_url,modpack.icon_url,target.icon_url,''),ref.target_id is null
 		from simple_project_parent_refs ref left join public_routes route on route.entity_type=ref.target_type and route.internal_id=ref.target_id
@@ -1354,7 +1354,7 @@ func (s *Server) simpleProjectHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	item, err := s.simpleProjectBySiteID(r.Context(), projectType, siteID, claims.Subject, true)
+	item, err := simpleProjectBySiteID(r.Context(), s.db, projectType, siteID, claims.Subject, true)
 	if err != nil {
 		writeSimpleProjectReadError(w, err, "project not found")
 		return

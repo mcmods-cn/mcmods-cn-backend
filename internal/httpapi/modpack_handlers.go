@@ -321,7 +321,7 @@ func (s *Server) modpackItem(w http.ResponseWriter, r *http.Request) {
 		s.createModpackRevision(w, r, siteID)
 		return
 	}
-	item, err := s.modpackBySiteID(r.Context(), siteID, claims.Subject, false)
+	item, err := modpackBySiteID(r.Context(), s.db, siteID, claims.Subject, false)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "modpack not found")
 		return
@@ -348,7 +348,7 @@ func (s *Server) modpackIcon(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) modpackEditor(w http.ResponseWriter, r *http.Request) {
-	item, err := s.modpackBySiteID(r.Context(), normalizeModSiteID(r.PathValue("siteId")), currentClaims(r).Subject, true)
+	item, err := modpackBySiteID(r.Context(), s.db, normalizeModSiteID(r.PathValue("siteId")), currentClaims(r).Subject, true)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "modpack not found")
 		return
@@ -466,14 +466,7 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
 		return
 	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to commit modpack")
-		return
-	}
-	if !s.requireSecurityVersionRefresh(w, r, "create_modpack", 0, s.refreshProjectACLVersion(r.Context())) {
-		return
-	}
-	item, err := s.modpackBySiteID(r.Context(), snapshot.SiteID, claims.Subject, true)
+	item, err := modpackBySiteID(r.Context(), tx, snapshot.SiteID, claims.Subject, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read created modpack")
 		return
@@ -481,6 +474,13 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 	item.CanEdit = canEditModpack(claims, item)
 	item.SubmissionRevisionID = created.RevisionPublicID
 	item.ChangeRequestID = created.ChangeRequestPublicID
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit modpack")
+		return
+	}
+	if !s.requireSecurityVersionRefresh(w, r, "create_modpack", 0, s.refreshProjectACLVersion(r.Context())) {
+		return
+	}
 	writeJSON(w, http.StatusCreated, item)
 }
 
@@ -490,7 +490,7 @@ func modpackCreationNeedsPreviewAssociations(reviewStatus string) bool {
 
 func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, siteID string) {
 	claims := currentClaims(r)
-	current, err := s.modpackBySiteID(r.Context(), siteID, claims.Subject, true)
+	current, err := modpackBySiteID(r.Context(), s.db, siteID, claims.Subject, true)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "modpack not found")
 		return
@@ -970,8 +970,8 @@ func (s *Server) loadModpackCatalogAssociations(ctx context.Context, items []mod
 	return rows.Err()
 }
 
-func (s *Server) modpackBySiteID(ctx context.Context, siteID string, viewerID int64, editor bool) (modpackResponse, error) {
-	row := s.db.QueryRow(ctx, `select pack.id,pack.public_id,pack.slug,pack.primary_name,pack.secondary_name,
+func modpackBySiteID(ctx context.Context, reader projectDetailReader, siteID string, viewerID int64, editor bool) (modpackResponse, error) {
+	row := reader.QueryRow(ctx, `select pack.id,pack.public_id,pack.slug,pack.primary_name,pack.secondary_name,
 		pack.abbreviation,pack.summary,pack.default_locale,pack.environment,pack.primary_category,pack.pack_type,
 		pack.packaging_method,pack.official_status,
 		pack.source_status,pack.license,pack.curseforge_project_id,pack.modrinth_project_id,pack.icon_url,
@@ -985,13 +985,13 @@ func (s *Server) modpackBySiteID(ctx context.Context, siteID string, viewerID in
 		return item, err
 	}
 	values := []modpackResponse{item}
-	if err = s.loadModpackAssociations(ctx, values); err != nil {
+	if err = loadModpackAssociations(ctx, reader, values); err != nil {
 		return item, err
 	}
 	return values[0], nil
 }
 
-func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackResponse) error {
+func loadModpackAssociations(ctx context.Context, reader projectDetailReader, items []modpackResponse) error {
 	if len(items) == 0 {
 		return nil
 	}
@@ -1001,7 +1001,7 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 		byID[items[index].ID] = &items[index]
 		ids = append(ids, items[index].ID)
 	}
-	rows, err := s.db.Query(ctx, `select modpack_id,loader,array_agg(minecraft_version order by minecraft_version desc)
+	rows, err := reader.Query(ctx, `select modpack_id,loader,array_agg(minecraft_version order by minecraft_version desc)
 		from modpack_loader_compatibilities where modpack_id=any($1) group by modpack_id,loader order by modpack_id,loader`, ids)
 	if err != nil {
 		return err
@@ -1018,7 +1018,7 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select modpack_id,tag from modpack_tags where modpack_id=any($1) order by modpack_id,tag`, ids)
+	rows, err = reader.Query(ctx, `select modpack_id,tag from modpack_tags where modpack_id=any($1) order by modpack_id,tag`, ids)
 	if err != nil {
 		return err
 	}
@@ -1034,7 +1034,7 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select modpack_id,link_type,url,note from modpack_links where modpack_id=any($1) order by modpack_id,display_order,id`, ids)
+	rows, err = reader.Query(ctx, `select modpack_id,link_type,url,note from modpack_links where modpack_id=any($1) order by modpack_id,display_order,id`, ids)
 	if err != nil {
 		return err
 	}
@@ -1050,7 +1050,7 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select binding.subject_id,creator.public_id,creator.kind,creator.name,creator.avatar_url,
+	rows, err = reader.Query(ctx, `select binding.subject_id,creator.public_id,creator.kind,creator.name,creator.avatar_url,
 		coalesce(role.public_id,''),coalesce(role.name,binding.role_snapshot),coalesce((select jsonb_agg(jsonb_build_object(
 		'creatorId',member.public_id,'kind',member.kind,'name',member.name,'avatarUrl',member.avatar_url,
 		'roleId',member_role.public_id,'role',member_role.name,'title',membership.title) order by membership.display_order,membership.created_at)
@@ -1078,7 +1078,7 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select gallery.modpack_id,gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
+	rows, err = reader.Query(ctx, `select gallery.modpack_id,gallery.public_id,file.public_id,file.original_name,file.content_type,file.size_bytes
 		from modpack_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id and file.status='active'
 		where gallery.modpack_id=any($1) order by gallery.modpack_id,gallery.display_order,gallery.id`, ids)
 	if err != nil {
@@ -1097,7 +1097,7 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 	if err = finishRows(rows); err != nil {
 		return err
 	}
-	rows, err = s.db.Query(ctx, `select entry.modpack_id,coalesce(resolved.project_code,''),coalesce(resolved.slug,''),
+	rows, err = reader.Query(ctx, `select entry.modpack_id,coalesce(resolved.project_code,''),coalesce(resolved.slug,''),
 		coalesce(resolved.primary_name,nullif(entry.mod_name,''),entry.identifier,entry.provider_project_id),coalesce(resolved.icon_url,''),
 		entry.provider,entry.provider_project_id,entry.provider_version_id,entry.identifier,entry.file_name,
 		entry.client_required,entry.server_required,resolved.id is not null
@@ -1224,7 +1224,7 @@ func (s *Server) modpackHistory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	item, err := s.modpackBySiteID(r.Context(), siteID, claims.Subject, true)
+	item, err := modpackBySiteID(r.Context(), s.db, siteID, claims.Subject, true)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "modpack not found")
 		return

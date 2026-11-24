@@ -14,22 +14,26 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type skinMutationObservationKey struct{}
-type skinMutationCommitKey struct{}
+type mutationReceiptObservationKey struct{}
+type mutationReceiptCommitKey struct{}
 
-type skinMutationObservation struct {
-	committed       bool
-	lateSQLAttempts int
+type mutationReceiptObservation struct {
+	committed              bool
+	allowProjectACLRefresh bool
+	lateSQLAttempts        int
 }
 
-type skinMutationResultTracer struct{}
+type mutationReceiptTracer struct{}
 
-func (skinMutationResultTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	observation, _ := ctx.Value(skinMutationObservationKey{}).(*skinMutationObservation)
+func (mutationReceiptTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	observation, _ := ctx.Value(mutationReceiptObservationKey{}).(*mutationReceiptObservation)
 	if observation == nil {
 		return ctx
 	}
 	if observation.committed {
+		if observation.allowProjectACLRefresh && strings.TrimSpace(data.SQL) == "select version from runtime_versions where name='project_acl'" {
+			return ctx
+		}
 		observation.lateSQLAttempts++
 		// Simulate loss of a new query after an acknowledged commit. Keep the
 		// HTTP request and the independent facts query usable.
@@ -38,13 +42,13 @@ func (skinMutationResultTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn
 		return failed
 	}
 	if strings.EqualFold(strings.TrimSpace(data.SQL), "commit") {
-		return context.WithValue(ctx, skinMutationCommitKey{}, observation)
+		return context.WithValue(ctx, mutationReceiptCommitKey{}, observation)
 	}
 	return ctx
 }
 
-func (skinMutationResultTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
-	if observation, ok := ctx.Value(skinMutationCommitKey{}).(*skinMutationObservation); ok && data.Err == nil {
+func (mutationReceiptTracer) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if observation, ok := ctx.Value(mutationReceiptCommitKey{}).(*mutationReceiptObservation); ok && data.Err == nil {
 		observation.committed = true
 	}
 }
@@ -59,7 +63,7 @@ func TestSkinMutationRespondsFromCommittedFactsIntegration(t *testing.T) {
 	profilePath := "/api/v1/users/me/player-profiles/" + profile.PublicID
 
 	cfg := f.db.Config()
-	cfg.ConnConfig.Tracer = skinMutationResultTracer{}
+	cfg.ConnConfig.Tracer = mutationReceiptTracer{}
 	pool, err := pgxpool.NewWithConfig(f.ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -136,8 +140,8 @@ func TestSkinMutationRespondsFromCommittedFactsIntegration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var observed skinMutationObservation
-			ctx := context.WithValue(f.ctx, skinMutationObservationKey{}, &observed)
+			var observed mutationReceiptObservation
+			ctx := context.WithValue(f.ctx, mutationReceiptObservationKey{}, &observed)
 			request := httptest.NewRequestWithContext(ctx, mutation.method, mutation.path, bytes.NewReader(body))
 			request.Header.Set("Authorization", "Bearer "+f.editor)
 			request.Header.Set("Content-Type", "application/json")

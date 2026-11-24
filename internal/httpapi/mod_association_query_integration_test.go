@@ -91,7 +91,7 @@ func TestModAssociationsLoadFiftyGroupsInOneRelationshipQueryIntegration(t *test
 	counter.queries.Store(0)
 	server := &Server{db: pool}
 	result := modResponse{ID: modID, SiteID: "association-source"}
-	if err = server.loadModAssociations(ctx, &result); err != nil {
+	if err = loadModAssociations(ctx, server.db, &result); err != nil {
 		t.Fatal(err)
 	}
 	if got := counter.queries.Load(); got != 1 {
