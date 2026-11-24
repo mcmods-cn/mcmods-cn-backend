@@ -23,8 +23,12 @@
 | 目录布局深分页 | PostgreSQL 18.6，同一回滚事务、十万行和两个栏目。先对每个范围取主键页，再统一截取 501 项并补详情。五次交替执行、剔除首对后，中间页的 SQL 执行中位数从 1,538 ms 降至 19 ms，500 个结果的内容与顺序一致。稀有词从 18 ms 升至 29 ms，无结果从 4 ms 升至 9 ms。完整 HTTP 门另跑 `TestModContentSectionCursorSearchAndGraphIntegration`。 |
 | 蓝图归一化和封面 | 相同十万个非空气方块，Go 单线程六轮测量，每次额外分配从 4,800,512 字节降至 0。解码拒绝方块索引数量与声明体积不符的 Sponge 数据。封面回归解码实际 PNG 检查细长结构两端的方块颜色。[蓝图生命周期](blueprint-and-comment-lifecycle.md) |
 | 备份恢复 | PostgreSQL 18.6 在恢复时会重新解析触发器的 `WHEN`。曾有一处等价的行比较在恢复后生成不同的定义文本，导致同一安装程序拒绝启动。改用逐字段、NULL 安全比较后，在两个独立库比对了 10,164 条定义并复核了合成项目的公开 ID。CI 的 `postgres-integration` 使用同一安装程序复查还原库。[持续验收入口](../.github/workflows/ci.yml) |
-| 日志保留 | 分类选择继承时保存 `retentionDays=0`。站点策略 365 天的集成回归覆盖保留 180 天日志、清理 400 天日志。复跑 `TestSavedLogCategoryCanInheritTheSiteRetentionIntegration`。 |
+| 日志保留 | 分类选择继承时将 `categoryDays` 中的该项保存为 0，实际保留期来自 `defaultDays`。站点策略 365 天的集成回归覆盖保留 180 天日志、清理 400 天日志。复跑 `TestSavedLogCategoryCanInheritTheSiteRetentionIntegration`。 |
 | 皮肤对象收据 | 网页和启动器共用的纹理写入会保留本次生成的对象键。即使对象存储已写入但客户端未收到成功回执，事务回滚后也可回收遗留字节。真实 PostgreSQL 与受控对象服务验证了保留待删记录、删除旧对象、重试使用新键。[文件约定](oss-object-layout.md) |
+
+玩家档案与皮肤操作在取得账户和目标行锁后，按当前会话、额度和对象归属决定是否写入。普通用户第二个档案等待期间调高额度，提交后可正常创建，且仅保留一个默认档案。管理员在 PNG 处理期间改为要求审核，新皮肤随即进入待审核。回归入口为 `TestPlayerProfileCreationUsesNewQuotaAfterAccountLock` 和 `TestSkinCreationUsesReviewPolicyInForceAfterFileProcessing`。
+
+资料布局支持 2,048 条引用，提交后可逐条找到。只修改布局显示方式时保留目录外的父进度。JEI categories v7 的候选保留未知数量及显式 0，v6 维持原有数量规则。[导入契约](import-asset-registry.md)
 
 完整 PostgreSQL 门禁按一次运行的固定提交计数。运行中止、测试断言失败、条件跳过分别保留。合并修复后需重新运行整门，所需服务和隔离步骤见[测试环境](testing-isolated-environment.md)。正式 Fabric 和 Forge 发行包的入世界导出、目标云服务与跨主机恢复仍待验收。
 
@@ -92,7 +96,7 @@
 
 ### 2026-11-23 第三轮接续
 
-从后端 `d24c576536547fddb461fb7ee7008771c672c975`、前端 `2c6da361ab50629a17bd90d19563401bafbd0f01` 和 exporter `01b50137fb3dee206507f96c245e7554fb814ec3` 继续。此节保存阶段性发现、历史结果与复验线索。最终冻结快照以[当前版本与验收](#当前版本与验收)为准。
+从后端 `d24c576536547fddb461fb7ee7008771c672c975`、前端 `2c6da361ab50629a17bd90d19563401bafbd0f01` 和 exporter `01b50137fb3dee206507f96c245e7554fb814ec3` 继续。此节保存阶段性发现、历史结果与复验线索。该阶段的最终结果见[2026-11-23 冻结快照的验收](#2026-11-23-冻结快照的验收)。
 
 | 事项 | 已核对的影响与处理 |
 | --- | --- |
