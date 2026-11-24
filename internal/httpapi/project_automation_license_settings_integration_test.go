@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -89,6 +90,22 @@ func TestProjectScheduleChangesPreserveApprovedRedistributionDecisionIntegration
 	f.require(t, admin, http.MethodPut, path, body, http.StatusOK)
 	if err := f.db.QueryRow(f.ctx, `select count(*) from audit_events where aggregate_type='project_automation_license' and aggregate_key=$1`, f.modCode).Scan(&count); err != nil || count != 2 {
 		t.Fatalf("approved and revoked decisions=%d err=%v", count, err)
+	}
+	var raw, encrypted []byte
+	var previousProject string
+	if err := f.db.QueryRow(f.ctx, `select metadata,metadata->'evidence',metadata->>'previousExternalProjectId' from audit_events
+        where aggregate_type='project_automation_license' and aggregate_key=$1 and metadata->>'enabled'='false'`, f.modCode).Scan(&raw, &encrypted, &previousProject); err != nil {
+		t.Fatal(err)
+	}
+	var proof map[string]struct {
+		Enabled        bool
+		Reason, Source string
+	}
+	if err := server.openSystemSetting(encrypted, &proof); err != nil {
+		t.Fatal(err)
+	}
+	if previousProject != "11" || !proof["before"].Enabled || proof["before"].Reason != "Written authorization" || proof["before"].Source != "Publication agreement" || proof["after"].Enabled || bytes.Contains(raw, []byte("Publication agreement")) {
+		t.Error("revocation did not retain the private approval evidence and its original external project")
 	}
 	f.require(t, editor, http.MethodPost, path+"/sources", replacement, http.StatusOK)
 }

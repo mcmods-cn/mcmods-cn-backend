@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -115,6 +116,20 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 		for _, item := range stored {
 			previous[item.Kind] = item
 		}
+		sourceRows, err := tx.Query(r.Context(), `select source_type,external_project_id from project_external_sources where project_route_id=$1`, target.RouteID)
+		if err != nil {
+			writeError(w, 500, "读取项目来源失败")
+			return
+		}
+		boundSources, err := pgx.CollectRows(sourceRows, pgx.RowToStructByPos[struct{ Provider, ExternalID string }])
+		if err != nil {
+			writeError(w, 500, "读取项目来源失败")
+			return
+		}
+		externalIDs := make(map[string]string, len(boundSources))
+		for _, source := range boundSources {
+			externalIDs[source.Provider] = source.ExternalID
+		}
 		actor, ok := requireCurrentWriteActor(w, r, tx)
 		if !ok {
 			return
@@ -150,12 +165,7 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if item.Enabled || item.LicenseOverride {
-				var bound bool
-				if scanErr := tx.QueryRow(r.Context(), `select exists(select 1 from project_external_sources where project_route_id=$1 and source_type=$2)`, target.RouteID, item.SourceType).Scan(&bound); scanErr != nil {
-					writeError(w, http.StatusInternalServerError, "读取项目来源失败")
-					return
-				}
-				if !bound {
+				if externalIDs[item.SourceType] == "" {
 					writeError(w, 400, "启用自动更新前必须绑定并验证对应来源")
 					return
 				}
@@ -182,11 +192,7 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if changedLicense {
-				if err := appendAuditEventTx(r.Context(), tx, auditEventParams{
-					EntityType: target.ProjectType, EntityID: target.InternalID, AggregateType: "project_automation_license", AggregateKey: target.PublicID,
-					ActorID: actor.Subject, ActorSnapshot: actor.Username, Action: "project.auto_update.redistribution_override",
-					Metadata: map[string]any{"kind": item.Kind, "sourceType": item.SourceType, "enabled": item.LicenseOverride},
-				}); err != nil {
+				if err := s.recordProjectAutomationLicenseDecision(r.Context(), tx, actor, target, externalIDs, old, item); err != nil {
 					writeError(w, 500, "记录再分发许可变更失败")
 					return
 				}
@@ -199,6 +205,30 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 		s.writeAppLog(r.Context(), "admin_operation", "info", "project.auto_update.configure", target.PublicID, currentClaims(r).Subject, r, 200, 0, nil)
 	}
 	s.writeProjectAutomation(w, r, target)
+}
+
+func (s *Server) recordProjectAutomationLicenseDecision(ctx context.Context, tx pgx.Tx, actor security.Claims, target projectAutomationTarget, externalIDs map[string]string, old, next projectAutomationSetting) error {
+	// Approval sources can include private correspondence. Preserve the two
+	// decisions under the existing settings key without logging their text.
+	type evidence struct {
+		Enabled bool   `json:"enabled"`
+		Reason  string `json:"reason"`
+		Source  string `json:"source"`
+	}
+	sealed, err := s.sealSystemSetting(map[string]evidence{
+		"before": {old.LicenseOverride, old.LicenseOverrideReason, old.LicenseOverrideSource},
+		"after":  {next.LicenseOverride, next.LicenseOverrideReason, next.LicenseOverrideSource},
+	})
+	if err != nil {
+		return err
+	}
+	return appendAuditEventTx(ctx, tx, auditEventParams{
+		EntityType: target.ProjectType, EntityID: target.InternalID, AggregateType: "project_automation_license", AggregateKey: target.PublicID,
+		ActorID: actor.Subject, ActorSnapshot: actor.Username, Action: "project.auto_update.redistribution_override",
+		Metadata: map[string]any{"kind": next.Kind, "sourceType": next.SourceType, "externalProjectId": externalIDs[next.SourceType],
+			"previousSourceType": old.SourceType, "previousExternalProjectId": externalIDs[old.SourceType], "enabled": next.LicenseOverride,
+			"evidence": json.RawMessage(sealed)},
+	})
 }
 
 func autoUpdateNextRun(interval string, now time.Time) *time.Time {
