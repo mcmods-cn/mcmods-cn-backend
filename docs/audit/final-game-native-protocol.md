@@ -1,7 +1,7 @@
 # Final fixed-combination original059b journey
 
 > This record preserves a fixed historical commit combination and its ports.
-> For new runs, use the [current isolated game-package verification](../testing-isolated-environment.md#真实游戏包经浏览器和-jetstream-的验证).
+> New runs pin the release manifest, verified loopback origin and actual public API base. See the [current fixed-package lifecycle instructions](../testing-isolated-environment.md#固定小包的上传授权自然到期).
 
 This is a new opt-in fixture and read-only observer. The earlier42b/bf6/8062
 journey and all its original results stay at their original source pins. A

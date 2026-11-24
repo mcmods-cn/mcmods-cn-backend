@@ -250,6 +250,20 @@ MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_JOURNEY_DIR/runtime.json" node --tes
 停止本次 Next 进程，在同一提交和配置下使用新的开发缓存重启，保留旧缓存与失败报告。
 重新操作前，检查浏览器报告和该项目的任务记录。已经得到 202 的上传可沿原任务 ID 查看进度和审核结果。
 
+### 固定小包的上传授权自然到期
+
+`TestAuditFinalGameJourneyFixture` 拓展了单次 PUT 的实际业务链。使用原始 18,290 字节 Fabric 样本 `auditfixture-minecraft1201-fabric-jei1520-v7.zip`，创建投稿与独立审核、检查默认任务的账务结果，并观察真实回收 Worker 在上传授权自然到期后的删除和审计留存。运行需保留实际授予的等待时间。
+
+签出并固定三个仓库的完整提交。使用已验哈希的生产制品，将实际站点的 HTTPS 回环地址设为 `MCMODS_AUDIT_FRONTEND_ORIGIN`。用 `MCMODS_AUDIT_FRONTEND_BUILD_MANIFEST` 和 `MCMODS_AUDIT_EXPECT_FRONTEND_BUILD_MANIFEST_SHA256` 固定部署清单，其中包含源码目录与提交、部署目录、BUILD_ID、server.js 哈希、`embeddedSiteOrigin` 和 `embeddedApiOrigin`。支持同站点的根 API 和 `/service` API。启动后，夹具用实际文件、公开的 `/authentication-write-config`、可信 CA 链与指定叶证书逐项核对。运行目录须为本次全新路径，认证材料只保存在私有子目录。
+
+设置 `MCMODS_RUN_FINAL_GAME_JOURNEY=1`，执行下列三步。浏览器审核完成后独立观察器继续检查授权到期及回收终态，取得 `terminal-acceptance.json` 才给夹具写入 STOP。完整环境变量、OSS 协议和证据字段见[固定小包验收协议](audit/final-game-native-protocol.md)。
+
+```sh
+go test ./internal/httpapi -run '^TestAuditFinalGameJourneyFixture$' -v -count=1 -timeout=105m
+MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_FINAL_GAME_DIR/browser-runtime.json" node --test browser-tests/audit-game-live.mts
+python tools/audit/final-game/observe.py "$MCMODS_AUDIT_FINAL_GAME_DIR/runtime.json" ACTUAL_BROWSER_REPORT "$MCMODS_AUDIT_FINAL_GAME_DIR/observation"
+```
+
 ## 临时 schema 安装回归
 
 `InstallEphemeralSchema` 为每次安装编译函数资格化模式，ASCII 语句通过组合模式单次扫描，
