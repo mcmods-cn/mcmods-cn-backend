@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -39,7 +40,8 @@ func TestDeadLetterIsRetainedByBrokerWhenDatabaseSinkFailsIntegration(t *testing
 		}
 		return errors.New("synthetic database unavailable")
 	})
-	if err := client.SubscribeTask("test", func(context.Context, []byte) error { return errors.New("synthetic terminal task failure") }); err != nil {
+	prefix := strings.Repeat("界", 333)
+	if err := client.SubscribeTask("test", func(context.Context, []byte) error { return errors.New(prefix + "错") }); err != nil {
 		t.Fatal(err)
 	}
 	envelope := EventEnvelope{EventID: "synthetic-dead-event", EventType: "test.failed", SchemaVersion: 1, OccurredAt: time.Now(),
@@ -63,6 +65,10 @@ func TestDeadLetterIsRetainedByBrokerWhenDatabaseSinkFailsIntegration(t *testing
 		if err == nil {
 			if string(message.Data) != string(raw) {
 				t.Fatal("broker recovery record lost its original event envelope")
+			}
+			var info deadLetterInfo
+			if err := json.Unmarshal([]byte(message.Header.Get(deadLetterInfoHeader)), &info); err != nil || info.LastError != prefix {
+				t.Fatalf("broker retained an invalid diagnostic prefix: length=%d, err=%v", len(info.LastError), err)
 			}
 			if message.Header.Get("Nats-Msg-Id") == envelope.EventID {
 				t.Fatal("dead-letter publication reused the original deduplication ID")

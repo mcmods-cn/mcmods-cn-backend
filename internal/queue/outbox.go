@@ -74,10 +74,7 @@ func NewPostgresDeadLetterSink(db *pgxpool.Pool) DeadLetterSink {
 		if db == nil {
 			return errors.New("dead letter database is required")
 		}
-		lastError := dead.LastError
-		if len(lastError) > 1000 {
-			lastError = lastError[:1000]
-		}
+		lastError := boundedDiagnostic(dead.LastError)
 		payload := dead.Payload
 		if !json.Valid(payload) {
 			// Keep malformed input inspectable without making the jsonb sink
@@ -324,10 +321,7 @@ func (dispatcher *OutboxDispatcher) renewLease(ctx context.Context, cancel conte
 
 func (dispatcher *OutboxDispatcher) fail(ctx context.Context, record outboxRecord, cause error) error {
 	attempts := record.Attempts + 1
-	errorText := cause.Error()
-	if len(errorText) > 1000 {
-		errorText = errorText[:1000]
-	}
+	errorText := boundedDiagnostic(cause.Error())
 	if attempts >= record.MaxAttempts {
 		stage := "publish"
 		var deadEnvelope any

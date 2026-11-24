@@ -3,6 +3,7 @@ package queue
 import (
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"mcmods-cn-backend/internal/config"
 )
@@ -50,4 +51,25 @@ func redactDiagnostic(message string, cfg config.NATSConfig) string {
 		}
 	}
 	return message
+}
+
+// PostgreSQL text and the broker metadata must use the same valid UTF-8
+// prefix. A diagnostic must never prevent recording a failed delivery.
+func boundedDiagnostic(message string) string {
+	const maxBytes = 1000
+	if len(message) <= maxBytes && utf8.ValidString(message) && !strings.ContainsRune(message, 0) {
+		return message
+	}
+	var result strings.Builder
+	result.Grow(min(len(message), maxBytes))
+	for _, r := range message {
+		if r == 0 {
+			r = utf8.RuneError
+		}
+		if result.Len()+utf8.RuneLen(r) > maxBytes {
+			break
+		}
+		result.WriteRune(r)
+	}
+	return result.String()
 }

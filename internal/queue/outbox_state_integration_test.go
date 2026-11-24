@@ -89,6 +89,59 @@ func TestOutboxFailureMetricsRequirePersistedTransitions(t *testing.T) {
 	}
 }
 
+func TestQueuePersistsMultilingualFailureDiagnostics(t *testing.T) {
+	pool := openOutboxStateTestDB(t)
+	ctx := t.Context()
+	// The 1,000-byte diagnostic limit falls inside the next multibyte character.
+	prefix := strings.Repeat("界", 333)
+	message := prefix + "错"
+	_, err := pool.Exec(ctx, `insert into nats_outbox(id,event_id,event_type,subject,aggregate_type,aggregate_id,payload,status,locked_by,attempts)
+		values(1,'retry','test','ai','test','1','{}','publishing','queue-test',1),
+		      (2,'terminal','test','ai','test','2','{}','publishing','queue-test',1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dispatcher := &OutboxDispatcher{db: pool, workerID: "queue-test"}
+	for _, row := range []struct {
+		id, maximum int64
+		state       string
+	}{{1, 2, "failed"}, {2, 1, "dead"}} {
+		t.Run(row.state, func(t *testing.T) {
+			if err := dispatcher.fail(ctx, outboxRecord{ID: row.id, MaxAttempts: row.maximum}, errors.New(message)); err != nil {
+				t.Fatal(err)
+			}
+			var status, detail string
+			if err := pool.QueryRow(ctx, `select status,last_error from nats_outbox where id=$1`, row.id).Scan(&status, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if status != row.state || detail != prefix {
+				t.Fatalf("unexpected state %q or diagnostic length %d", status, len(detail))
+			}
+		})
+	}
+	t.Run("recovered broker event", func(t *testing.T) {
+		letter := DeadLetter{EventID: "broker", EventType: "test", TaskCode: "ai", FailureStage: "consumer:ai",
+			Payload: []byte(`{}`), Attempts: 1, LastError: message}
+		if err := NewPostgresDeadLetterSink(pool)(ctx, letter); err != nil {
+			t.Fatal(err)
+		}
+		var detail string
+		if err := pool.QueryRow(ctx, `select last_error from dead_letter_events where event_id=$1`, letter.EventID).Scan(&detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail != prefix {
+			t.Fatalf("unexpected broker diagnostic length %d", len(detail))
+		}
+		letter.EventID, letter.LastError = "binary-error", "错误\x00\xff"
+		if err := NewPostgresDeadLetterSink(pool)(ctx, letter); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `select last_error from dead_letter_events where event_id=$1`, letter.EventID).Scan(&detail); err != nil || detail != "错误��" {
+			t.Fatalf("database-incompatible diagnostic was not normalized: %q, %v", detail, err)
+		}
+	})
+}
+
 func TestOutboxStaleLeaseRecoveryErrorsAreReturned(t *testing.T) {
 	pool := openOutboxStateTestDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

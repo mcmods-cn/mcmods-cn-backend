@@ -27,10 +27,7 @@ type deadLetterInfo struct {
 
 func (c *Client) publishDeadLetter(js nats.JetStreamContext, cfg config.NATSConfig, letter DeadLetter) error {
 	info := deadLetterInfo{letter.EventID, letter.EventType, letter.TaskCode,
-		letter.AggregateType, letter.AggregateID, letter.LastError, letter.Attempts}
-	if len(info.LastError) > 1000 {
-		info.LastError = info.LastError[:1000]
-	}
+		letter.AggregateType, letter.AggregateID, boundedDiagnostic(letter.LastError), letter.Attempts}
 	raw, err := json.Marshal(info)
 	if err != nil {
 		return err
