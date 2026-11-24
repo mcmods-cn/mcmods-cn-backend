@@ -62,6 +62,14 @@ python3 -B tools/testing/isolated_environment.py run -- go run ./tools/testing/d
 并使专用测试URL与应用URL精确匹配。不要以RUN=0配合非空专用URL运行：旧opt-in测试
 可能因此被启用，再被schema安全守卫拒绝。
 
+验收原始上传字节的实际签名到期清理时，使用已启动的上述隔离环境，单独预留 15 分钟。测试等待默认 600 秒的签名有效期，并检查两个 Worker 处理同一删除意图的次数。命令中的 Go 超时要覆盖有效期和清理轮询。
+
+```sh
+python3 -B tools/testing/isolated_environment.py run -- \
+  env MCMODS_RUN_RAW_EXPIRY_INTEGRATION=1 \
+  go test -count=1 -timeout=15m -v -run '^TestAuditGR001DefaultTicketRealExpiryRemovesOriginalPrivateBytesIntegration$' ./internal/httpapi
+```
+
 三项需要直接改变主测试库的 public 对象，分别是评论热度差分、收藏导出终态事务及库存工具的表/视图区分。先核对状态文件的随机所有权标签、实际回环端口和数据库身份，
 确认该库为本任务新建、可丢弃且没有其它测试/应用使用，再将
 `MCMODS_DB_FUNCTION_REPAIR_TEST_TARGET` 设置为该状态文件记录的精确数据库名。
