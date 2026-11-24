@@ -30,6 +30,7 @@ type catalogPresentationSource struct {
 }
 
 type catalogPresentationBatchItem struct {
+	ambiguous      bool
 	InputIndex     int                       `json:"inputIndex"`
 	PublicID       string                    `json:"publicId"`
 	ID             string                    `json:"id"`
@@ -76,6 +77,14 @@ func normalizeCatalogPresentationBatchRequest(request catalogPresentationBatchRe
 		if (item.PublicID == "" && item.ID == "") || len(item.PublicID) > 180 || len(item.ID) > 255 ||
 			len(item.Kind) > 64 || len(item.Registry) > 128 {
 			return "", "", nil, errors.New("invalid resource presentation reference")
+		}
+		if item.Registry != "" && (item.Kind == "" || item.Kind == "resource") {
+			for kind, family := range catalogRegistryFamilies {
+				if family == item.Registry {
+					item.Kind = kind
+					break
+				}
+			}
 		}
 		items = append(items, item)
 	}
@@ -124,7 +133,14 @@ func (s *Server) catalogResourcePresentations(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusInternalServerError, "failed to resolve resource presentations")
 			return
 		}
-		items = append(items, loaded...)
+		for _, item := range loaded {
+			if item.ambiguous {
+				continue
+			}
+			item.ResolvedName = truncateUTF8(item.ResolvedName, 512)
+			item.Names = presentationName(item.ResolvedLocale, item.ResolvedName)
+			items = append(items, item)
+		}
 	}
 	resolved := make(map[int]bool, len(items))
 	for _, item := range items {
@@ -155,19 +171,21 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 	rows, err := s.db.Query(ctx, `with input as (
 		select * from unnest($1::text[],$2::text[],$3::text[],$4::text[]) with ordinality input(public_id,identifier,kind,registry,input_index)
 	), selected as materialized (
-		select match.entity_id,input.input_index from input join lateral (
-			select resource.entity_id from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
+		select input.input_index,(array_agg(match.entity_id order by match.exact desc))[1] as entity_id,
+			count(*) > 1 and not bool_or(match.exact) as ambiguous
+		from input join lateral (
+			select resource.entity_id,entity.public_id=input.public_id as exact from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
 			where entity.status='active' and `+publicCatalogEntitySQL("entity", "resource")+`
 			and (input.kind='' or input.kind='resource' or resource.kind_code=input.kind) and (
 				(input.public_id<>'' and entity.public_id=input.public_id) or
 				(input.identifier<>'' and (lower(resource.canonical_id)=input.identifier or exists(
 					select 1 from game_resource_aliases alias where alias.resource_id=resource.entity_id
 					and (input.kind='' or input.kind='resource' or alias.kind_code=input.kind) and lower(alias.alias_id)=input.identifier
-				)) and (input.kind='' or input.kind='resource' or resource.kind_code=input.kind)))
-			order by case when entity.public_id=input.public_id then 0 else 1 end limit 1
-		) match on true
+				))))
+			order by exact desc limit 2
+		) match on true group by input.input_index
 	), `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
-	select selected.input_index,entity.public_id,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),resource.kind_code,entity.default_locale,
+	select selected.input_index,selected.ambiguous,entity.public_id,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),resource.kind_code,entity.default_locale,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		coalesce(imported.names,'{}'::jsonb) || coalesce((select jsonb_object_agg(candidate.locale,candidate.name)
 			from content_localizations candidate where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb),
@@ -192,7 +210,7 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 		var inputIndex int
 		var defaultLocale, locale, name, iconFileID, importedIconPath string
 		var names []byte
-		if err = rows.Scan(&inputIndex, &item.PublicID, &item.ID, &item.Namespace, &item.Registry, &item.Kind, &defaultLocale, &locale, &name, &names,
+		if err = rows.Scan(&inputIndex, &item.ambiguous, &item.PublicID, &item.ID, &item.Namespace, &item.Registry, &item.Kind, &defaultLocale, &locale, &name, &names,
 			&iconFileID, &importedIconPath, &item.Source.PublicID, &item.Source.SiteID, &item.Source.Name); err != nil {
 			return nil, err
 		}
@@ -200,8 +218,7 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 		if resolvedLocale, resolvedName := catalogResolvedName(names, primary, secondary, defaultLocale); resolvedName != "" {
 			locale, name = resolvedLocale, resolvedName
 		}
-		item.ResolvedLocale, item.ResolvedName = locale, truncateUTF8(name, 512)
-		item.Names = presentationName(locale, item.ResolvedName)
+		item.ResolvedLocale, item.ResolvedName = locale, name
 		item.IconURL = catalogRecipeResourceIconURL(item.PublicID, iconFileID, "", importedIconPath)
 		if item.Source.PublicID != "" || item.Source.SiteID != "" || item.Source.Name != "" {
 			item.Source.Type = "mod"
@@ -220,14 +237,15 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 	rows, err := s.db.Query(ctx, `with input as (
 		select * from unnest($1::text[],$2::text[],$3::text[]) with ordinality input(public_id,identifier,registry,input_index)
 	), selected as materialized (
-		select match.entity_id,input.input_index from input join lateral (
-			select tag.entity_id from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
+		select input.input_index,(array_agg(match.entity_id order by match.exact desc))[1] as entity_id
+		from input join lateral (
+			select tag.entity_id,entity.public_id=input.public_id as exact from catalog_tags tag join catalog_entities entity on entity.id=tag.entity_id
 			where entity.status='active' and `+publicCatalogEntitySQL("entity", "tag")+`
 			and (input.registry='' or lower(tag.registry)=input.registry) and ((input.public_id<>'' and entity.public_id=input.public_id) or
 				(input.identifier<>'' and (lower(tag.canonical_id)=input.identifier or lower(tag.registry||':'||tag.canonical_id)=input.identifier)
 				and (input.registry='' or lower(tag.registry)=input.registry)))
-			order by case when entity.public_id=input.public_id then 0 else 1 end limit 1
-		) match on true
+			order by exact desc limit 2
+		) match on true group by input.input_index having count(*)=1 or bool_or(match.exact)
 	)
 	select selected.input_index,entity.public_id,tag.canonical_id,tag.registry,entity.default_locale,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
@@ -256,8 +274,7 @@ func (s *Server) loadCatalogTagPresentations(ctx context.Context, items []catalo
 			locale, name = resolvedLocale, resolvedName
 		}
 		item.Kind = "tag"
-		item.ResolvedLocale, item.ResolvedName = locale, truncateUTF8(name, 512)
-		item.Names = presentationName(locale, item.ResolvedName)
+		item.ResolvedLocale, item.ResolvedName = locale, name
 		if inputIndex < 1 || inputIndex > len(items) {
 			return nil, errors.New("invalid presentation input mapping")
 		}
@@ -312,9 +329,7 @@ func (s *Server) loadProjectPresentations(ctx context.Context, items []catalogPr
 			&item.Source.PublicID, &item.Source.SiteID, &item.Source.Name); err != nil {
 			return nil, err
 		}
-		item.ResolvedName = truncateUTF8(item.ResolvedName, 512)
 		item.ResolvedLocale = primary
-		item.Names = presentationName(primary, item.ResolvedName)
 		item.Source.Type = item.Kind
 		if inputIndex < 1 || inputIndex > len(items) {
 			return nil, errors.New("invalid presentation input mapping")

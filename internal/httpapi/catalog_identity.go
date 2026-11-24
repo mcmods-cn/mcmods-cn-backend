@@ -122,43 +122,43 @@ func catalogSnapshotID(kind, revisionID, entityID, qualifier string) string {
 	return "snp_" + strings.TrimPrefix(identity.ID, "doc_")
 }
 
+var catalogRegistryFamilies = map[string]string{
+	"minecraft.item":               "items",
+	"minecraft.block":              "blocks",
+	"minecraft.fluid":              "fluids",
+	"minecraft.entity_type":        "entity_types",
+	"minecraft.mob_effect":         "mob_effects",
+	"minecraft.potion":             "potions",
+	"minecraft.enchantment":        "enchantments",
+	"minecraft.biome":              "biomes",
+	"minecraft.dimension":          "dimensions",
+	"minecraft.key_mapping":        "key_mappings",
+	"minecraft.advancement":        "advancements",
+	"minecraft.loot_table":         "loot_tables",
+	"minecraft.game_setting":       "game_settings",
+	"minecraft.structure":          "world_structures",
+	"minecraft.natural_generation": "natural_generation",
+}
+
 // Catalog cards use stable resource families. A source registry can identify
 // an extension kind, while the namespace belongs to the object's canonical ID.
 func catalogResourceRegistry(kind, observed string) string {
 	switch kind {
-	case "minecraft.item", "item":
-		return "items"
-	case "minecraft.block", "block":
-		return "blocks"
-	case "minecraft.fluid", "fluid":
-		return "fluids"
-	case "minecraft.entity_type", "entity":
-		return "entity_types"
-	case "minecraft.mob_effect", "effect":
-		return "mob_effects"
-	case "minecraft.potion":
-		return "potions"
-	case "minecraft.enchantment":
-		return "enchantments"
-	case "minecraft.biome":
-		return "biomes"
-	case "minecraft.dimension":
-		return "dimensions"
-	case "minecraft.key_mapping":
-		return "key_mappings"
-	case "minecraft.advancement":
-		return "advancements"
-	case "minecraft.loot_table":
-		return "loot_tables"
-	case "minecraft.game_setting":
-		return "game_settings"
-	case "minecraft.structure":
-		return "world_structures"
-	case "minecraft.natural_generation":
-		return "natural_generation"
-	default:
-		return observed
+	case "item":
+		kind = "minecraft.item"
+	case "block":
+		kind = "minecraft.block"
+	case "fluid":
+		kind = "minecraft.fluid"
+	case "entity":
+		kind = "minecraft.entity_type"
+	case "effect":
+		kind = "minecraft.mob_effect"
 	}
+	if family, ok := catalogRegistryFamilies[kind]; ok {
+		return family
+	}
+	return observed
 }
 
 func resourceKindForRegistry(registry string) string {

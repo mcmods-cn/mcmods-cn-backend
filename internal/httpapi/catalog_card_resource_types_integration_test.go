@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"reflect"
 	"testing"
@@ -160,4 +161,68 @@ func TestResourcePresentationUsesPublishedDisplayNameIntegration(t *testing.T) {
 	if display["name"] != "Published translation" || display["locale"] != "en-US" {
 		t.Fatalf("expected the approved fallback language, got name=%q locale=%q", display["name"], display["locale"])
 	}
+}
+
+func TestCatalogReferenceSelectionRequiresAnUnambiguousVisibleIdentity(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	const identifier = "example:shared_presentation"
+	var fluids, solidTag string
+	for _, kind := range []string{"minecraft.item", "minecraft.fluid"} {
+		identity := resourceIdentity(kind, identifier)
+		if _, err := f.db.Exec(f.ctx, `with entity as (
+			insert into catalog_entities(identity_key,public_id,entity_type,status) values($1,$2,'resource','active') returning id)
+			insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path)
+			select id,$3,$4,'example','shared_presentation' from entity`, identity.ID, identity.PublicID, kind, identifier); err != nil {
+			t.Fatal(err)
+		}
+		if kind == "minecraft.fluid" {
+			fluids = identity.PublicID
+		}
+	}
+	for _, registry := range []string{"minecraft:item", "minecraft:fluid"} {
+		identity := tagIdentity(registry, identifier)
+		if _, err := f.db.Exec(f.ctx, `with entity as (
+			insert into catalog_entities(identity_key,public_id,entity_type,status) values($1,$2,'tag','active') returning id)
+			insert into catalog_tags(entity_id,registry,canonical_id) select id,$3,$4 from entity`, identity.ID, identity.PublicID, registry, identifier); err != nil {
+			t.Fatal(err)
+		}
+		if registry == "minecraft:item" {
+			solidTag = identity.PublicID
+		}
+	}
+
+	t.Run("single", func(t *testing.T) {
+		path := "/api/v1/catalog/resource-presentation?ref="
+		var conflict apiResponse
+		if err := json.Unmarshal(f.require(t, "", http.MethodGet, path+identifier, nil, http.StatusConflict), &conflict); err != nil || conflict.Code != "resource_reference_ambiguous" {
+			t.Fatalf("ambiguous reference code = %q: %v", conflict.Code, err)
+		}
+		for _, ref := range []string{identifier + "&kind=minecraft.fluid", fluids} {
+			result := decodeTEST022Data[map[string]string](t, f.require(t, "", http.MethodGet, path+ref, nil, http.StatusOK))
+			if result["publicId"] != fluids || result["registry"] != "fluids" {
+				t.Errorf("resolved %s to %#v", ref, result)
+			}
+		}
+		f.require(t, "", http.MethodGet, path+identifier+"&kind=minecraft.block", nil, http.StatusNotFound)
+	})
+	t.Run("batch", func(t *testing.T) {
+		items := []catalogPresentationBatchReference{
+			{ID: identifier}, {ID: identifier, Kind: "minecraft.fluid"}, {ID: identifier, PublicID: fluids},
+			{ID: identifier, Registry: "fluids"}, {ID: identifier, Kind: "tag"}, {ID: identifier, Kind: "tag", Registry: "minecraft:item"},
+		}
+		got := decodeTEST022Data[struct {
+			Items                  []catalogPresentationBatchItem
+			UnresolvedInputIndices []int
+		}](t, f.require(t, "", http.MethodPost, "/api/v1/catalog/resource-presentations", catalogPresentationBatchRequest{Locale: "en-US", Items: items}, http.StatusOK))
+		if !reflect.DeepEqual(got.UnresolvedInputIndices, []int{0, 4}) {
+			t.Errorf("unresolved input positions = %v", got.UnresolvedInputIndices)
+		}
+		matched := map[int]string{}
+		for _, item := range got.Items {
+			matched[item.InputIndex] = item.PublicID
+		}
+		if !reflect.DeepEqual(matched, map[int]string{1: fluids, 2: fluids, 3: fluids, 5: solidTag}) {
+			t.Errorf("resolved input positions and IDs = %v", matched)
+		}
+	})
 }

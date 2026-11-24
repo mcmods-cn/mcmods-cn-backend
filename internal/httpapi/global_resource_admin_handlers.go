@@ -14,40 +14,31 @@ import (
 // permission boundary.
 func (s *Server) catalogResourcePresentation(w http.ResponseWriter, r *http.Request) {
 	reference := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("ref")))
-	if reference == "" || len(reference) > 180 {
+	kind := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("kind")))
+	if reference == "" || len(reference) > 180 || len(kind) > 64 {
 		writeError(w, http.StatusBadRequest, "invalid resource reference")
 		return
 	}
 	primary, secondary := s.requestContentLocales(r)
-	var publicID, kind, canonicalID, namespace, registry, defaultLocale, locale, name, iconFileID, importedIconPath string
-	var names []byte
-	err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
-		select entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),entity.default_locale,
-		coalesce(localization.locale,''),coalesce(localization.name,''),coalesce((select public_id from oss_files where id=definition.icon_file_id),''),
-		coalesce(imported.icon_path,''),coalesce(imported.names,'{}'::jsonb) || coalesce((select jsonb_object_agg(candidate.locale,candidate.name)
-		 from content_localizations candidate where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb)
-		from game_resources resource join catalog_entities entity on entity.id=resource.entity_id
-		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
-		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
-		left join lateral (select candidate.locale,candidate.name from content_localizations candidate
-		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' order by case candidate.locale when $2 then 0 when $3 then 1
-		 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
-		where entity.status='active' and `+publicCatalogEntitySQL("entity", "resource")+` and (entity.public_id=$1 or lower(resource.canonical_id)=$1) limit 1`, reference, primary, secondary).
-		Scan(&publicID, &kind, &canonicalID, &namespace, &registry, &defaultLocale, &locale, &name, &iconFileID, &importedIconPath, &names)
+	items, err := s.loadCatalogResourcePresentations(r.Context(), []catalogPresentationBatchReference{{
+		PublicID: reference, ID: reference, Kind: kind,
+	}}, primary, secondary)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "resource presentation not found")
-		} else {
-			writeError(w, http.StatusInternalServerError, "failed to read resource presentation")
-		}
+		writeError(w, http.StatusInternalServerError, "failed to read resource presentation")
 		return
 	}
-	if resolvedLocale, resolvedName := catalogResolvedName(names, primary, secondary, defaultLocale); resolvedName != "" {
-		locale, name = resolvedLocale, resolvedName
+	if len(items) == 0 {
+		writeError(w, http.StatusNotFound, "resource presentation not found")
+		return
+	}
+	item := items[0]
+	if item.ambiguous {
+		writeAPIError(w, http.StatusConflict, "resource_reference_ambiguous", "specify a resource kind or public ID", 0, nil)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"publicId": publicID, "kind": kind, "id": canonicalID, "registry": catalogResourceRegistry(kind, registry), "namespace": namespace,
-		"locale": locale, "name": name, "iconUrl": catalogRecipeResourceIconURL(publicID, iconFileID, "", importedIconPath),
+		"publicId": item.PublicID, "kind": item.Kind, "id": item.ID, "registry": item.Registry, "namespace": item.Namespace,
+		"locale": item.ResolvedLocale, "name": item.ResolvedName, "iconUrl": item.IconURL,
 	})
 }
 
