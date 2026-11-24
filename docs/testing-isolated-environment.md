@@ -153,7 +153,7 @@ python3 -B tools/testing/isolated_environment.py --state "$state" run -- \
 
 | 服务 | 真实运行边界 |
 | --- | --- |
-| Redis | 共享服务测试限流、在线计数、RBAC 到期和撤权后的新请求。两个 API 通过独立 PostgreSQL 连接池和 Redis 客户端验证用户权限、全站 RBAC、项目 ACL 和认证版本，覆盖旧请求返回、缓存丢失和提交后通知失败。SSE 与可选 Redis 用例另启私有进程，实际停止或冷重启。在线状态 HTTP 用例同时运行本地回退和共享 Redis 两个子项。 |
+| Redis | 共享服务测试限流、在线计数、RBAC 到期和撤权后的新请求。未读计数回归用两个 Redis 客户端验证全局通知失效后仍从权威源重建计数。两个 API 通过独立 PostgreSQL 连接池和 Redis 客户端验证用户权限、全站 RBAC、项目 ACL 和认证版本，覆盖旧请求返回、缓存丢失和提交后通知失败。SSE 与可选 Redis 用例另启私有进程，实际停止或冷重启。在线状态 HTTP 用例同时运行本地回退和共享 Redis 两个子项。 |
 | NATS | 专用容器提供文件型 JetStream，覆盖发布确认、重投、去重、并发、积压、长任务、容量与死信。服务端重启用例在 Go 测试进程内启停真实 NATS 服务，保留其文件数据。 |
 | Typesense | 共享回环服务覆盖真实建库、检索、重建和从 PostgreSQL 重查公开状态。作者目录游标用例另起 Typesense 进程并独占子数据库。 |
 

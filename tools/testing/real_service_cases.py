@@ -24,6 +24,7 @@ CASES = {
     "querycache": (
         "TestOCT03PresenceRealRedisAtomicCardinalityPruningAndFallback",
         "TestOCT03PresenceRealRedisSharesSixtyAdmissionsAndKeepsOutageBudget",
+        "TestUnreadDeltaKeepsGlobalInvalidationWithRealRedis",
     ),
     "queue": (
         "TestClosingQueueCancelsRunningTaskIntegration",
