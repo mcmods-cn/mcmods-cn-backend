@@ -45,18 +45,9 @@ func (s *Server) userBlockList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	ossCfg := s.ossConfigFromSettings(r.Context())
-	avatarURLs := make([]string, len(items))
-	for index := range items {
-		avatarURLs[index] = items[index].AvatarURL
-	}
-	avatarURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, avatarURLs)
-	if err != nil {
+	if err = s.resolveUserConnectionAvatars(r.Context(), items); err != nil {
 		writeError(w, http.StatusBadGateway, "生成用户头像访问链接失败")
 		return
-	}
-	for index := range items {
-		items[index].AvatarURL = avatarURLs[index]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "page": page, "pageSize": pageSize, "total": total,

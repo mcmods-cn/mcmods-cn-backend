@@ -158,20 +158,35 @@ func (s *Server) userConnections(w http.ResponseWriter, r *http.Request, connect
 		writeError(w, http.StatusInternalServerError, "failed to load user connections")
 		return
 	}
-	items := make([]userConnectionItem, 0, len(pageRows))
-	ossCfg := s.ossConfigFromSettings(r.Context())
-	for _, pageRow := range pageRows {
-		item := pageRow.Item
-		item.AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.AvatarURL)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate user avatar URL")
-			return
-		}
-		items = append(items, item)
+	items := make([]userConnectionItem, len(pageRows))
+	for i, row := range pageRows {
+		items[i] = row.Item
+	}
+	if err = s.resolveUserConnectionAvatars(r.Context(), items); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate user avatar URL")
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "limit": request.Limit, "hasMore": hasMore, "nextCursor": nextCursor,
 	})
+}
+
+func (s *Server) resolveUserConnectionAvatars(ctx context.Context, items []userConnectionItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	urls := make([]string, len(items))
+	for i := range items {
+		urls[i] = items[i].AvatarURL
+	}
+	resolved, err := s.resolveStoredOSSImageURLsWithConfig(ctx, s.ossConfigFromSettings(ctx), urls)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		items[i].AvatarURL = resolved[i]
+	}
+	return nil
 }
 
 func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
