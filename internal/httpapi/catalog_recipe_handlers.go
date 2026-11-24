@@ -47,6 +47,20 @@ func (s *Server) catalogRecipeSourceVersions(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) requireActiveRecipeType(w http.ResponseWriter, r *http.Request, publicID string) (catalogEditorEntity, bool) {
+	entity, err := s.catalogEditorEntityByPublicID(r.Context(), publicID, "recipe_type")
+	if errors.Is(err, errCatalogEditorNotFound) || err == nil && entity.Status != "active" {
+		writeError(w, http.StatusNotFound, "recipe type not found")
+		return entity, false
+	}
+	if err != nil {
+		logCatalogEditorReadFailure("recipe type entity", err)
+		writeError(w, http.StatusInternalServerError, "failed to read recipe type")
+		return entity, false
+	}
+	return entity, true
+}
+
 func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 	var edit catalogRecipeEdit
 	if decodeJSON(r, &edit) != nil || edit.BaseRevisionID != nil {
@@ -61,20 +75,25 @@ func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "recipeTypePublicId is invalid")
 		return
 	}
-	typeEntity, err := s.catalogEditorEntityByPublicID(r.Context(), typePublicID, "recipe_type")
-	if err != nil || typeEntity.Status != "active" {
-		writeError(w, http.StatusNotFound, "recipe type not found")
+	typeEntity, ok := s.requireActiveRecipeType(w, r, typePublicID)
+	if !ok {
 		return
 	}
 	edit.RecipeTypePublicID = typeEntity.PublicID
-	if err = s.normalizeCatalogRecipeEdit(r.Context(), typeEntity.ID, 0, &edit); err != nil {
+	if err := s.normalizeCatalogRecipeEdit(r.Context(), typeEntity.ID, 0, &edit); err != nil {
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
 	if edit.ApplicableVersionIDs == nil && edit.SourceVersionPublicID != "" {
 		var versions []string
-		if err = s.db.QueryRow(r.Context(), `select minecraft_versions from mod_content_versions where public_id=$1 and status='active'`, edit.SourceVersionPublicID).Scan(&versions); err != nil {
+		err := s.db.QueryRow(r.Context(), `select minecraft_versions from mod_content_versions where public_id=$1 and status='active'`, edit.SourceVersionPublicID).Scan(&versions)
+		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusUnprocessableEntity, "sourceVersionPublicId is invalid")
+			return
+		}
+		if err != nil {
+			logCatalogEditorReadFailure("recipe source versions", err)
+			writeError(w, http.StatusInternalServerError, "failed to read recipe source versions")
 			return
 		}
 		versions = uniqueNonEmpty(versions)
@@ -84,7 +103,7 @@ func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "at least one applicable Minecraft version is required")
 		return
 	}
-	if err = requireCatalogCreateDefaultLocalization(edit.DefaultLocale, edit.Localizations); err != nil {
+	if err := requireCatalogCreateDefaultLocalization(edit.DefaultLocale, edit.Localizations); err != nil {
 		writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 		return
 	}
@@ -97,9 +116,8 @@ func (s *Server) createCatalogRecipe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
-	typeEntity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("typePublicId"), "recipe_type")
-	if err != nil || typeEntity.Status != "active" {
-		writeError(w, http.StatusNotFound, "recipe type not found")
+	typeEntity, ok := s.requireActiveRecipeType(w, r, r.PathValue("typePublicId"))
+	if !ok {
 		return
 	}
 	if !s.requirePublicCatalogEntity(w, r, typeEntity) {
@@ -110,7 +128,7 @@ func (s *Server) catalogRecipes(w http.ResponseWriter, r *http.Request) {
 	limit := boundedLimit(r.URL.Query().Get("limit"), 40, 100)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	var total int
-	if err = s.db.QueryRow(r.Context(), `select count(*)::int from recipes recipe
+	if err := s.db.QueryRow(r.Context(), `select count(*)::int from recipes recipe
 		join catalog_entities entity on entity.id=recipe.entity_id
 		where recipe.recipe_type_id=$1 and entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe")+` and ($2='' or coalesce(recipe.canonical_source_id,'') ilike '%'||$2||'%')`,
 		typeEntity.ID, query).Scan(&total); err != nil {

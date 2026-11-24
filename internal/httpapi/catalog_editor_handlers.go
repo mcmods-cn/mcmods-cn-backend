@@ -825,9 +825,8 @@ func (s *Server) catalogRecipeTypeDetail(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) catalogRecipeTemplates(w http.ResponseWriter, r *http.Request) {
-	typeEntity, err := s.catalogEditorEntityByPublicID(r.Context(), r.PathValue("typePublicId"), "recipe_type")
-	if err != nil || typeEntity.Status != "active" {
-		writeError(w, http.StatusNotFound, "recipe type not found")
+	typeEntity, ok := s.requireActiveRecipeType(w, r, r.PathValue("typePublicId"))
+	if !ok {
 		return
 	}
 	if r.Method == http.MethodGet && !s.requirePublicCatalogEntity(w, r, typeEntity) {
@@ -840,11 +839,11 @@ func (s *Server) catalogRecipeTemplates(w http.ResponseWriter, r *http.Request) 
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		if err = normalizeCatalogTemplateEdit(&edit); err != nil {
+		if err := normalizeCatalogTemplateEdit(&edit); err != nil {
 			writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 			return
 		}
-		if err = requireCatalogCreateDefaultLocalization(edit.DefaultLocale, edit.Localizations); err != nil {
+		if err := requireCatalogCreateDefaultLocalization(edit.DefaultLocale, edit.Localizations); err != nil {
 			writeError(w, catalogEditorHTTPStatus(err), catalogEditorErrorMessage(err))
 			return
 		}
