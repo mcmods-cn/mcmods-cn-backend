@@ -60,9 +60,20 @@ PostgreSQL 18.6 上，131 条待解析 Mod 关系原需 268 次 SQL，已有目�
 
 容量抽样使用 `9bda905` 后端及 `0c31c4b` 前端，在 1、4 并发下对健康、匿名目录和认证各发 80 次，共 480 次返回 200。单并发认证 P99 为 362 ms。这一负载只覆盖本机样本。
 
-前端 `8e04f9f` 的云端完整门通过 439 项单测。在真实 Chromium 中，424 个用例有 423 个通过，1 个因没有注入原始游戏几何 ZIP 而跳过。KaTeX 的公式、字体、错误恢复和手机 AI 后台只读操作均通过，依赖扫描的同一低危公告从 4 条锁文件记录降为 0。[完整前端门](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45398621877) · [锁文件审计](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45398621846)
+前端功能分支 `8e04f9f` 的云端完整门通过 439 项单测。在真实 Chromium 中，424 个用例有 423 个通过，1 个因没有注入原始游戏几何 ZIP 而跳过。KaTeX 的公式、字体、错误恢复和手机 AI 后台只读操作均通过，依赖扫描的同一低危公告从 4 条锁文件记录降为 0。[完整前端门](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45398621877) · [锁文件审计](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45398621846)
+
+前端 main 在相同提交 `8e04f9f` 上复跑，单测 439 项通过，Chromium 有 421 项通过、1 项失败、1 项取消、1 项缺少原始几何 ZIP 而跳过。同一版本在本机注入原包后曾通过全部 424 项。针对云端两个异常，在真实浏览器将操作固定在第一次可交互的帧，确认了两处产品问题。[该次 main 运行](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45400170972)
+
+| 操作 | 观察到的差异 |
+| --- | --- |
+| 编辑掉落表高级 JSON | 旧实现已显示输入错误，却仍能提交上一次合法值。字段现在直接向表单登记有效性。输入无效时实际 PUT 从 1 次降到 0 次。纠正一个字段时其它无效池继续阻止保存，全部纠正后按 Enter 只提交一次人工差量。 |
+| 首次打开举报弹窗选两份附件 | 旧实现第一次选文件时没有申请上传，输入却已清空。弹窗现在把打开它的同一会话传给文件处理。新镜像的首个文件发出 1 个上传票据请求；切换账号后请求取消，第二张票据、上传完成和举报提交均为 0 次。简中 390 × 844 深色视口还验证了 Tab、Escape 和新账号显示空草稿。[界面对照与复跑](https://github.com/mcmods-cn/mcmods-cn-frontend/blob/main/docs/ui/README.md) |
+
+英文浅色桌面和简中深色窄屏中，掉落表保存按钮锁定后仍与可用状态逐像素相同。共享编辑器在 `c3ca2f2` 上为顶部与底部的原生按钮使用同一禁用样式。真实 Chromium 测得两处不透明度均从 1 降至 0.5，纠正输入后均恢复到 1。该版本的实际前端镜像配合 `2daeee3` 后端，也通过本机 TLS、登录退出、通知 Worker 和同一未改 ZIP 的续传、独立审核及匿名展示。[正式前端镜像](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45403447980) · [截图、用例和输入](https://github.com/mcmods-cn/mcmods-cn-frontend/blob/6d8a8e8/docs/ui/README.md)
 
 后端 `0c9e61f` 的质量、并行 race、容器构建及四种服务专项均通过。真实服务专项为 31 项顶层和 6 项子用例，零跳过。完整 PostgreSQL 门使用独立数据库、全部发现的批次和逐名输出。维护者可从指定运行的 PostgreSQL 步骤分别核对各用例终态和 `DB_SUITE runner_exit`。此前本机冻结版本 `9cfab4d` 的完整门运行了 99 批，2,434 个顶层用例中有 2,372 个通过、21 个失败、41 个跳过，退出码为 1。对已暴露的配方查询、自动化回执、收藏额度及创作者修订夹具按各自版本留证。[当前完整数据库门](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45399009308) · [当前真实服务专项](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45399009326) · [当前 Go 依赖审计](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45399009317)
+
+较早的托管门 `840f009` 运行 100 批，顶层 2,411 通过、8 失败、41 跳过，子例 2,246 通过、1 失败、1 跳过，退出码 1。两份皮肤夹具只给写处理函数传入用户编号，生产实现重新检查活动会话后提前返回 401。`c853006` 用已签发的合成编辑员会话和具备对应写权限的合成所有者完成原有操作。定向 PostgreSQL 门的两项顶层、三项子例均通过，验证单连接更新成功写入，以及私有纹理冲突返回 409 后数据库保持原值。整门另按该次运行核对。[原完整门](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45391231761) · [修正两份夹具](https://github.com/mcmods-cn/mcmods-cn-backend/commit/c853006735612d3ce8cbe9d78d03ff99bd60d490) · [修正后的完整门](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45403881389)
 
 逐文件记录包含三个固定 Git SHA、每份文件的 Git blob、SHA-256、分类、连续阅读区间或格式核验依据。条目保留实际阅读者的职责与调用链记录。将三仓完整 Git 克隆放在同一目录，打开下列命令所在的后端仓库。命令会重新读取记录中的 Git 对象并检查区间，输出中单列运行验证。[逐文件记录](audit/current-review.json.gz) · [核对工具](../tools/audit/review_snapshot.py)
 
