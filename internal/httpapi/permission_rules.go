@@ -392,7 +392,7 @@ func permissionCandidateWins(candidate permissionCandidate, current permissionCa
 	return candidate.Source < current.Source
 }
 
-func permissionRulesAllow(entries []security.PermissionRule, required string) bool {
+func selectedPermissionRule(entries []security.PermissionRule, required string) *security.PermissionRule {
 	var selected *security.PermissionRule
 	selectedSpecificity := -1
 	for index := range entries {
@@ -408,7 +408,12 @@ func permissionRulesAllow(entries []security.PermissionRule, required string) bo
 			selectedSpecificity = specificity
 		}
 	}
-	return selected != nil && selected.Allow
+	return selected
+}
+
+func permissionRulesAllow(entries []security.PermissionRule, required string) bool {
+	rule := selectedPermissionRule(entries, required)
+	return rule != nil && rule.Allow
 }
 
 func claimsAllow(claims security.Claims, required string) bool {
@@ -429,17 +434,24 @@ func claimsExplicitlyAllow(claims security.Claims, required string) bool {
 }
 
 func permissionRulesNumericValue(entries []security.PermissionRule, permissionPrefix string) int32 {
-	if permissionRulesAllow(entries, "admin.*") || permissionRulesAllow(entries, strings.TrimSuffix(permissionPrefix, ".")+".*") {
-		return maxPermissionValue
+	permissionPrefix = strings.TrimSuffix(permissionPrefix, ".")
+	prefix := permissionPrefix + "."
+	// An inherited wildcard supplies the default limit, subject to the same
+	// priority and specificity as every concrete permission.
+	unlimited := selectedPermissionRule(entries, prefix+"*")
+	if unlimited != nil && unlimited.Allow {
+		node := selectedPermissionRule(entries, permissionPrefix)
+		if node == nil || node.Allow || unlimited.Code == prefix+"*" {
+			return maxPermissionValue
+		}
 	}
 	best := int32(0)
-	prefix := strings.TrimSuffix(permissionPrefix, ".") + "."
 	for _, entry := range entries {
 		if !strings.HasPrefix(entry.Code, prefix) || !permissionRulesAllow(entries, entry.Code) {
 			continue
 		}
 		valuePart := strings.TrimPrefix(entry.Code, prefix)
-		if valuePart == "*" || valuePart == "-1" {
+		if valuePart == "-1" {
 			return maxPermissionValue
 		}
 		value, err := strconv.ParseInt(valuePart, 10, 32)

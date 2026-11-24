@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"net/http/httptest"
 	"testing"
 
 	"mcmods-cn-backend/internal/domain"
@@ -77,6 +79,23 @@ func TestPermissionRulesNumericValueHonorsDeny(t *testing.T) {
 	}
 	if got := permissionRulesNumericValue(entries, "user.file.total_limit"); got != 100 {
 		t.Fatalf("permissionRulesNumericValue() = %d, want 100", got)
+	}
+}
+
+func TestOSSQuotaHonorsMoreSpecificLimitWithinAdministrativeGrant(t *testing.T) {
+	claims := security.Claims{PermissionRules: []security.PermissionRule{
+		{Code: "admin.*", Allow: true, Priority: 10},
+		{Code: "user.file.single_limit.*", Allow: false, Priority: 20},
+		{Code: "user.file.single_limit.1", Allow: true, Priority: 30},
+	}}
+	req := httptest.NewRequest("POST", "/api/v1/users/me/oss/uploads", nil)
+	req = req.WithContext(context.WithValue(req.Context(), claimsContextKey, claims))
+	limits, err := ossUserQuotaLimitsForRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.daily != maxPermissionBytes || limits.total != maxPermissionBytes || limits.validateSingle(1<<20) != nil || limits.validateSingle(1<<20+1) == nil {
+		t.Fatalf("storage limits did not retain the configured one-MiB allowance: %+v", limits)
 	}
 }
 
