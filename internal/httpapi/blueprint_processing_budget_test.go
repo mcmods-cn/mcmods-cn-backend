@@ -22,9 +22,14 @@ func TestBlueprintProcessingLimitsRejectTheAuditScale(t *testing.T) {
 	if maxBlueprintNonAirBlockCount > 250_000 {
 		t.Errorf("non-air block limit = %d, want at most 250000", maxBlueprintNonAirBlockCount)
 	}
-	document := blueprintDocument{SchemaVersion: blueprintSchemaVersion, Size: [3]int{250_001, 1, 1}, Blocks: make([]blueprintBlock, 250_001)}
+	document := blueprintDocument{SchemaVersion: blueprintSchemaVersion, Size: [3]int{500, 1, 501}, Blocks: make([]blueprintBlock, 250_001)}
 	for index := range document.Blocks {
-		document.Blocks[index] = blueprintBlock{Position: [3]int{index, 0, 0}, State: blueprintBlockState{ID: "minecraft:stone"}}
+		document.Blocks[index] = blueprintBlock{Position: [3]int{index % 500, 0, index / 500}, State: blueprintBlockState{ID: "minecraft:stone"}}
+	}
+	atLimit := document
+	atLimit.Blocks = document.Blocks[:250_000]
+	if err := validateBlueprintDocument(atLimit); err != nil {
+		t.Fatalf("valid 250000-block structure: %v", err)
 	}
 	if err := validateBlueprintDocument(document); err == nil {
 		t.Fatal("250001 retained blocks unexpectedly passed the processing budget")
