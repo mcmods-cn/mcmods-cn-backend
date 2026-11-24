@@ -132,15 +132,14 @@ func TestFavoriteAtCollectionLimitCanListAndRemoveMembershipIntegration(t *testi
 	if status := create("second"); status != http.StatusConflict {
 		t.Errorf("custom folder consumed the default folder's reserved space, HTTP %d", status)
 	}
-	// This inventory has no default, as can happen for a previously imported
-	// account, and the operator has lowered its stock limit.
+	// Exercise a full inventory of existing custom folders after a quota reduction.
 	if _, err := pool.Exec(ctx, `delete from favorite_collections where user_id=$1 and is_default`, owner); err != nil {
 		t.Fatal(err)
 	}
 	server.cfg.Favorite.MaxCollectionsPerUser = 1
 	var projectCode string
 	var projectID int64
-	if err := pool.QueryRow(ctx, `insert into mods(slug,primary_name,review_status) values('favorite-stock-test','Stock test','approved') returning id,project_code`).Scan(&projectID, &projectCode); err != nil {
+	if err := pool.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status) values('stock1001','favorite-stock-test','Stock test','approved') returning id,project_code`).Scan(&projectID, &projectCode); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `insert into favorite_collection_items(collection_id,entity_type,entity_id)
