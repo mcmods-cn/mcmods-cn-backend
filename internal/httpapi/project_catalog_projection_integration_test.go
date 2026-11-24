@@ -64,6 +64,30 @@ func TestProjectCatalogCardMetricsAndAvatarQueryBudgetIntegration(t *testing.T) 
 			or (r.entity_type='modpack' and r.internal_id=(select id from modpacks where slug='reviewcard-2'))`); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("icon read failure", func(t *testing.T) {
+		for _, kind := range []string{"mod", "modpack", "plugin"} {
+			read := func(requestCtx context.Context) int {
+				req := httptest.NewRequestWithContext(requestCtx, http.MethodGet, "/icon", nil)
+				req.SetPathValue("siteId", "reviewcard-2")
+				req.SetPathValue("projectType", kind)
+				rec := httptest.NewRecorder()
+				if kind == "plugin" {
+					s.simpleProjectIcon(rec, req)
+				} else {
+					s.publicProjectIcon(rec, req, kind)
+				}
+				return rec.Code
+			}
+			if code := read(ctx); code != http.StatusNotFound {
+				t.Errorf("%s missing icon returned %d", kind, code)
+			}
+			unavailable, stop := context.WithCancel(ctx)
+			stop()
+			if code := read(unavailable); code != http.StatusInternalServerError {
+				t.Errorf("%s unavailable icon read returned %d", kind, code)
+			}
+		}
+	})
 	type stats struct {
 		Downloads, Views, Favorites, Comments, RatingCount int64
 		Rating                                             *float64
