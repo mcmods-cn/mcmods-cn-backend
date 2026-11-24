@@ -165,6 +165,9 @@ func TestDraftDetailReturnsOneOwnerSnapshotIntegration(t *testing.T) {
 		server.userDraftItem(response, req)
 		return response
 	}
+	if err := pool.Ping(f.ctx); err != nil {
+		t.Fatal(err)
+	}
 	tracer.queries.Store(0)
 	owned := get(owner)
 	queries := tracer.queries.Load()
