@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -88,31 +89,29 @@ func (worker *ProjectAutomationWorker) applyProjectMaintenancePolicy(
 		return result, err
 	}
 
-	var currentStatus string
+	var currentStatus, reviewStatus, publicID string
 	var createdAt time.Time
 	var publishedRevisionID *int64
 	if job.ProjectType == "mod" {
-		err = tx.QueryRow(ctx, `select official_status,created_at,published_revision_id from mods where id=$1 for update`, job.InternalID).
-			Scan(&currentStatus, &createdAt, &publishedRevisionID)
+		err = tx.QueryRow(ctx, `select official_status,review_status,project_code,created_at,published_revision_id from mods where id=$1 for update`, job.InternalID).
+			Scan(&currentStatus, &reviewStatus, &publicID, &createdAt, &publishedRevisionID)
 	} else {
-		err = tx.QueryRow(ctx, `select official_status,created_at,published_revision_id from simple_projects
+		err = tx.QueryRow(ctx, `select official_status,review_status,public_id,created_at,published_revision_id from simple_projects
 			where id=$1 and project_type=$2 for update`, job.InternalID, job.ProjectType).
-			Scan(&currentStatus, &createdAt, &publishedRevisionID)
+			Scan(&currentStatus, &reviewStatus, &publicID, &createdAt, &publishedRevisionID)
 	}
 	if err != nil {
 		return result, fmt.Errorf("load project maintenance status: %w", err)
 	}
+	if publicID != job.ProjectPublicID {
+		return result, errProjectAutomationParentUnavailable
+	}
 	result.PreviousStatus = currentStatus
 	result.CurrentStatus = currentStatus
-
-	aggregateType := simpleProjectAggregate
-	if job.ProjectType == "mod" {
-		aggregateType = "mod"
-	}
-	if err = checkProjectRevisionModerationTx(ctx, tx, aggregateType, job.InternalID); errors.Is(err, errProjectModerationHidden) {
+	if reviewStatus != "approved" {
 		return result, nil
 	}
-	if err != nil {
+	if _, err = authorizeAutomationProject(ctx, tx, job.ActorID, publicID, false, true); err != nil {
 		return result, err
 	}
 
@@ -248,23 +247,35 @@ func publishAutomatedProjectMaintenanceStatusTx(ctx context.Context, tx pgx.Tx, 
 		*baseRevisionID, job.ProjectType, job.InternalID, aggregateType, job.ProjectPublicID).Scan(&raw); err != nil {
 		return fmt.Errorf("load published project revision for automated maintenance: %w", err)
 	}
-	var snapshot any
-	if job.ProjectType == "mod" {
-		var value createModRequest
-		if err := json.Unmarshal(raw, &value); err != nil {
-			return fmt.Errorf("decode published mod revision for automated maintenance: %w", err)
-		}
-		value.OfficialStatus = status
-		snapshot = value
-	} else {
-		var value simpleProjectSnapshot
-		if err := json.Unmarshal(raw, &value); err != nil {
-			return fmt.Errorf("decode published project revision for automated maintenance: %w", err)
-		}
-		value.ProjectType = job.ProjectType
-		value.OfficialStatus = status
-		snapshot = value
+	// Compatibility discovery commits independently of maintenance publication.
+	// Carry those live facts into the revision without reapplying old project content.
+	var snapshot map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &snapshot); err != nil || snapshot == nil {
+		return errors.New("invalid published snapshot for automated maintenance")
 	}
+	var compat map[string]json.RawMessage
+	if job.ProjectType == "mod" {
+		err := tx.QueryRow(ctx, `select jsonb_build_object('compatibilities',coalesce(jsonb_agg(to_jsonb(c) order by loader),'[]'::jsonb))
+			from (select loader,array_agg(minecraft_version order by minecraft_version desc) versions
+				from mod_loader_compatibilities where mod_id=$1 group by loader) c`, job.InternalID).Scan(&compat)
+		if err != nil {
+			return fmt.Errorf("read mod compatibility for maintenance revision: %w", err)
+		}
+	} else {
+		err := tx.QueryRow(ctx, `select jsonb_build_object('minecraftVersions',minecraft_versions,'loaders',loaders)
+			from simple_projects where id=$1 and project_type=$2`, job.InternalID, job.ProjectType).Scan(&compat)
+		if err != nil {
+			return fmt.Errorf("read project compatibility for maintenance revision: %w", err)
+		}
+	}
+	for field, value := range compat {
+		previous := snapshot[field]
+		if bytes.Equal(value, []byte("[]")) && (previous == nil || bytes.Equal(previous, []byte("null"))) {
+			continue
+		}
+		snapshot[field] = value
+	}
+	snapshot["officialStatus"], _ = json.Marshal(status)
 	nextRaw, err := json.Marshal(snapshot)
 	if err != nil {
 		return fmt.Errorf("encode automated project maintenance revision: %w", err)
@@ -279,13 +290,18 @@ func publishAutomatedProjectMaintenanceStatusTx(ctx context.Context, tx pgx.Tx, 
 	if err != nil {
 		return fmt.Errorf("create automated project maintenance revision: %w", err)
 	}
-	if job.ProjectType == "mod" {
-		if err = applyModSnapshot(ctx, tx, job.InternalID, created.RevisionID, job.ActorID, true, true, snapshot.(createModRequest)); err != nil {
-			return fmt.Errorf("apply automated mod maintenance revision: %w", err)
-		}
-	} else if err = applySimpleProjectSnapshotTx(ctx, tx, job.InternalID, created.RevisionID, job.ActorID,
-		true, true, snapshot.(simpleProjectSnapshot)); err != nil {
-		return fmt.Errorf("apply automated project maintenance revision: %w", err)
+	update := `update mods set official_status=$2,published_revision_id=$3,updated_at=now()
+		where id=$1 and published_revision_id=$4 and official_status=$5 and review_status='approved'`
+	if job.ProjectType != "mod" {
+		update = `update simple_projects set official_status=$2,published_revision_id=$3,updated_at=now()
+			where id=$1 and published_revision_id=$4 and official_status=$5 and review_status='approved'`
+	}
+	tag, err := tx.Exec(ctx, update, job.InternalID, status, created.RevisionID, *baseRevisionID, previousStatus)
+	if err != nil {
+		return fmt.Errorf("apply automated maintenance status: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return errProjectAutomationParentUnavailable
 	}
 	if err = appendReviewResolutionTx(ctx, tx, created.ChangeRequestID, "approved", job.ActorID, reason, nil); err != nil {
 		return fmt.Errorf("approve automated project maintenance revision: %w", err)

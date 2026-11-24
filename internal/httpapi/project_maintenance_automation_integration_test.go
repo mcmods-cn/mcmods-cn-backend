@@ -7,23 +7,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/systemactor"
 )
 
 func TestProjectMaintenanceAutomationTransitionsAndRestoresOwnedStatus(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to verify project maintenance transitions against PostgreSQL")
 	}
+	pool := newOCT02IsolatedDatabase(t, t.Context())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, config.Load().DB.ConnString())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	var err error
 
 	suffix := fmt.Sprintf("%08x", uint32(time.Now().UnixNano()))
 	projectCode := "a" + suffix
@@ -36,13 +30,11 @@ func TestProjectMaintenanceAutomationTransitionsAndRestoresOwnedStatus(t *testin
 	}
 	defer pool.Exec(context.Background(), `delete from mods where id=$1`, modID)
 
-	var routeID, actorID int64
+	var routeID int64
 	if err = pool.QueryRow(ctx, `select id from public_routes where entity_type='mod' and internal_id=$1`, modID).Scan(&routeID); err != nil {
 		t.Fatal(err)
 	}
-	if err = pool.QueryRow(ctx, `select id from users where username=$1 and email=$2`, systemactor.AutobotUsername, systemactor.AutobotEmail).Scan(&actorID); err != nil {
-		t.Fatal(err)
-	}
+	actorID := configureSeededAutomationFixture(t, ctx, pool, "project.edit", "project.no-review")
 	seedPublishedMaintenanceModRevision(t, ctx, pool, modID, projectCode, actorID, "active")
 	worker := NewProjectAutomationWorker(config.Load(), pool)
 	job := projectAutomationJob{RouteID: routeID, InternalID: modID, ProjectType: "mod", ProjectPublicID: projectCode,
@@ -98,13 +90,10 @@ func TestProjectMaintenanceAutomationPreservesManualOverride(t *testing.T) {
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 to verify manual maintenance overrides against PostgreSQL")
 	}
+	pool := newOCT02IsolatedDatabase(t, t.Context())
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, config.Load().DB.ConnString())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
+	var err error
 
 	suffix := fmt.Sprintf("%08x", uint32(time.Now().UnixNano()))
 	projectCode := "b" + suffix
@@ -115,13 +104,11 @@ func TestProjectMaintenanceAutomationPreservesManualOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer pool.Exec(context.Background(), `delete from mods where id=$1`, modID)
-	var routeID, actorID int64
+	var routeID int64
 	if err = pool.QueryRow(ctx, `select id from public_routes where entity_type='mod' and internal_id=$1`, modID).Scan(&routeID); err != nil {
 		t.Fatal(err)
 	}
-	if err = pool.QueryRow(ctx, `select id from users where username=$1`, systemactor.AutobotUsername).Scan(&actorID); err != nil {
-		t.Fatal(err)
-	}
+	actorID := configureSeededAutomationFixture(t, ctx, pool, "project.edit", "project.no-review")
 	seedPublishedMaintenanceModRevision(t, ctx, pool, modID, projectCode, actorID, "active")
 	worker := NewProjectAutomationWorker(config.Load(), pool)
 	job := projectAutomationJob{RouteID: routeID, InternalID: modID, ProjectType: "mod", ProjectPublicID: projectCode,

@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -40,13 +39,7 @@ func TestBUG039AutomatedMaintenancePublishesAuditedRevisionAtomicallyIntegration
 		}
 	}()
 
-	stamp := time.Now().UnixNano()
-	var actorID int64
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-		values($1,$2,'bug039',true) returning id`, fmt.Sprintf("bug039-auto-%d", stamp),
-		fmt.Sprintf("bug039-auto-%d@example.invalid", stamp)).Scan(&actorID); err != nil {
-		t.Fatal(err)
-	}
+	actorID := configureSeededAutomationFixture(t, ctx, pool, "project.edit", "project.no-review")
 	now := time.Date(2026, time.August, 23, 12, 0, 0, 0, time.UTC)
 	projectCode := "b039m0001"
 	var modID int64
