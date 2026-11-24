@@ -66,6 +66,16 @@ func TestAuditChallengeEvidenceCodecUsesRealSchemaAndDoesNotExposeSecrets(t *tes
 	if err != nil || seal["contextBound"] != true || seal["correctSolutionBound"] != true {
 		t.Fatalf("evidence binding codec failed: %v", err)
 	}
+	// This actor already owns the seeded fixture Mod. A matched challenge event
+	// cannot, on its own, certify the browser's separate zero-submission claim.
+	var modCount int
+	if err := base.db.QueryRow(base.ctx, `select count(*) from mods where submitted_by=$1`, actor).Scan(&modCount); err != nil || modCount == 0 {
+		t.Fatalf("fixture needs an existing submitted Mod, got %d: %v", modCount, err)
+	}
+	if _, claimed := seal["result"]; claimed {
+		t.Fatal("an event binding emitted a verdict before checking the submission postconditions")
+	}
+
 	snapshot := filepath.Join(dir, "safe.json")
 	if err := writeAuditChallengeSQLSnapshot(base.ctx, f, map[string]int64{"expiry": actor}, seedHash, snapshot); err != nil {
 		t.Fatal(err)
@@ -200,7 +210,6 @@ func sealAuditExpiredBrowserRequest(ctx context.Context, f auditFixGRFixture, id
 	result["stableBodySHA256"] = receipt.FirstBodySHA256
 	result["backendCommit"] = backendCommit
 	result["frontendCommit"] = frontendCommit
-	result["result"] = "PASS_SPECIFIC_EXPIRED_CORRECT_PROOF_CONTEXT_BODY_AND_ZERO_MOD_SCOPE"
 	result["productChallengeTTLSeconds"] = 600
 	result["productionExecuted"] = false
 	return result, nil

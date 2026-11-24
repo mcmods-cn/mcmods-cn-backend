@@ -262,12 +262,7 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 			if err = writeAuditChallengeSQLSnapshot(f.ctx, f, ids, seedHash, filepath.Join(dir, "actors-final-sql.json")); err != nil {
 				t.Fatal("could not preserve final SQL facts: ", err)
 			}
-			if expiryOnly {
-				encoded, _ := json.MarshalIndent(expirySeal, "", "  ")
-				if err = os.WriteFile(filepath.Join(dir, "expiry-specific-seal.json"), encoded, 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
+
 			var total, pending, others int
 			if err = f.db.QueryRow(f.ctx, `select count(*),count(*) filter(where review_status='pending') from mods where submitted_by=$1`, ids["creator"]).Scan(&total, &pending); err != nil || total != expectedCreated || pending != expectedCreated {
 				t.Fatalf("creator total=%d pending=%d err=%v", total, pending, err)
@@ -282,6 +277,18 @@ func TestAuditLiveRealChallengeBrowserFixture(t *testing.T) {
 			after, _ := json.Marshal(current)
 			if !bytes.Equal(settingsBefore, after) {
 				t.Fatal("anti-abuse policy was changed")
+			}
+			if expiryOnly {
+				expirySeal["result"] = "PASS_SPECIFIC_EXPIRED_CORRECT_PROOF_CONTEXT_BODY_AND_ZERO_MOD_SCOPE"
+				expirySeal["failedExpiredProbeModCount"] = others
+				expirySeal["creatorModCount"] = total
+				encoded, err := json.MarshalIndent(expirySeal, "", "  ")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(filepath.Join(dir, "expiry-specific-seal.json"), encoded, 0600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			report, _ := json.MarshalIndent(map[string]any{"result": "PASS", "scope": "actual browser proof business outcome independently checked; browser evidence owns error/cancel/expiry UI detail", "sourceCommit": strings.TrimSpace(string(head)), "frontendExpectedCommit": frontendCommit, "expiryOnly": expiryOnly, "specificExpiryEventBound": expiryOnly, "creatorModCount": total, "pendingModCount": pending, "failedExpiredProbeModCount": others, "policyUnchanged": true, "challengeTTLSeconds": 600, "productionExecuted": false}, "", "  ")
 			if err = os.WriteFile(filepath.Join(dir, "backend-postconditions.json"), report, 0600); err != nil {
