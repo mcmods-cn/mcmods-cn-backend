@@ -29,6 +29,8 @@ func TestContentMetricsAttributeImportEditsOnPublicationIntegration(t *testing.T
 		return decodeTEST022Data[contentMetricsResponse](t, f.require(t, "", http.MethodGet,
 			"/api/v1/content-metrics/"+resource.PublicID, nil, http.StatusOK))
 	}
+	// The canonical resource remains public independently of this version.
+	exec("insert into catalog_resource_definitions(resource_id) values($1) on conflict(resource_id) do nothing", resourceID)
 	base := metrics()
 	editorCount := func(result contentMetricsResponse) int64 {
 		var count int64
