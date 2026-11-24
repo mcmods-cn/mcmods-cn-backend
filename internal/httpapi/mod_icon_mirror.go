@@ -225,9 +225,7 @@ func (s *Server) reserveExternalImage(ctx context.Context, cfg ossConfigPayload,
 	}
 	// Use the existing deletion queue and its due-time index. Failed or
 	// interrupted transfers remain private and recoverable for a full day.
-	_, err = tx.Exec(ctx, `insert into oss_object_deletion_outbox(
-        oss_file_id,bucket,endpoint,region,use_cname,object_key,reason,next_attempt_at)
-        values($1,$2,$3,$4,$5,$6,$7,now()+interval '1 day')`, fileID, cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), key, externalImageExpiryReason)
+	_, err = scheduleOSSUploadExpiry(ctx, tx, cfg, key, externalImageExpiryReason, &fileID)
 	if err != nil {
 		return "", err
 	}

@@ -16,6 +16,9 @@ func TestDownloadedMirrorUsesCurrentRedistributionDecisionIntegration(t *testing
 	cfg := ossConfigPayload{Bucket: "owned", Endpoint: "https://owned.example.invalid", Region: "cn-owned"}
 	const key = "owned/test.jar"
 	const digest = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	if _, err := scheduleOSSUploadExpiry(f.ctx, f.db, cfg, key, projectMirrorUploadExpiryReason, nil); err != nil {
+		t.Fatal(err)
+	}
 	register := func() error { return worker.registerDownloadedProjectMirror(f.ctx, job, cfg, file, key, 4, digest) }
 	if _, err := f.db.Exec(f.ctx, `update mods set license='MIT' where id=$1`, job.InternalID); err != nil {
 		t.Fatal(err)
@@ -57,10 +60,30 @@ func TestDownloadedMirrorUsesCurrentRedistributionDecisionIntegration(t *testing
 	if err = register(); err != nil {
 		t.Fatal(err)
 	}
+	if err = f.db.QueryRow(f.ctx, `select count(*) from oss_object_deletion_outbox where bucket=$1 and object_key=$2`, cfg.Bucket, key).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("committed mirror retained an expiry: rows=%d err=%v", rows, err)
+	}
 	var state, license, project string
 	if err = f.db.QueryRow(f.ctx, `select status,license_spdx_id,metadata->>'providerProjectId' from mirrored_project_files where project_route_id=$1 and external_file_id=$2`, job.RouteID, file.ID).Scan(&state, &license, &project); err != nil || state != "scanning" || license != "ARR" || project != job.ExternalID {
 		t.Fatalf("register authorized mirror: state=%s license=%s project=%s err=%v", state, license, project, err)
 	}
+	// An earlier delete can arrive after its retry has gone back to pending.
+	const retiredKey = "owned/already-attempted.jar"
+	id, err := scheduleOSSUploadExpiry(f.ctx, f.db, cfg, retiredKey, projectMirrorUploadExpiryReason, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.db.Exec(f.ctx, `update oss_object_deletion_outbox set attempts=1 where id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	file.ID = "another-release"
+	if err = worker.registerDownloadedProjectMirror(f.ctx, job, cfg, file, retiredKey, 4, digest); err == nil {
+		t.Fatal("a transfer with a previously attempted deletion was registered")
+	}
+	if err = f.db.QueryRow(f.ctx, `select count(*) from oss_files where object_key=$1`, retiredKey).Scan(&rows); err != nil || rows != 0 {
+		t.Fatalf("lost cleanup ownership still produced a file: rows=%d err=%v", rows, err)
+	}
+
 }
 
 func enableMirrorPublicationFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, routeID int64) {

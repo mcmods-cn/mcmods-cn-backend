@@ -500,6 +500,18 @@ func (s *Server) enqueueUnregisteredOSSObjectDeletion(ctx context.Context, cfg o
 	return nil
 }
 
+// Commit this receipt before sending bytes whose presence would otherwise be
+// unknown after a provider timeout or process exit. Random mirror keys have
+// no oss_files row until registration; imported images already have one.
+func scheduleOSSUploadExpiry(ctx context.Context, db databaseQuery, cfg ossConfigPayload, objectKey, reason string, fileID *int64) (int64, error) {
+	var id int64
+	err := db.QueryRow(ctx, `insert into oss_object_deletion_outbox(
+		oss_file_id,bucket,endpoint,region,use_cname,object_key,reason,next_attempt_at)
+		values($1,$2,$3,$4,$5,$6,$7,clock_timestamp()+interval '1 day') returning id`,
+		fileID, cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), objectKey, reason).Scan(&id)
+	return id, err
+}
+
 func enqueueOSSObjectDeletionTx(ctx context.Context, tx pgx.Tx, target ossDeletionTarget) error {
 	target.Bucket = strings.TrimSpace(target.Bucket)
 	target.Endpoint = strings.TrimSpace(target.Endpoint)

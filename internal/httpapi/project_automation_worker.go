@@ -1002,6 +1002,17 @@ func (worker *ProjectAutomationWorker) registerDownloadedProjectMirror(ctx conte
 	if err != nil {
 		return err
 	}
+	// A claimed or previously attempted deletion can still reach the provider.
+	// Register only while this exact transfer's unclaimed receipt can be canceled.
+	tag, err := tx.Exec(ctx, `delete from oss_object_deletion_outbox
+		where bucket=$1 and endpoint=$2 and object_key=$3 and oss_file_id is null and reason=$4
+		  and status='pending' and attempts=0`, cfg.Bucket, cfg.Endpoint, objectKey, projectMirrorUploadExpiryReason)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return errors.New("project mirror upload is no longer available for registration")
+	}
 	return tx.Commit(ctx)
 }
 
@@ -1085,14 +1096,37 @@ func (worker *ProjectAutomationWorker) uploadProviderFile(ctx context.Context, c
 		return 0, "", err
 	}
 	defer spooled.Close()
-	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{
-		Bucket: aliyunoss.Ptr(ossCfg.Bucket), Key: aliyunoss.Ptr(objectKey), ContentType: aliyunoss.Ptr("application/octet-stream"),
-		ContentLength: aliyunoss.Ptr(spooled.Size), Body: spooled.File, Metadata: map[string]string{"sha256": spooled.SHA256},
-	})
-	if err != nil {
+	ioCtx, stop := context.WithTimeout(ctx, time.Duration(cfg.RequestTimeoutSeconds)*time.Second)
+	defer stop()
+	if err = putSpooledProjectMirror(ioCtx, slot.connection, client, ossCfg, objectKey, spooled); err != nil {
 		return 0, "", err
 	}
 	return spooled.Size, spooled.SHA256, nil
+}
+
+const projectMirrorUploadExpiryReason = "abandoned_project_mirror_upload"
+
+func putSpooledProjectMirror(ctx context.Context, conn *pgxpool.Conn, client *aliyunoss.Client, cfg ossConfigPayload, key string, file *spooledProviderFile) error {
+	// This insert commits on the single connection already reserved by the global
+	// transfer slot. A lost acknowledgement leaves a durable, delayed cleanup.
+	id, err := scheduleOSSUploadExpiry(ctx, conn, cfg, key, projectMirrorUploadExpiryReason, nil)
+	if err != nil {
+		return err
+	}
+	guard, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer guard.Rollback(ctx)
+	if err = guard.QueryRow(ctx, `select id from oss_object_deletion_outbox
+		where id=$1 and status='pending' and attempts=0 for update`, id).Scan(&id); err != nil {
+		return err
+	}
+	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{
+		Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(key), ContentType: aliyunoss.Ptr("application/octet-stream"),
+		ContentLength: aliyunoss.Ptr(file.Size), Body: file.File, Metadata: map[string]string{"sha256": file.SHA256},
+	})
+	return err
 }
 
 func downloadProviderFile(ctx context.Context, file providerProjectFile, cfg modImportConfig) (*spooledProviderFile, error) {
