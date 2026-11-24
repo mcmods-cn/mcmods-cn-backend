@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -141,5 +142,56 @@ func TestHeatPromotionSequenceUsesAtomicCounter(t *testing.T) {
 		if nextErr != nil || sequence != expected {
 			t.Fatalf("sequence call %d returned %d, %v", expected, sequence, nextErr)
 		}
+	}
+}
+
+func TestIndependentEconomyRewardsSharePolicyAndExcludeConfigurationWritesIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "economy.checkin")
+	server := &Server{db: f.db}
+	download, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer download.Rollback(f.ctx)
+	if err = server.recordOwnedContentDownloadTx(f.ctx, download, "mod", f.modCode, f.userIDs[f.editor], f.userIDs[f.otherEditor]); err != nil {
+		t.Fatal(err)
+	}
+
+	// Probe without waiting, before calling a second ordinary reward endpoint.
+	var shared, exclusive bool
+	probe, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Rollback(f.ctx)
+	if err = probe.QueryRow(f.ctx, `select pg_try_advisory_xact_lock_shared(hashtext('mcmods-cn-economy-configuration'))`).Scan(&shared); err != nil {
+		t.Fatal(err)
+	}
+	if err = probe.QueryRow(f.ctx, `select pg_try_advisory_xact_lock(hashtext('mcmods-cn-economy-configuration'))`).Scan(&exclusive); err != nil {
+		t.Fatal(err)
+	}
+	if !shared || exclusive {
+		t.Fatalf("overlapping policy access: reader=%v writer=%v", shared, exclusive)
+	}
+	if err = probe.Rollback(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	f.require(t, f.reviewer, http.MethodPost, "/api/v1/users/me/economy/checkin", nil, http.StatusOK)
+	if err = download.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	writer, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback(f.ctx)
+	if err = lockEconomyConfigurationTx(f.ctx, writer); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.db.QueryRow(f.ctx, `select pg_try_advisory_xact_lock_shared(hashtext('mcmods-cn-economy-configuration'))`).Scan(&shared); err != nil || shared {
+		t.Fatalf("configuration writer admitted a concurrent reward: shared=%v err=%v", shared, err)
 	}
 }
