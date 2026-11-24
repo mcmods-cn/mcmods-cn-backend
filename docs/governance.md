@@ -28,7 +28,7 @@
 
 玩家档案与皮肤操作在取得账户和目标行锁后，按当前会话、额度和对象归属决定是否写入。普通用户第二个档案等待期间调高额度，提交后可正常创建，且仅保留一个默认档案。管理员在 PNG 处理期间改为要求审核，新皮肤随即进入待审核。回归入口为 `TestPlayerProfileCreationUsesNewQuotaAfterAccountLock` 和 `TestSkinCreationUsesReviewPolicyInForceAfterFileProcessing`。
 
-资料布局支持 2,048 条引用，提交后可逐条找到。只修改布局显示方式时保留目录外的父进度。JEI categories v7 的候选保留未知数量及显式 0，v6 维持原有数量规则。[导入契约](import-asset-registry.md)
+资料字段可保存最多 2,048 条引用。审核发布后，事务会逐条登记尚未解析的引用。只修改目录布局的显示方式时保留目录外的父进度。JEI categories v7 的候选保留未知数量及显式 0，v6 维持原有数量规则。[导入契约](import-asset-registry.md)
 
 完整 PostgreSQL 门禁按一次运行的固定提交计数。运行中止、测试断言失败、条件跳过分别保留。合并修复后需重新运行整门，所需服务和隔离步骤见[测试环境](testing-isolated-environment.md)。正式 Fabric 和 Forge 发行包的入世界导出、目标云服务与跨主机恢复仍待验收。
 
