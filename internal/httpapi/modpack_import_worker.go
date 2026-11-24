@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,19 +65,21 @@ type curseForgePackFile struct {
 }
 
 type modrinthPackIndex struct {
-	FormatVersion int               `json:"formatVersion"`
-	Game          string            `json:"game"`
-	VersionID     string            `json:"versionId"`
-	Name          string            `json:"name"`
-	Dependencies  map[string]string `json:"dependencies"`
-	Files         []struct {
-		Path      string   `json:"path"`
-		Downloads []string `json:"downloads"`
-		Env       struct {
-			Client string `json:"client"`
-			Server string `json:"server"`
-		} `json:"env"`
-	} `json:"files"`
+	FormatVersion int                `json:"formatVersion"`
+	Game          string             `json:"game"`
+	VersionID     string             `json:"versionId"`
+	Name          string             `json:"name"`
+	Dependencies  map[string]string  `json:"dependencies"`
+	Files         []modrinthPackFile `json:"files"`
+}
+
+type modrinthPackFile struct {
+	Path      string   `json:"path"`
+	Downloads []string `json:"downloads"`
+	Env       *struct {
+		Client string `json:"client"`
+		Server string `json:"server"`
+	} `json:"env"`
 }
 
 type curseForgePackManifest struct {
@@ -131,8 +136,8 @@ func importModrinthModpackWithArchiveClientFactory(ctx context.Context, client *
 	if err = readJSONFromArchive(archivePath, []string{"modrinth.index.json"}, &index); err != nil {
 		return createModpackRequest{}, fmt.Errorf("读取 modrinth.index.json 失败: %w", err)
 	}
-	if index.Game != "minecraft" || index.FormatVersion <= 0 {
-		return createModpackRequest{}, errors.New("modrinth.index.json 不是有效的 Minecraft 整合包索引")
+	if index.Game != "minecraft" || index.FormatVersion != 1 {
+		return createModpackRequest{}, errors.New("unsupported Modrinth pack game or format version (expected minecraft version 1)")
 	}
 	if len(index.Files) > maxModpackIndexFiles {
 		return createModpackRequest{}, fmt.Errorf("modrinth.index.json contains more than %d files", maxModpackIndexFiles)
@@ -215,7 +220,10 @@ func modrinthPackCompatibility(project modrinthProject, version modrinthVersion,
 		loaders = normalizeLoaders(project.Loaders)
 	}
 	if len(loaders) == 0 {
-		for dependency := range index.Dependencies {
+		for _, dependency := range slices.Sorted(maps.Keys(index.Dependencies)) {
+			if dependency == "fabric-loader" || dependency == "quilt-loader" {
+				dependency = strings.TrimSuffix(dependency, "-loader")
+			}
 			loaders = append(loaders, normalizeLoaders([]string{dependency})...)
 		}
 	}
@@ -232,19 +240,26 @@ func modrinthPackCompatibility(project modrinthProject, version modrinthVersion,
 func modrinthIndexMods(index modrinthPackIndex) []modpackModPayload {
 	mods := make([]modpackModPayload, 0, len(index.Files))
 	for _, file := range index.Files {
-		if !strings.HasPrefix(strings.ReplaceAll(file.Path, "\\", "/"), "mods/") {
+		archivePath := strings.ReplaceAll(file.Path, "\\", "/")
+		if !strings.HasPrefix(archivePath, "mods/") {
 			continue
 		}
+		name := path.Base(archivePath)
 		projectID, versionID, trustedIdentity := consistentModrinthDownloadIdentity(file.Downloads)
 		identifier := ""
 		if !trustedIdentity {
 			projectID, versionID = "", ""
-			identifier = strings.TrimSuffix(filepath.Base(file.Path), filepath.Ext(file.Path))
+			identifier = strings.TrimSuffix(name, path.Ext(name))
+		}
+		// The format uses env overrides only for files with a side restriction.
+		clientRequired, serverRequired := true, true
+		if file.Env != nil {
+			clientRequired, serverRequired = sideRequired(file.Env.Client), sideRequired(file.Env.Server)
 		}
 		mods = append(mods, modpackModPayload{
-			ModName: filepath.Base(file.Path), Provider: "modrinth", ProviderProjectID: projectID,
-			ProviderVersionID: versionID, Identifier: identifier, FileName: filepath.Base(file.Path),
-			ClientRequired: sideRequired(file.Env.Client), ServerRequired: sideRequired(file.Env.Server),
+			ModName: name, Provider: "modrinth", ProviderProjectID: projectID,
+			ProviderVersionID: versionID, Identifier: identifier, FileName: name,
+			ClientRequired: clientRequired, ServerRequired: serverRequired,
 		})
 	}
 	return mods
@@ -631,6 +646,7 @@ func loadCurseForgePackFile(ctx context.Context, client *http.Client, cfg modImp
 	defer cancel()
 	var candidates []curseForgePackFile
 	seen := make(map[int64]bool)
+	nextIndex := 0
 	for page := 0; page < maxPages; page++ {
 		var response struct {
 			Data       []curseForgePackFile `json:"data"`
@@ -640,7 +656,7 @@ func loadCurseForgePackFile(ctx context.Context, client *http.Client, cfg modImp
 				TotalCount  int `json:"totalCount"`
 			} `json:"pagination"`
 		}
-		endpoint := fmt.Sprintf("%s/mods/%d/files?pageSize=%d&index=%d", cfg.CurseForge.BaseURL, projectID, pageSize, page*pageSize)
+		endpoint := fmt.Sprintf("%s/mods/%d/files?pageSize=%d&index=%d", cfg.CurseForge.BaseURL, projectID, pageSize, nextIndex)
 		if err := getProviderJSON(ctx, client, endpoint, headers, &response); err != nil {
 			return curseForgePackFile{}, fmt.Errorf("CurseForge file pagination failed: %w", err)
 		}
@@ -656,7 +672,7 @@ func loadCurseForgePackFile(ctx context.Context, client *http.Client, cfg modImp
 		}
 		complete := len(response.Data) < pageSize
 		if p := response.Pagination; p != nil {
-			if p.Index != page*pageSize || p.ResultCount != len(response.Data) || p.TotalCount < p.Index+p.ResultCount {
+			if p.Index != nextIndex || p.ResultCount != len(response.Data) || p.TotalCount < p.Index+p.ResultCount {
 				return curseForgePackFile{}, errors.New("CurseForge file pagination metadata is inconsistent")
 			}
 			complete = p.Index+p.ResultCount >= p.TotalCount
@@ -667,6 +683,7 @@ func loadCurseForgePackFile(ctx context.Context, client *http.Client, cfg modImp
 		if complete {
 			return selectCurseForgePackFile(candidates)
 		}
+		nextIndex += len(response.Data)
 	}
 	return curseForgePackFile{}, errors.New("CurseForge file pagination budget exhausted (1000 files)")
 }

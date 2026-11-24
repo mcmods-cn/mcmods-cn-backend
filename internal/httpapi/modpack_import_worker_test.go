@@ -138,14 +138,7 @@ func TestModrinthDownloadIdentityRequiresOfficialConsistentCDNPaths(t *testing.T
 
 func TestModrinthIndexModsDoesNotBindIdentityFromUntrustedURL(t *testing.T) {
 	var index modrinthPackIndex
-	index.Files = append(index.Files, struct {
-		Path      string   `json:"path"`
-		Downloads []string `json:"downloads"`
-		Env       struct {
-			Client string `json:"client"`
-			Server string `json:"server"`
-		} `json:"env"`
-	}{
+	index.Files = append(index.Files, modrinthPackFile{
 		Path:      "mods/victim.jar",
 		Downloads: []string{"https://attacker.example/data/victim/versions/fake/victim.jar"},
 	})
