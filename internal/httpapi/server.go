@@ -74,7 +74,7 @@ func NewServer(ctx context.Context, cfg config.Config, db *pgxpool.Pool, queueCl
 	server.antiAbuse = antiabuse.New(ctx, cfg.AntiAbuse, db, server.cache)
 	permissions := server.routes()
 	if db != nil {
-		if err := registerDeclaredPermissions(ctx, db, permissions); err != nil {
+		if err := ensurePermissionNodes(ctx, db, applicationPermissionDescription, permissions); err != nil {
 			log.Print(database.RedactedError("register HTTP route permissions", err))
 		}
 	}

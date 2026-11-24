@@ -231,7 +231,7 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if request.MessageReceive != nil {
-		if err := ensurePermissionNode(r.Context(), tx, "user.message.receive"); err != nil {
+		if err := ensurePermissionNodes(r.Context(), tx, assignedPermissionDescription, []string{"user.message.receive"}); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存私聊权限失败")
 			return
 		}

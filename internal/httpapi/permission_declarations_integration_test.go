@@ -20,7 +20,7 @@ func TestWarmRouteRegistrationPreservesRBACVersionIntegration(t *testing.T) {
 		t.Helper()
 		s := &Server{mux: http.NewServeMux(), db: db}
 		codes := s.routes()
-		if err := registerDeclaredPermissions(ctx, db, codes); err != nil {
+		if err := ensurePermissionNodes(ctx, db, applicationPermissionDescription, codes); err != nil {
 			t.Fatal(err)
 		}
 		var allPresent bool
@@ -40,7 +40,7 @@ func TestWarmRouteRegistrationPreservesRBACVersionIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = registerDeclaredPermissions(ctx, tx, []string{a, b, a}); err != nil {
+		if err = ensurePermissionNodes(ctx, tx, applicationPermissionDescription, []string{a, b, a}); err != nil {
 			_ = tx.Rollback(ctx)
 			t.Fatal(err)
 		}

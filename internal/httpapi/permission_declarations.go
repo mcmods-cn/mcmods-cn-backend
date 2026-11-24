@@ -6,6 +6,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+const (
+	applicationPermissionDescription = "Permission declared by application code"
+	assignedPermissionDescription    = "自动创建的变量/数值权限节点"
+)
+
 type permissionDeclarationStore interface {
 	databaseQuery
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
@@ -14,7 +19,7 @@ type permissionDeclarationStore interface {
 // A conflict-only INSERT would still fire the statement-level RBAC generation
 // trigger. A warm startup only reads the registered names. A shop mutation
 // passes its own transaction, so creation of new names follows the item commit.
-func registerDeclaredPermissions(ctx context.Context, db permissionDeclarationStore, codes []string) error {
+func ensurePermissionNodes(ctx context.Context, db permissionDeclarationStore, description string, codes []string) error {
 	codes = normalizeCodes(codes)
 	if len(codes) == 0 {
 		return nil
@@ -28,7 +33,7 @@ func registerDeclaredPermissions(ctx context.Context, db permissionDeclarationSt
 		return nil
 	}
 	_, err := db.Exec(ctx, `insert into permissions(code,module,name,description)
-		select code,split_part(code,'.',1),code,'Permission declared by application code'
-		from unnest($1::text[]) as c(code) order by code on conflict(code) do nothing`, missing)
+		select code,split_part(code,'.',1),code,$2
+		from unnest($1::text[]) as c(code) order by code on conflict(code) do nothing`, missing, description)
 	return err
 }

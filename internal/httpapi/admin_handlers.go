@@ -653,11 +653,13 @@ func (s *Server) updateUserPermissions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	codes := make([]string, 0, len(manualPermissions))
 	for _, permission := range manualPermissions {
-		if err := ensurePermissionNode(r.Context(), tx, permission.Code); err != nil {
-			writeError(w, http.StatusInternalServerError, "保存权限节点失败")
-			return
-		}
+		codes = append(codes, permission.Code)
+	}
+	if err = ensurePermissionNodes(r.Context(), tx, assignedPermissionDescription, codes); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存权限节点失败")
+		return
 	}
 	if err = replaceManualUserAuthorizationTx(r.Context(), tx, userID, manualRoles, manualPermissions); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存用户权限失败")
@@ -1020,7 +1022,7 @@ func addRolePermissionTx(ctx context.Context, tx pgx.Tx, roleID int64, entry dom
 	if err != nil {
 		return &requestError{message: "权限节点有效期格式不正确: " + permissionCode}
 	}
-	if err := ensurePermissionNode(ctx, tx, permissionCode); err != nil {
+	if err := ensurePermissionNodes(ctx, tx, assignedPermissionDescription, []string{permissionCode}); err != nil {
 		return err
 	}
 	tag, err := tx.Exec(
@@ -1212,22 +1214,6 @@ func normalizeCode(value string) string {
 		}
 	}
 	return builder.String()
-}
-
-func ensurePermissionNode(ctx context.Context, tx pgx.Tx, code string) error {
-	module := code
-	if index := strings.Index(code, "."); index > 0 {
-		module = code[:index]
-	}
-	_, err := tx.Exec(
-		ctx,
-		`insert into permissions (code, module, name, description)
-		 values ($1, $2, $1, '自动创建的变量/数值权限节点')
-		 on conflict (code) do nothing`,
-		code,
-		module,
-	)
-	return err
 }
 
 func parseOptionalTime(value string) (*time.Time, error) {

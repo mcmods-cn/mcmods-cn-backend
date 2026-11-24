@@ -958,7 +958,7 @@ func (s *Server) saveShopItem(w http.ResponseWriter, r *http.Request, currentPub
 		writeError(w, http.StatusInternalServerError, "failed to lock economy configuration")
 		return
 	}
-	if err = registerDeclaredPermissions(r.Context(), tx, []string{payload.PurchasePermission, payload.UsePermission}); err != nil {
+	if err = ensurePermissionNodes(r.Context(), tx, applicationPermissionDescription, []string{payload.PurchasePermission, payload.UsePermission}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to declare shop item permission")
 		return
 	}
