@@ -108,12 +108,37 @@ func writePermissionComparisonError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) attachPermissionComparisonMetadata(ctx context.Context, rows []permissionComparisonRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
 	catalog, err := s.permissions(ctx)
 	if err != nil {
 		return err
 	}
+	decoratePermissionComparisonRows(rows, catalog)
+	return nil
+}
+
+func decoratePermissionComparisonRows(rows []permissionComparisonRow, catalog []domain.Permission) {
+	exact := make(map[string]*domain.Permission, len(rows))
+	for _, row := range rows {
+		exact[row.Code] = nil
+	}
+	var templates []domain.Permission
+	for i := range catalog {
+		node := &catalog[i]
+		if _, requested := exact[node.Code]; requested {
+			exact[node.Code] = node
+		}
+		if strings.ContainsAny(node.Code, "[<") {
+			templates = append(templates, *node)
+		}
+	}
 	for index := range rows {
-		permission := matchPermissionCatalog(rows[index].Code, catalog)
+		permission := exact[rows[index].Code]
+		if permission == nil {
+			permission = matchPermissionTemplate(rows[index].Code, templates)
+		}
 		if permission == nil {
 			rows[index].Translations = domain.LocalizedTexts{}
 			continue
@@ -122,15 +147,9 @@ func (s *Server) attachPermissionComparisonMetadata(ctx context.Context, rows []
 		rows[index].Description = permission.Description
 		rows[index].Translations = permission.Translations
 	}
-	return nil
 }
 
-func matchPermissionCatalog(code string, catalog []domain.Permission) *domain.Permission {
-	for index := range catalog {
-		if catalog[index].Code == code {
-			return &catalog[index]
-		}
-	}
+func matchPermissionTemplate(code string, catalog []domain.Permission) *domain.Permission {
 	actualParts := strings.Split(code, ".")
 	bestIndex := -1
 	bestLiteralCount := -1

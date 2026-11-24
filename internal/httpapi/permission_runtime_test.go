@@ -11,20 +11,27 @@ import (
 	"mcmods-cn-backend/internal/security"
 )
 
-func TestMatchPermissionCatalogUsesVariableTemplate(t *testing.T) {
+func TestPermissionComparisonMetadataResolvesExactAndMostSpecificTemplate(t *testing.T) {
 	catalog := []domain.Permission{
-		{Code: "project.edit.<ProjectID>", Name: "Edit project"},
+		{Code: "project.[action].<object>", Name: "Generic project action"},
+		{Code: "project.edit.<ProjectID>", Name: "Edit project", Description: "Scoped"},
+		{Code: "project.edit.[otherID]", Name: "Equivalent later template"},
+		{Code: "project.edit.known", Name: "Known project"},
 		{Code: "user.file.daily_limit.<num>", Name: "Daily upload limit"},
 	}
-	for code, expected := range map[string]string{
-		"project.edit.112345":       "Edit project",
-		"project.edit.*":            "Edit project",
-		"user.file.daily_limit.150": "Daily upload limit",
-	} {
-		permission := matchPermissionCatalog(code, catalog)
-		if permission == nil || permission.Name != expected {
-			t.Fatalf("matchPermissionCatalog(%q) = %#v, want %q", code, permission, expected)
+	rows := []permissionComparisonRow{
+		{Code: "project.edit.112345"}, {Code: "project.edit.*"}, {Code: "project.edit.known"},
+		{Code: "user.file.daily_limit.150"}, {Code: "project.edit.<ProjectID>"}, {Code: "absent"},
+	}
+	decoratePermissionComparisonRows(rows, catalog)
+	want := []string{"Edit project", "Edit project", "Known project", "Daily upload limit", "Edit project", ""}
+	for i, row := range rows {
+		if row.Name != want[i] {
+			t.Errorf("permission %q name=%q want=%q", row.Code, row.Name, want[i])
 		}
+	}
+	if rows[0].Description != "Scoped" || rows[5].Translations == nil {
+		t.Fatalf("description or empty translation map lost: %+v", rows)
 	}
 }
 
