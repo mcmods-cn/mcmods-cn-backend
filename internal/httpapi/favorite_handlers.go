@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -43,7 +44,8 @@ type favoriteCollectionItem struct {
 type favoriteCollectionItemRow struct {
 	entityType, entityPublicID, primaryName, secondaryName, iconURL, slug string
 	modpackPrimaryName, modpackSecondaryName, modpackIconURL              string
-	modpackSlug, title, publicID, blueprintIconURL                        string
+	modpackSlug, title, publicID                                          string
+	blueprintCoverAt                                                      *time.Time
 }
 
 type favoriteQueryer interface {
@@ -473,21 +475,26 @@ func (s *Server) patchFavoriteMembership(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to reserve favorite quota")
 		return
 	}
+	changed := false
 	for _, collectionID := range request.RemoveCollectionIDs {
-		if _, err = tx.Exec(r.Context(), `delete from favorite_collection_items item using favorite_collections collection
+		tag, err := tx.Exec(r.Context(), `delete from favorite_collection_items item using favorite_collections collection
 			where item.collection_id=collection.id and collection.user_id=$1 and collection.public_id=$2
-			  and item.entity_type=$3 and item.entity_id=$4`, claims.Subject, collectionID, target.Type, target.InternalID); err != nil {
+			  and item.entity_type=$3 and item.entity_id=$4`, claims.Subject, collectionID, target.Type, target.InternalID)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
+		changed = changed || tag.RowsAffected() > 0
 	}
 	for _, collectionID := range request.AddCollectionIDs {
-		if _, err = tx.Exec(r.Context(), `insert into favorite_collection_items(collection_id,entity_type,entity_id)
+		tag, err := tx.Exec(r.Context(), `insert into favorite_collection_items(collection_id,entity_type,entity_id)
 			select id,$3,$4 from favorite_collections where user_id=$1 and public_id=$2
-			on conflict do nothing`, claims.Subject, collectionID, target.Type, target.InternalID); err != nil {
+			on conflict do nothing`, claims.Subject, collectionID, target.Type, target.InternalID)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
+		changed = changed || tag.RowsAffected() > 0
 	}
 	var selected bool
 	if err = tx.QueryRow(r.Context(), `select exists(select 1 from favorite_collection_items item
@@ -497,7 +504,7 @@ func (s *Server) patchFavoriteMembership(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to load favorite membership")
 		return
 	}
-	if err = enqueueRequestActivityTx(r, tx); err != nil {
+	if err = recordFavoriteMembershipActivity(r, tx, changed); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to persist favorite activity")
 		return
 	}
@@ -577,6 +584,7 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read favorites")
 		return
 	}
+	changed := false
 	desired := make(map[string]bool, len(request.CollectionIDs))
 	for _, id := range request.CollectionIDs {
 		desired[id] = true
@@ -593,6 +601,7 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
+		changed = true
 	}
 	for _, id := range request.CollectionIDs {
 		if existing[id] {
@@ -605,8 +614,9 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to save favorites")
 			return
 		}
+		changed = true
 	}
-	if err = enqueueRequestActivityTx(r, tx); err != nil {
+	if err = recordFavoriteMembershipActivity(r, tx, changed); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to persist favorite activity")
 		return
 	}
@@ -615,6 +625,14 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"saved": true, "collectionIds": request.CollectionIDs})
+}
+
+func recordFavoriteMembershipActivity(r *http.Request, tx pgx.Tx, changed bool) error {
+	if !changed {
+		skipRequestActivity(r)
+		return nil
+	}
+	return enqueueRequestActivityTx(r, tx)
 }
 
 // Membership writes are serialized for the user. Apply one collection change
@@ -683,10 +701,10 @@ func (s *Server) writeFavoriteCollectionItems(w http.ResponseWriter, r *http.Req
 	}
 	items := make([]favoriteCollectionItem, 0, len(pageRows))
 	ossCfg := s.ossConfigFromSettings(r.Context())
-	iconURLs := make([]string, 0, len(pageRows)*3)
+	iconURLs := make([]string, 0, len(pageRows)*2)
 	for i := range pageRows {
 		row := &pageRows[i].Item
-		iconURLs = append(iconURLs, row.iconURL, row.blueprintIconURL, row.modpackIconURL)
+		iconURLs = append(iconURLs, row.iconURL, row.modpackIconURL)
 	}
 	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, iconURLs)
 	if err != nil {
@@ -695,7 +713,7 @@ func (s *Server) writeFavoriteCollectionItems(w http.ResponseWriter, r *http.Req
 	}
 	for index := range pageRows {
 		row := &pageRows[index].Item
-		row.iconURL, row.blueprintIconURL, row.modpackIconURL = iconURLs[index*3], iconURLs[index*3+1], iconURLs[index*3+2]
+		row.iconURL, row.modpackIconURL = iconURLs[index*2], iconURLs[index*2+1]
 		metadata := map[string]any{}
 		switch row.entityType {
 		case "mod":
@@ -703,7 +721,11 @@ func (s *Server) writeFavoriteCollectionItems(w http.ResponseWriter, r *http.Req
 		case "modpack":
 			metadata = map[string]any{"primaryName": row.modpackPrimaryName, "secondaryName": row.modpackSecondaryName, "iconUrl": row.modpackIconURL, "slug": row.modpackSlug}
 		case "blueprint":
-			metadata = map[string]any{"title": row.title, "publicId": row.publicID, "iconUrl": row.blueprintIconURL}
+			cover := ""
+			if row.blueprintCoverAt != nil {
+				cover = blueprintCoverPath(row.publicID, *row.blueprintCoverAt)
+			}
+			metadata = map[string]any{"title": row.title, "publicId": row.publicID, "iconUrl": cover}
 		}
 		items = append(items, favoriteCollectionItem{EntityType: row.entityType, EntityPublicID: row.entityPublicID, Metadata: metadata})
 	}

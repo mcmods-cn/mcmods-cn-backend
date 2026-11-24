@@ -265,7 +265,7 @@ func favoriteItemPageSQL(request favoriteItemPageRequest) (string, []any) {
 	query := `select item.id,item.created_at,item.entity_type,route.public_id,
 		coalesce(mods.primary_name,''),coalesce(mods.secondary_name,''),coalesce(mods.icon_url,''),coalesce(mods.slug,''),
 		coalesce(modpack.primary_name,''),coalesce(modpack.secondary_name,''),coalesce(modpack.icon_url,''),coalesce(modpack.slug,''),
-		coalesce(blueprint.title,''),coalesce(blueprint.public_id,''),coalesce(blueprint.cover_object_key,'')
+		coalesce(blueprint.title,''),coalesce(blueprint.public_id,''),case when blueprint.cover_object_key<>'' then blueprint.updated_at end
 		from favorite_collection_items item
 		` + favoriteTargetJoinsSQL + `
 		where item.collection_id=(select collection.id from favorite_collections collection
@@ -306,7 +306,7 @@ func scanFavoriteItemPageRow(scanner favoriteRowScanner) (favoriteItemPageRow, e
 	err := scanner.Scan(&row.ID, &row.CreatedAt, &row.Item.entityType, &row.Item.entityPublicID,
 		&row.Item.primaryName, &row.Item.secondaryName, &row.Item.iconURL, &row.Item.slug,
 		&row.Item.modpackPrimaryName, &row.Item.modpackSecondaryName, &row.Item.modpackIconURL, &row.Item.modpackSlug,
-		&row.Item.title, &row.Item.publicID, &row.Item.blueprintIconURL)
+		&row.Item.title, &row.Item.publicID, &row.Item.blueprintCoverAt)
 	return row, err
 }
 
