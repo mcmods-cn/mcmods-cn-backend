@@ -74,8 +74,10 @@ func TestAntiAbuseQueryPlans(t *testing.T) {
 		from generate_series(1,$1) generated_id`, antiAbusePlanFixtureRows); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = pool.Exec(ctx, `insert into anti_abuse_restrictions(public_id,user_id,actions,mode,source,starts_at,ends_at)
-		select lpad(to_hex(generated_id),9,'0'),1+(generated_id%1000),array['comment.create'],
+	if _, err = pool.Exec(ctx, `insert into anti_abuse_restrictions(public_id,user_id,ip_hash,device_hash,actions,mode,source,starts_at,ends_at)
+		select lpad(to_hex(generated_id),9,'0'),case when generated_id%10<8 then 1+(generated_id%1000) end,
+			case when generated_id%10=8 then 'plan-ip-' || (generated_id%1200) else '' end,
+			case when generated_id%10=9 then 'plan-device-' || (generated_id%1400) else '' end,array['comment.create'],
 			'cooldown','automatic',now()-(generated_id*interval '1 second'),now()+interval '1 day'
 		from generate_series(1,$1) generated_id`, antiAbusePlanFixtureRows); err != nil {
 		t.Fatal(err)
@@ -179,6 +181,27 @@ func TestAntiAbuseQueryPlans(t *testing.T) {
 			t.Logf("%s forced degraded plan correctly rejected: %v; JSON: %s", plan.name, rejection, degraded)
 		}
 	}
+	// The protected write reads all three scopes together. A generic prepared
+	// plan must retain the partial indexes even when signal values are unknown.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `set local plan_cache_mode=force_generic_plan; prepare account_risk_plan(bigint,text,text,text) as `+accountProfileSQL); err != nil {
+		t.Fatal(err)
+	}
+	var profile []byte
+	if err = tx.QueryRow(ctx, `explain (analyze,buffers,format json)
+		execute account_risk_plan(1,'plan-ip-8','plan-device-9','comment.create')`).Scan(&profile); err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []string{"idx_anti_abuse_restrictions_user_active", "idx_anti_abuse_restrictions_ip_active", "idx_anti_abuse_restrictions_device_active"} {
+		if err := validateAntiAbuseMeasuredPlan(profile, "anti_abuse_restrictions", index, 1); err != nil {
+			t.Fatalf("generic account policy plan: %v\n%s", err, profile)
+		}
+	}
+
 }
 
 func explainAntiAbusePlan(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, args ...any) string {

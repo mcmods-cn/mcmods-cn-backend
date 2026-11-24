@@ -40,6 +40,7 @@ func antiAbuseSchemaStatements() []string {
 		)`,
 		`create index idx_anti_abuse_restrictions_user_active on anti_abuse_restrictions(user_id,starts_at desc) where lifted_at is null`,
 		`create index idx_anti_abuse_restrictions_ip_active on anti_abuse_restrictions(ip_hash,starts_at desc) where lifted_at is null and ip_hash<>''`,
+		`create index idx_anti_abuse_restrictions_device_active on anti_abuse_restrictions(device_hash,starts_at desc) where lifted_at is null and device_hash<>''`,
 		`create table anti_abuse_challenges (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
