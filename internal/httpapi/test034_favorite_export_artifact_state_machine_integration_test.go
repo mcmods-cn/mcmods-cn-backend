@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -185,6 +187,11 @@ func TestTEST034FavoriteExportArtifactCommitCompensationAndRecoveryIntegration(t
 	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), `"downloadAvailable":true`) {
 		t.Fatalf("ready detail status=%d body=%s", detail.Code, detail.Body.String())
 	}
+	var artifactDeadline time.Time
+	if err = pool.QueryRow(ctx, `update favorite_modpack_export_tasks set expires_at=now()+interval '90 seconds'
+		where public_id='t034ok001' returning expires_at`).Scan(&artifactDeadline); err != nil {
+		t.Fatal(err)
+	}
 	download := httptest.NewRecorder()
 	downloadRequest := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/modpack-exports/t034ok001/download", nil)
 	downloadRequest.SetPathValue("taskId", "t034ok001")
@@ -192,6 +199,34 @@ func TestTEST034FavoriteExportArtifactCommitCompensationAndRecoveryIntegration(t
 	server.downloadFavoriteModpackExport(download, downloadRequest)
 	if download.Code != http.StatusTemporaryRedirect || !strings.HasPrefix(download.Header().Get("Location"), provider.URL) {
 		t.Fatalf("ready download status=%d location=%q body=%s", download.Code, download.Header().Get("Location"), download.Body.String())
+	}
+	signedURL, err := url.Parse(download.Header().Get("Location"))
+	if err != nil {
+		t.Fatal("invalid signed download redirect")
+	}
+	signedAt, err := time.Parse("20060102T150405Z", signedURL.Query().Get("x-oss-date"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedSeconds, err := strconv.Atoi(signedURL.Query().Get("x-oss-expires"))
+	if err != nil || signedSeconds <= 0 || signedAt.Add(time.Duration(signedSeconds)*time.Second).After(artifactDeadline) {
+		t.Errorf("temporary artifact remaining %s but signed download lasts %ds", time.Until(artifactDeadline), signedSeconds)
+	}
+	if _, err = pool.Exec(ctx, `update oss_files set status='deleted' where id=$1`, readyFileID); err != nil {
+		t.Fatal(err)
+	}
+	missingDetail := httptest.NewRecorder()
+	server.favoriteModpackExportDetail(missingDetail, detailRequest)
+	if missingDetail.Code != http.StatusOK || !strings.Contains(missingDetail.Body.String(), `"downloadAvailable":false`) {
+		t.Errorf("history advertises an inactive artifact: HTTP %d", missingDetail.Code)
+	}
+	missingDownload := httptest.NewRecorder()
+	server.downloadFavoriteModpackExport(missingDownload, downloadRequest)
+	if missingDownload.Code != http.StatusGone {
+		t.Errorf("inactive artifact download status=%d", missingDownload.Code)
+	}
+	if _, err = pool.Exec(ctx, `update oss_files set status='active' where id=$1`, readyFileID); err != nil {
+		t.Fatal(err)
 	}
 	foreignDetail := httptest.NewRecorder()
 	foreignDetailRequest := httptest.NewRequest(http.MethodGet, "/api/v1/users/me/modpack-exports/t034ok001", nil)

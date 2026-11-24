@@ -93,15 +93,17 @@ func (s *Server) favoriteModpackExports(w http.ResponseWriter, r *http.Request) 
 func (s *Server) favoriteModpackExportDetail(w http.ResponseWriter, r *http.Request) {
 	taskID := strings.ToLower(strings.TrimSpace(r.PathValue("taskId")))
 	var task favoriteModpackExportSummary
+	var activeFile bool
 	err := s.db.QueryRow(r.Context(), `select task.public_id,collection_public_id_snapshot,pack_name,pack_version_id,minecraft_version,loader_type,
 		loader_version,allow_compatible_only,report_version,status,collection_item_count,exported_mod_count,auto_dependency_count,skipped_item_count,
-		failed_item_count,final_file_count,result_file_size,result_sha256,error_code,task.created_at,finished_at,expires_at
+		failed_item_count,final_file_count,result_file_size,result_sha256,error_code,task.created_at,finished_at,expires_at,
+		exists(select 1 from oss_files file where file.id=task.result_file_id and file.status='active')
 		from favorite_modpack_export_tasks task
 		where task.public_id=$1 and owner_user_id=$2`, taskID, currentClaims(r).Subject).
 		Scan(&task.ID, &task.CollectionID, &task.PackName, &task.PackVersion, &task.MinecraftVersion, &task.Loader, &task.LoaderVersion,
 			&task.AllowCompatibleOnly, &task.ReportVersion, &task.Status,
 			&task.CollectionItemCount, &task.ExportedModCount, &task.AutoDependencyCount, &task.SkippedItemCount, &task.FailedItemCount,
-			&task.FinalFileCount, &task.FileSize, &task.ResultSHA256, &task.ErrorCode, &task.CreatedAt, &task.FinishedAt, &task.ExpiresAt)
+			&task.FinalFileCount, &task.FileSize, &task.ResultSHA256, &task.ErrorCode, &task.CreatedAt, &task.FinishedAt, &task.ExpiresAt, &activeFile)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "export task not found")
@@ -141,7 +143,7 @@ func (s *Server) favoriteModpackExportDetail(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to load export report")
 		return
 	}
-	downloadAvailable := task.Status == "ready" && task.ExpiresAt != nil && task.ExpiresAt.After(time.Now())
+	downloadAvailable := activeFile && task.Status == "ready" && task.ExpiresAt != nil && task.ExpiresAt.After(time.Now())
 	writeJSON(w, http.StatusOK, map[string]any{"task": task, "items": items, "downloadAvailable": downloadAvailable})
 }
 
@@ -165,7 +167,7 @@ func (s *Server) downloadFavoriteModpackExport(w http.ResponseWriter, r *http.Re
 		return
 	}
 	filename := safeMRPackDownloadName(name, minecraftVersion, loader)
-	s.redirectOSSObjectAccess(w, r, objectKey, ossObjectAccessOptions{Expires: 10 * time.Minute, ContentDisposition: downloadContentDisposition(filename)})
+	s.redirectOSSObjectAccess(w, r, objectKey, ossObjectAccessOptions{Expires: 10 * time.Minute, NotAfter: *expires, ContentDisposition: downloadContentDisposition(filename)})
 }
 
 func safeMRPackDownloadName(name, minecraftVersion, loader string) string {

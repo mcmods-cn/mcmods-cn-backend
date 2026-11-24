@@ -19,6 +19,7 @@ import (
 
 type ossObjectAccessOptions struct {
 	Expires            time.Duration
+	NotAfter           time.Time
 	ContentDisposition string
 }
 
@@ -95,6 +96,9 @@ func (s *Server) resolveOSSObjectAccessWithConfig(
 		Mode:      ossDownloadModePresigned,
 		ExpiresAt: time.Now().Add(expires),
 	}
+	if !options.NotAfter.IsZero() && options.NotAfter.Before(access.ExpiresAt) {
+		access.ExpiresAt = options.NotAfter
+	}
 	client, err := s.ossDownloadClient(ctx, cfg)
 	if err != nil {
 		return ossObjectAccess{}, err
@@ -106,7 +110,7 @@ func (s *Server) resolveOSSObjectAccessWithConfig(
 	if options.ContentDisposition != "" {
 		request.ResponseContentDisposition = aliyunoss.Ptr(options.ContentDisposition)
 	}
-	result, err := client.Presign(ctx, request, aliyunoss.PresignExpires(expires))
+	result, err := client.Presign(ctx, request, aliyunoss.PresignExpiration(access.ExpiresAt))
 	if err != nil {
 		return ossObjectAccess{}, fmt.Errorf("presign OSS object access: %w", err)
 	}
