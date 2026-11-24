@@ -21,6 +21,7 @@ import (
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/diagnostic"
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
 const (
@@ -37,6 +38,7 @@ var blueprintProcessingSlots = semaphore.NewWeighted(maxBlueprintProcessWorkers)
 var (
 	errBlueprintJobLeaseActive = errors.New("blueprint job lease is still active")
 	errBlueprintJobLeaseLost   = errors.New("blueprint job lease was lost")
+	errBlueprintJobWithdrawn   = errors.New("blueprint job is no longer authorized")
 )
 
 type BlueprintWorker struct {
@@ -264,7 +266,8 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 	if err = requireLiveBlueprintJobTx(ctx, tx, job.id, job.runToken, job.attempts, job.blueprintID); err != nil {
 		return false, err
 	}
-	terminal := job.attempts >= job.maxAttempts || errors.Is(cause, errBlueprintEntityDataWouldBeLost)
+	withdrawn := errors.Is(cause, errBlueprintJobWithdrawn)
+	terminal := withdrawn || job.attempts >= job.maxAttempts || errors.Is(cause, errBlueprintEntityDataWouldBeLost)
 	lastError := diagnostic.Text(cause.Error(), 2000)
 	if err = abandonBlueprintJobArtifactsTx(ctx, tx, job.id, job.attempts, "blueprint-job-failed"); err != nil {
 		return false, err
@@ -279,7 +282,7 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 			return false, err
 		}
 	}
-	if terminal {
+	if terminal && !withdrawn {
 		if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": lastError}, job.blueprintID); err != nil {
 			return false, err
 		}
@@ -299,6 +302,55 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 	return terminal, nil
 }
 
+// The accepted job belongs to an account, independently of the lifetime of
+// its originating browser session. Lock the target before resolving that
+// account's current rights; hold both through the associated database write.
+func authorizeBlueprintJobTx(ctx context.Context, tx pgx.Tx, blueprintID, actorID int64, operation string) error {
+	var ownerID int64
+	var status, reviewStatus string
+	err := tx.QueryRow(ctx, `select owner_id,status,review_status from blueprints where id=$1 for no key update`, blueprintID).Scan(&ownerID, &status, &reviewStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errBlueprintJobWithdrawn
+	}
+	if err != nil {
+		return err
+	}
+	public := false
+	switch operation {
+	case "convert":
+		if status != "ready" && status != "partial" {
+			return errBlueprintJobWithdrawn
+		}
+		public = reviewStatus == "approved" || reviewStatus == "not_required"
+	case "normalize":
+		if status != "processing" && status != "queued" && status != "failed" {
+			return errBlueprintJobWithdrawn
+		}
+	default:
+		return errBlueprintJobWithdrawn
+	}
+	var accountStatus string
+	err = tx.QueryRow(ctx, `select status from users where id=$1 for share`, actorID).Scan(&accountStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return errBlueprintJobWithdrawn
+	}
+	if err != nil {
+		return err
+	}
+	if accountStatus != "active" {
+		return errBlueprintJobWithdrawn
+	}
+	resolved, err := resolveUsersRootPermissionsQuery(ctx, tx, []int64{actorID})
+	if err != nil {
+		return err
+	}
+	actor := security.Claims{Subject: actorID, PermissionRules: resolved[actorID].Permissions}
+	if claimsExplicitlyAllow(actor, "account.banned") || (!public && actorID != ownerID && !claimsAllow(actor, "admin.*")) {
+		return errBlueprintJobWithdrawn
+	}
+	return nil
+}
+
 func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int64, attempt int, runToken string, blueprintID, createdBy int64) error {
 	var publicID, objectKey, sourceFormat, title, description, coverKey string
 	var coverFileID int64
@@ -308,6 +360,9 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 	}
 	defer startTx.Rollback(ctx)
 	if err = requireLiveBlueprintJobTx(ctx, startTx, jobID, runToken, attempt, blueprintID); err != nil {
+		return err
+	}
+	if err = authorizeBlueprintJobTx(ctx, startTx, blueprintID, createdBy, "normalize"); err != nil {
 		return err
 	}
 	if err = startTx.QueryRow(ctx, `update blueprints set status='processing',last_error='',updated_at=now()
@@ -382,6 +437,9 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 	}
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, "blueprint:"+publicID); err != nil {
 		return fmt.Errorf("lock blueprint revision: %w", err)
+	}
+	if err = authorizeBlueprintJobTx(ctx, tx, blueprintID, createdBy, "normalize"); err != nil {
+		return err
 	}
 	var existingReviewStatus string
 	var existingPublishedRevisionID *int64
@@ -541,7 +599,13 @@ func replaceBlueprintMaterialsTx(ctx context.Context, tx pgx.Tx, blueprintID int
 
 func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID int64, attempt int, runToken string, blueprintID, createdBy int64, targetFormat string) error {
 	var publicID, title, normalizedKey string
-	if err := worker.db.QueryRow(ctx, `select public_id,title,normalized_object_key from blueprints where id=$1`, blueprintID).Scan(&publicID, &title, &normalizedKey); err != nil {
+	err := pgx.BeginFunc(ctx, worker.db, func(tx pgx.Tx) error {
+		if err := authorizeBlueprintJobTx(ctx, tx, blueprintID, createdBy, "convert"); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `select public_id,title,normalized_object_key from blueprints where id=$1`, blueprintID).Scan(&publicID, &title, &normalizedKey)
+	})
+	if err != nil {
 		return err
 	}
 	if normalizedKey == "" {
@@ -576,6 +640,9 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID int64
 	}
 	defer tx.Rollback(ctx)
 	if err = requireLiveBlueprintJobTx(ctx, tx, jobID, runToken, attempt, blueprintID); err != nil {
+		return err
+	}
+	if err = authorizeBlueprintJobTx(ctx, tx, blueprintID, createdBy, "convert"); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `insert into blueprint_variants(blueprint_id,format,file_id,object_key,original,recommended,status,original_name,content_type,size_bytes,sha256,created_by)

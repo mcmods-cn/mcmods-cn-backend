@@ -471,6 +471,40 @@ func TestTEST036GoldenUploadNormalizeReviewConvertAndDownloadFullHTTPIntegration
 	}
 }
 
+func TestWithdrawnBlueprintConversionStopsBeforeCreatingArtifacts(t *testing.T) {
+	f := newTEST036Fixture(t)
+	var id int64
+	var publicID string
+	err := f.db.QueryRow(f.ctx, `insert into blueprints(owner_id,title,source_format,status,review_status)
+		values($1,'Withdrawn conversion','nbt','ready','approved') returning id,public_id`, f.userIDs[f.editor]).Scan(&id, &publicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := f.require(t, f.otherEditor, http.MethodPost, "/api/v1/blueprints/"+publicID+"/convert", map[string]string{"format": "schem"}, http.StatusAccepted)
+	result := decodeTEST022Data[struct {
+		JobID string `json:"jobId"`
+	}](t, raw)
+	var jobID int64
+	if err = f.db.QueryRow(f.ctx, "select id from blueprint_jobs where public_id=$1", result.JobID).Scan(&jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.db.Exec(f.ctx, "update blueprints set status='deleted' where id=$1", id); err != nil {
+		t.Fatal(err)
+	}
+	if err = f.worker("withdrawn-convert").processJob(f.ctx, jobID); !errors.Is(err, errBlueprintJobWithdrawn) {
+		t.Fatalf("withdrawn conversion: %v", err)
+	}
+	var state string
+	var attempts, artifacts, notifications int
+	err = f.db.QueryRow(f.ctx, `select j.status,j.attempts,
+		(select count(*) from blueprint_job_artifacts where job_id=j.id),
+		(select count(*) from nats_outbox o where o.aggregate_type='blueprint' and o.aggregate_id=$2 and o.event_type like 'blueprint.notification.%')
+		from blueprint_jobs j where j.id=$1`, jobID, publicID).Scan(&state, &attempts, &artifacts, &notifications)
+	if err != nil || state != "failed" || attempts != 1 || artifacts != 0 || notifications != 0 {
+		t.Fatalf("withdrawn job status=%q attempts=%d artifacts=%d notifications=%d error=%v", state, attempts, artifacts, notifications, err)
+	}
+}
+
 func TestBlueprintOwnerCanRetryFailedNormalizationOnceOverHTTP(t *testing.T) {
 	f := newTEST036Fixture(t)
 	var id int64
