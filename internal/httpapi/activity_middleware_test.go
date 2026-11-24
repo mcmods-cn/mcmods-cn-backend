@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"net/http/httptest"
 	"net/http"
 	"testing"
 
@@ -146,5 +148,40 @@ func TestActivityObjectTypeForRevisionEntities(t *testing.T) {
 		if got := activityObjectTypeForEntityType(entityType); got != want {
 			t.Fatalf("activityObjectTypeForEntityType(%q) = %d, want %d", entityType, got, want)
 		}
+	}
+}
+
+func TestRequestActivityTracksMatchedObjectAcrossMiddleware(t *testing.T) {
+	for _, test := range []struct {
+		name, pattern, path, want string
+		internal bool
+	}{
+		{"community post", "GET /api/v1/community/posts/{id}", "/api/v1/community/posts/c00000001", "c00000001", false},
+		{"another post", "GET /api/v1/community/posts/{id}", "/api/v1/community/posts/c00000002", "c00000002", false},
+		{"resource detail", "GET /api/v1/catalog/resources/{publicId}", "/api/v1/catalog/resources/r00000001", "r00000001", false},
+		{"collection view", "GET /api/v1/catalog/resources", "/api/v1/catalog/resources", "", false},
+		{"explicit database identity", "GET /api/v1/community/posts/{id}", "/api/v1/community/posts/c00000001", "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc(test.pattern, func(w http.ResponseWriter, r *http.Request) {
+				markActivityUser(r, 42)
+				if test.internal {
+					annotateActivityID(r, activity.ActionEdit, activity.ObjectComment, "comment", 115, 0)
+				}
+				w.WriteHeader(http.StatusOK)
+			})
+			annotation := &requestActivity{}
+			ctx := context.WithValue(t.Context(), requestActivityContextKey, annotation)
+			outer := httptest.NewRequestWithContext(ctx, http.MethodGet, test.path, nil)
+			response := httptest.NewRecorder()
+			// The anti-abuse middleware can derive a request before ServeMux fills path values.
+			mux.ServeHTTP(response, outer.Clone(ctx))
+			event, valid := requestActivityEvent(outer, annotation)
+			if response.Code != http.StatusOK || !valid || event.ObjectPublicID != test.want ||
+				(test.internal && (event.ObjectEntityType != "comment" || event.ObjectInternalID != 115)) {
+				t.Fatalf("activity for %s = %+v, valid=%t, status=%d; want public ID %q", test.path, event, valid, response.Code, test.want)
+			}
+		})
 	}
 }
