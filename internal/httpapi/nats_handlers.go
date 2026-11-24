@@ -218,12 +218,14 @@ func natsCredentialDestination(raw string) string {
 // when the administrator explicitly replaces or clears a secret.
 func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfigUpdateRequest) (string, error) {
 	raw := strings.TrimSpace(*payload.URL)
-	if raw == queue.RedactURL(current.URL) {
+	unchanged := raw == queue.RedactURL(current.URL)
+	if unchanged {
 		raw = current.URL
 	}
 	// A cluster edit may reorder or remove peers. Restore a masked URL's own
 	// userinfo only for the same retained endpoint, never on an added peer.
 	byEndpoint := make(map[string]*url.Userinfo)
+	ambiguous := make(map[string]bool)
 	for _, old := range strings.Split(current.URL, ",") {
 		old = strings.TrimSpace(old)
 		if !strings.Contains(old, "://") {
@@ -237,7 +239,7 @@ func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfig
 		if previous, exists := byEndpoint[key]; exists && previous.String() != address.User.String() {
 			// The same endpoint appears under different identities. Its original
 			// list can round-trip exactly; an edited list must specify its login.
-			byEndpoint[key] = nil
+			ambiguous[key] = true
 		} else {
 			byEndpoint[key] = address.User
 		}
@@ -253,8 +255,15 @@ func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfig
 		if err != nil || address.Hostname() == "" {
 			return "", errors.New("invalid NATS endpoint")
 		}
-		if address.User == nil {
-			address.User = byEndpoint[natsCredentialDestination(server)]
+		if !unchanged && address.User == nil {
+			key := natsCredentialDestination(server)
+			if ambiguous[key] {
+				if !payload.ClearPassword || !payload.ClearToken {
+					return "", errNATSCredentialDecision
+				}
+			} else {
+				address.User = byEndpoint[key]
+			}
 		}
 		if address.User != nil {
 			username := address.User.Username()
