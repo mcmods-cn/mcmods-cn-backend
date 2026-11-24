@@ -1000,7 +1000,7 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tx, err := s.db.Begin(ctx)
+	tx, err := s.db.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "创建转换任务失败")
 		return
