@@ -179,3 +179,26 @@ func TestBanCreationWaitsForAnOngoingReleaseBeforeLockingAccountsIntegration(t *
 		t.Fatalf("active=%d revoked=%d active bindings=%d: %v", active, revoked, bindings, err)
 	}
 }
+
+func TestBanReasonsAvailableForEachSanctionWorkflowIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "report.review", "report.action.ban")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "ban.create")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "report.review")
+	const path = "/api/v1/admin/ban-reasons?locale=en-US"
+	for label, token := range map[string]string{"report_reviewer": f.reviewer, "direct_moderator": f.editor} {
+		t.Run(label, func(t *testing.T) {
+			dictionary := decodeTEST022Data[struct {
+				Items []struct{ Code, Label string }
+			}](t, f.require(t, token, http.MethodGet, path, nil, http.StatusOK))
+			for _, reason := range dictionary.Items {
+				if reason.Code == "harassment" && reason.Label != "" {
+					return
+				}
+			}
+			t.Fatal("active harassment reason missing from the sanction dictionary")
+		})
+	}
+	f.require(t, f.otherEditor, http.MethodGet, path, nil, http.StatusForbidden)
+	f.require(t, f.reviewer, http.MethodPost, "/api/v1/admin/bans", nil, http.StatusForbidden)
+}
