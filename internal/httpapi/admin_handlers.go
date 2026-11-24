@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"sort"
@@ -180,15 +181,20 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err = validateRoleGraphTx(r.Context(), tx); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRoleMutationError(w, err)
 		return
 	}
-	if err := s.replaceRolePermissions(r.Context(), tx, req.Code, rolePermissionEntries(req.Permissions, req.PermissionEntries)); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := replaceRolePermissionsTx(r.Context(), tx, req.Code, req.PermissionEntries); err != nil {
+		writeRoleMutationError(w, err)
 		return
 	}
 	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "create_role", req); err != nil {
 		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
+	role, err := readRole(r.Context(), tx, req.Code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取权限组失败")
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
@@ -196,11 +202,6 @@ func (s *Server) createRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireSecurityVersionRefresh(w, r, "create_role", 0, s.refreshRBACVersion(r.Context())) {
-		return
-	}
-	role, err := s.roleByCode(r.Context(), req.Code)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取权限组失败")
 		return
 	}
 	writeJSON(w, http.StatusCreated, role)
@@ -261,15 +262,20 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err = validateRoleGraphTx(r.Context(), tx); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeRoleMutationError(w, err)
 		return
 	}
-	if err := s.replaceRolePermissions(r.Context(), tx, req.Code, rolePermissionEntries(req.Permissions, req.PermissionEntries)); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	if err := replaceRolePermissionsTx(r.Context(), tx, req.Code, req.PermissionEntries); err != nil {
+		writeRoleMutationError(w, err)
 		return
 	}
 	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, nil, "update_role", req); err != nil {
 		writeError(w, http.StatusInternalServerError, "记录权限变更审计失败")
+		return
+	}
+	role, err := readRole(r.Context(), tx, req.Code)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取权限组失败")
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {
@@ -277,11 +283,6 @@ func (s *Server) updateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireSecurityVersionRefresh(w, r, "update_role", 0, s.refreshRBACVersion(r.Context())) {
-		return
-	}
-	role, err := s.roleByCode(r.Context(), req.Code)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取权限组失败")
 		return
 	}
 	writeJSON(w, http.StatusOK, role)
@@ -513,16 +514,16 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to persist account governance activity")
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "创建用户失败")
-		return
-	}
-	roleCodes, _, permissionErr := s.resolveUserRootPermissions(r.Context(), user.ID)
+	permissions, permissionErr := resolveUsersRootPermissionsQuery(r.Context(), tx, []int64{user.ID})
 	if permissionErr != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
 		return
 	}
-	user.RoleCodes = roleCodes
+	user.RoleCodes = permissions[user.ID].Roles
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "创建用户失败")
+		return
+	}
 	writeJSON(w, http.StatusCreated, user)
 }
 
@@ -711,7 +712,7 @@ func (s *Server) roles(ctx context.Context) ([]domain.Role, error) {
 	for index := range roles {
 		roleCodes[index] = roles[index].Code
 	}
-	entriesByRole, err := s.rolePermissionEntriesForRoles(ctx, roleCodes)
+	entriesByRole, err := readRolePermissionEntries(ctx, s.db, roleCodes)
 	if err != nil {
 		return nil, err
 	}
@@ -722,10 +723,10 @@ func (s *Server) roles(ctx context.Context) ([]domain.Role, error) {
 	return roles, nil
 }
 
-func (s *Server) roleByCode(ctx context.Context, code string) (domain.Role, error) {
+func readRole(ctx context.Context, db permissionQuery, code string) (domain.Role, error) {
 	var role domain.Role
 	var translations []byte
-	err := s.db.QueryRow(
+	err := db.QueryRow(
 		ctx,
 		`select code, name, description, translations, weight, parents from roles where code = $1`,
 		code,
@@ -734,15 +735,16 @@ func (s *Server) roleByCode(ctx context.Context, code string) (domain.Role, erro
 		return role, err
 	}
 	role.Translations = parseLocalizedTexts(translations)
-	role.PermissionEntries, err = s.rolePermissionEntries(ctx, role.Code)
+	entriesByRole, err := readRolePermissionEntries(ctx, db, []string{role.Code})
 	if err != nil {
 		return role, err
 	}
+	role.PermissionEntries = entriesByRole[role.Code]
 	role.Permissions = rolePermissionCodes(role.PermissionEntries)
 	return role, nil
 }
 
-func (s *Server) replaceRolePermissions(ctx context.Context, tx pgx.Tx, roleCode string, permissionEntries []domain.RolePermissionEntry) error {
+func replaceRolePermissionsTx(ctx context.Context, tx pgx.Tx, roleCode string, permissionEntries []domain.RolePermissionEntry) error {
 	var roleID int64
 	if err := tx.QueryRow(ctx, `select id from roles where code = $1`, roleCode).Scan(&roleID); err != nil {
 		return err
@@ -760,32 +762,8 @@ func (s *Server) replaceRolePermissions(ctx context.Context, tx pgx.Tx, roleCode
 			continue
 		}
 		seen[permissionCode] = struct{}{}
-		if !permissionCodePattern.MatchString(permissionCode) {
-			return &requestError{message: "权限节点格式不正确: " + permissionCode}
-		}
-		expiresAt, err := parseOptionalTime(entry.ExpiresAt)
-		if err != nil {
-			return &requestError{message: "权限节点有效期格式不正确: " + permissionCode}
-		}
-		if err := ensurePermissionNode(ctx, tx, permissionCode); err != nil {
+		if err := addRolePermissionTx(ctx, tx, roleID, entry); err != nil {
 			return err
-		}
-		tag, err := tx.Exec(
-			ctx,
-			`insert into role_permissions (role_id, permission_id, allow, expires_at, updated_at)
-			 select $1, id, $3, $4, now() from permissions where code = $2
-			 on conflict (role_id, permission_id) do update
-			 set allow = excluded.allow, expires_at = excluded.expires_at, updated_at = now()`,
-			roleID,
-			permissionCode,
-			entry.Allow,
-			expiresAt,
-		)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return &requestError{message: "权限节点不存在: " + permissionCode}
 		}
 	}
 	return nil
@@ -811,15 +789,7 @@ func (s *Server) permissions(ctx context.Context) ([]domain.Permission, error) {
 	return permissions, rows.Err()
 }
 
-func (s *Server) rolePermissionEntries(ctx context.Context, roleCode string) ([]domain.RolePermissionEntry, error) {
-	entriesByRole, err := s.rolePermissionEntriesForRoles(ctx, []string{roleCode})
-	if err != nil {
-		return nil, err
-	}
-	return entriesByRole[roleCode], nil
-}
-
-func (s *Server) rolePermissionEntriesForRoles(ctx context.Context, roleCodes []string) (map[string][]domain.RolePermissionEntry, error) {
+func readRolePermissionEntries(ctx context.Context, db rowsQuery, roleCodes []string) (map[string][]domain.RolePermissionEntry, error) {
 	entriesByRole := make(map[string][]domain.RolePermissionEntry, len(roleCodes))
 	for _, roleCode := range roleCodes {
 		entriesByRole[roleCode] = []domain.RolePermissionEntry{}
@@ -827,7 +797,7 @@ func (s *Server) rolePermissionEntriesForRoles(ctx context.Context, roleCodes []
 	if len(roleCodes) == 0 {
 		return entriesByRole, nil
 	}
-	rows, err := s.db.Query(
+	rows, err := db.Query(
 		ctx,
 		`select r.code,p.code,rp.allow,rp.expires_at
 		 from permissions p
@@ -853,7 +823,10 @@ func (s *Server) rolePermissionEntriesForRoles(ctx context.Context, roleCodes []
 		}
 		entriesByRole[roleCode] = append(entriesByRole[roleCode], entry)
 	}
-	return entriesByRole, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return entriesByRole, nil
 }
 
 func rolePermissionCodes(entries []domain.RolePermissionEntry) []string {
@@ -884,27 +857,33 @@ func (s *Server) ensureRoleForBinding(ctx context.Context, tx pgx.Tx, roleCode s
 	if len(parents) == 0 {
 		parents = []string{template.Code}
 	}
-	if _, err := tx.Exec(
+	var roleID int64
+	err = tx.QueryRow(
 		ctx,
 		`insert into roles (code, name, description, weight, parents, status, updated_at)
 		 values ($1, $2, $3, $4, $5, 'active', now())
-		 on conflict (code) do nothing`,
+		 on conflict (code) do nothing returning id`,
 		roleCode,
 		template.Name+" "+roleTemplateSuffix(variables),
 		template.Description,
 		template.Weight,
 		parents,
-	); err != nil {
-		return err
+	).Scan(&roleID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// A concurrent creator owns the permission copy for its new role.
+		return nil
 	}
-
-	entries, err := rolePermissionEntriesTx(ctx, tx, template.Code)
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
+
+	entries, err := readRolePermissionEntries(ctx, tx, []string{template.Code})
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries[template.Code] {
 		entry.Code = applyRoleVariables(entry.Code, variables)
-		if err := addRolePermissionTx(ctx, tx, roleCode, entry); err != nil {
+		if err := addRolePermissionTx(ctx, tx, roleID, entry); err != nil {
 			return err
 		}
 	}
@@ -1029,37 +1008,7 @@ func roleTemplateSuffix(variables map[string]string) string {
 	return strings.Join(values, ".")
 }
 
-func rolePermissionEntriesTx(ctx context.Context, tx pgx.Tx, roleCode string) ([]domain.RolePermissionEntry, error) {
-	rows, err := tx.Query(
-		ctx,
-		`select p.code, rp.allow, rp.expires_at
-		 from permissions p
-		 join role_permissions rp on rp.permission_id = p.id
-		 join roles r on r.id = rp.role_id
-		 where r.code = $1
-		 order by p.code`,
-		roleCode,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	entries := make([]domain.RolePermissionEntry, 0)
-	for rows.Next() {
-		var entry domain.RolePermissionEntry
-		var expiresAt *time.Time
-		if err := rows.Scan(&entry.Code, &entry.Allow, &expiresAt); err != nil {
-			return nil, err
-		}
-		if expiresAt != nil {
-			entry.ExpiresAt = expiresAt.Format(time.RFC3339)
-		}
-		entries = append(entries, entry)
-	}
-	return entries, rows.Err()
-}
-
-func addRolePermissionTx(ctx context.Context, tx pgx.Tx, roleCode string, entry domain.RolePermissionEntry) error {
+func addRolePermissionTx(ctx context.Context, tx pgx.Tx, roleID int64, entry domain.RolePermissionEntry) error {
 	permissionCode := normalizeCode(entry.Code)
 	if permissionCode == "" {
 		return nil
@@ -1077,12 +1026,10 @@ func addRolePermissionTx(ctx context.Context, tx pgx.Tx, roleCode string, entry 
 	tag, err := tx.Exec(
 		ctx,
 		`insert into role_permissions (role_id, permission_id, allow, expires_at, updated_at)
-		 select r.id, p.id, $3, $4, now()
-		 from roles r, permissions p
-		 where r.code = $1 and p.code = $2
+		 select $1, p.id, $3, $4, now() from permissions p where p.code = $2
 		 on conflict (role_id, permission_id) do update
 		 set allow = excluded.allow, expires_at = excluded.expires_at, updated_at = now()`,
-		roleCode,
+		roleID,
 		permissionCode,
 		entry.Allow,
 		expiresAt,
@@ -1091,9 +1038,18 @@ func addRolePermissionTx(ctx context.Context, tx pgx.Tx, roleCode string, entry 
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return &requestError{message: "权限组或权限节点不存在: " + roleCode + " / " + permissionCode}
+		return &requestError{message: "权限节点不存在: " + permissionCode}
 	}
 	return nil
+}
+
+func writeRoleMutationError(w http.ResponseWriter, err error) {
+	var invalid *requestError
+	if errors.As(err, &invalid) {
+		writeError(w, http.StatusBadRequest, invalid.Error())
+		return
+	}
+	writeError(w, http.StatusServiceUnavailable, "暂时无法保存权限组")
 }
 
 type requestError struct {

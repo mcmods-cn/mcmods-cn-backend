@@ -435,21 +435,17 @@ func (s *Server) presignProjectEditorApplicationAttachment(w http.ResponseWriter
 	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: file.ObjectKey})
 }
 
-type projectEditorApplicationRows interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}
-
-func queryProjectEditorApplications(ctx context.Context, db projectEditorApplicationRows, applicationID, targetRouteID, userID int64, status string) ([]projectEditorApplicationResponse, error) {
+func queryProjectEditorApplications(ctx context.Context, db rowsQuery, applicationID, targetRouteID, userID int64, status string) ([]projectEditorApplicationResponse, error) {
 	items, _, err := queryProjectEditorApplicationsBounded(ctx, db, applicationID, targetRouteID, userID, status, nil, 0, 0)
 	return items, err
 }
 
-func queryProjectEditorApplicationPage(ctx context.Context, db projectEditorApplicationRows, request projectEditorApplicationPageRequest) ([]projectEditorApplicationResponse, bool, error) {
+func queryProjectEditorApplicationPage(ctx context.Context, db rowsQuery, request projectEditorApplicationPageRequest) ([]projectEditorApplicationResponse, bool, error) {
 	return queryProjectEditorApplicationsBounded(ctx, db, 0, 0, 0, request.Status, request.Cursor, request.Limit+1, request.Limit)
 }
 
 func queryProjectEditorApplicationsBounded(
-	ctx context.Context, db projectEditorApplicationRows,
+	ctx context.Context, db rowsQuery,
 	applicationID, targetRouteID, userID int64,
 	status string,
 	cursor *projectEditorApplicationPageCursor,
@@ -523,7 +519,7 @@ func queryProjectEditorApplicationsBounded(
 	return items, hasMore, nil
 }
 
-func projectEditorApplicationAttachments(ctx context.Context, db projectEditorApplicationRows, applicationIDs []int64) (map[int64][]projectEditorApplicationAttachment, error) {
+func projectEditorApplicationAttachments(ctx context.Context, db rowsQuery, applicationIDs []int64) (map[int64][]projectEditorApplicationAttachment, error) {
 	result := make(map[int64][]projectEditorApplicationAttachment, len(applicationIDs))
 	if len(applicationIDs) == 0 {
 		return result, nil

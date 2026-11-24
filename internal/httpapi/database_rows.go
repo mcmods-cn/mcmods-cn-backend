@@ -1,5 +1,15 @@
 package httpapi
 
+import (
+	"context"
+
+	"github.com/jackc/pgx/v5"
+)
+
+type rowsQuery interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
 type checkedRows interface {
 	Next() bool
 	Scan(...any) error

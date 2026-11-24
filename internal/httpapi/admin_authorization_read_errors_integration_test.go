@@ -94,10 +94,30 @@ func TestAdminAuthorizationDatabaseFailuresAreNotEditableEmptyDataIntegration(t 
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("permission catalog status=%d body=%s", response.Code, response.Body.String())
 	}
-	if _, err = server.roleByCode(ctx, "broken_read"); err == nil {
+	if _, err = readRole(ctx, pool, "broken_read"); err == nil {
 		t.Fatal("role detail converted a nested permission scan error into an empty permission list")
 	}
 
+	// A broken permission writer must not turn database detail into a caller
+	// error, or commit an apparently successful role without its grant.
+	if _, err = pool.Exec(ctx, `create function pg_temp.reject_permission_write() returns trigger as $$
+		begin raise exception 'synthetic private role database detail'; end
+		$$ language plpgsql;
+		create trigger trg_reject_permission_write before insert on role_permissions
+		for each row execute function pg_temp.reject_permission_write()`); err != nil {
+		t.Fatal(err)
+	}
+	write := httptest.NewRecorder()
+	server.createRole(write, httptest.NewRequest(http.MethodPost, "/api/v1/admin/roles", strings.NewReader(
+		`{"code":"unavailable_grant","name":"Test role","permissions":["test.write"]}`,
+	)).WithContext(ctx))
+	if write.Code != http.StatusServiceUnavailable || strings.Contains(write.Body.String(), "private role database detail") {
+		t.Fatalf("role write failure returned HTTP %d: %s", write.Code, write.Body)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `select count(*) from roles where code='unavailable_grant'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed role write left %d role(s): %v", count, err)
+	}
 	if _, err = pool.Exec(ctx, `create function pg_temp.reject_role_insert() returns trigger as $$
 		begin raise exception 'injected role insert failure'; end
 		$$ language plpgsql;

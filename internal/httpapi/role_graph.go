@@ -38,7 +38,7 @@ func validateRoleGraph(graph map[string][]string) error {
 	for code, parents := range graph {
 		for _, parent := range parents {
 			if _, exists := graph[parent]; !exists {
-				return fmt.Errorf("role %s references missing parent %s", code, parent)
+				return &requestError{message: fmt.Sprintf("role %s references missing parent %s", code, parent)}
 			}
 		}
 	}
@@ -52,7 +52,7 @@ func validateRoleGraph(graph map[string][]string) error {
 	visit = func(code string) error {
 		switch states[code] {
 		case visiting:
-			return fmt.Errorf("role inheritance cycle includes %s", code)
+			return &requestError{message: fmt.Sprintf("role inheritance cycle includes %s", code)}
 		case visited:
 			return nil
 		}
