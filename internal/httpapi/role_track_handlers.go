@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -116,7 +115,11 @@ func (s *Server) saveRoleTrack(w http.ResponseWriter, r *http.Request, currentCo
 			role,
 			position,
 		)
-		if err != nil || tag.RowsAffected() == 0 {
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "保存线路权限组失败")
+			return
+		}
+		if tag.RowsAffected() == 0 {
 			writeError(w, http.StatusBadRequest, "权限组不存在: "+role)
 			return
 		}
@@ -232,7 +235,8 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 		return
 	}
 	rows.Close()
-	if len(current) == 0 {
+	targets, targetExpiries, changed := shiftRoleTrackRoles(roles, currentExpiries, direction)
+	if !changed {
 		if err = enqueueRequestActivityTx(r, tx); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to persist role track activity")
 			return
@@ -241,22 +245,8 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 			writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"changed": false, "roles": []string{}})
+		writeJSON(w, http.StatusOK, map[string]any{"changed": false, "roles": targets})
 		return
-	}
-	targets := shiftRoleTrackRoles(roles, current, direction)
-	targetExpiries := make(map[string]*time.Time, len(targets))
-	for _, role := range current {
-		shifted := shiftRoleTrackRoles(roles, []string{role}, direction)
-		if len(shifted) == 0 {
-			continue
-		}
-		target := shifted[0]
-		expiresAt := currentExpiries[role]
-		currentExpiry, exists := targetExpiries[target]
-		if !exists || currentExpiry != nil && (expiresAt == nil || expiresAt.After(*currentExpiry)) {
-			targetExpiries[target] = expiresAt
-		}
 	}
 	if _, err := tx.Exec(
 		r.Context(),
@@ -306,32 +296,28 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	writeJSON(w, http.StatusOK, map[string]any{"changed": true, "roles": targets})
 }
 
-func shiftRoleTrackRoles(track []string, current []string, direction int) []string {
-	positions := make(map[string]int, len(track))
+func shiftRoleTrackRoles(track []string, current map[string]*time.Time, direction int) (targets []string, expiries map[string]*time.Time, changed bool) {
+	targets = make([]string, 0, len(current))
+	expiries = make(map[string]*time.Time, len(current))
 	for index, role := range track {
-		positions[role] = index
-	}
-	targetSet := map[string]struct{}{}
-	for _, role := range current {
-		index, exists := positions[role]
-		if !exists {
+		expiresAt, enrolled := current[role]
+		if !enrolled {
 			continue
 		}
-		position := index + direction
-		if position < 0 {
-			position = 0
+		target := track[max(0, min(index+direction, len(track)-1))]
+		if target != role {
+			changed = true
 		}
-		if position >= len(track) {
-			position = len(track) - 1
+		previous, exists := expiries[target]
+		if !exists {
+			targets = append(targets, target)
 		}
-		targetSet[track[position]] = struct{}{}
+		// A merge keeps permanent membership or the longest remaining grant.
+		if !exists || previous != nil && (expiresAt == nil || expiresAt.After(*previous)) {
+			expiries[target] = expiresAt
+		}
 	}
-	targets := make([]string, 0, len(targetSet))
-	for role := range targetSet {
-		targets = append(targets, role)
-	}
-	sort.Slice(targets, func(i, j int) bool { return positions[targets[i]] < positions[targets[j]] })
-	return targets
+	return targets, expiries, changed
 }
 
 func (s *Server) loadRoleTracks(ctx context.Context) ([]roleTrackPayload, error) {

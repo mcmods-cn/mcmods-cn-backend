@@ -184,6 +184,34 @@ func TestOCT03CBUG004ConcurrentRoleTrackReadsCommittedManualBindingIntegration(t
 	if systemBindings != 2 || audits != 2 {
 		t.Fatalf("system bindings=%d audits=%d want=2/2", systemBindings, audits)
 	}
+
+	t.Run("retry at the upper boundary retains the original grant", func(t *testing.T) {
+		readGrant := func() (version int64, created time.Time, changes int) {
+			t.Helper()
+			err := f.db.QueryRow(f.ctx, `select u.permission_version,b.created_at,
+				(select count(*) from permission_audit_logs where target_user_id=u.id and action='upgrade_role_track')
+				from users u join user_role_bindings b on b.user_id=u.id
+				join roles r on r.id=b.role_id where u.id=$1 and b.source='manual' and r.code='oct03_high'`,
+				target).Scan(&version, &created, &changes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		beforeVersion, beforeCreated, beforeChanges := readGrant()
+		path := "/api/v1/admin/users/" + targetPublicID + "/role-tracks/oct03_track/upgrade"
+		body := f.require(t, f.reviewer, http.MethodPost, path, nil, http.StatusOK)
+		result := decodeTEST022Data[struct {
+			Changed bool
+			Roles   []string
+		}](t, body)
+		afterVersion, afterCreated, afterChanges := readGrant()
+		if result.Changed || !reflect.DeepEqual(result.Roles, []string{"oct03_high"}) ||
+			afterVersion != beforeVersion || !afterCreated.Equal(beforeCreated) || afterChanges != beforeChanges {
+			t.Fatalf("boundary upgrade changed=%t roles=%v, permission versions=%d/%d, same grant=%t, adjustment audits=%d/%d",
+				result.Changed, result.Roles, beforeVersion, afterVersion, afterCreated.Equal(beforeCreated), beforeChanges, afterChanges)
+		}
+	})
 }
 
 func TestOCT03CBUG122ConcurrentRoleParentsCannotCommitCycleIntegration(t *testing.T) {

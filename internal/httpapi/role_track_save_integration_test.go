@@ -47,6 +47,27 @@ func TestRoleTrackUpdateRejectsAnEditForTheOldCodeIntegration(t *testing.T) {
 		t.Errorf("renamed track changed after stale edit: got %#v, want %#v", got, renamed)
 	}
 
+	t.Run("unknown role and unavailable storage roll back the whole edit", func(t *testing.T) {
+		edit := other
+		edit.Roles = []string{"track_edit_high", "unknown_track_role"}
+		f.require(t, f.reviewer, http.MethodPut, basePath+"/"+other.Code, edit, http.StatusBadRequest)
+		if _, err := f.db.Exec(f.ctx, `create function refuse_test_track_insert() returns trigger language plpgsql as $$
+			begin raise exception 'simulated storage error'; end $$;
+			create trigger refuse_test_track_insert before insert on permission_role_track_roles
+			for each row execute function refuse_test_track_insert()`); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := f.db.Exec(f.ctx, `drop trigger refuse_test_track_insert on permission_role_track_roles`); err != nil {
+				t.Fatal(err)
+			}
+		}()
+		f.require(t, f.reviewer, http.MethodPut, basePath+"/"+other.Code, other, http.StatusInternalServerError)
+		if got := readTrack(other.Code); !reflect.DeepEqual(got, other) {
+			t.Fatalf("failed edit changed persisted membership: got %v want %v", got.Roles, other.Roles)
+		}
+	})
+
 	other.Roles = []string{"track_edit_high", "track_edit_low"}
 	f.require(t, f.reviewer, http.MethodPut, basePath+"/"+other.Code, other, http.StatusOK)
 	if got := readTrack(other.Code); !reflect.DeepEqual(got, other) {
