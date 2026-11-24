@@ -49,3 +49,44 @@ func TestFinalizeBlueprintDropsAir(t *testing.T) {
 		t.Fatalf("unexpected blocks: %#v", document.Blocks)
 	}
 }
+
+// Sponge stores one palette reference per position, including air.
+func TestSpongeBlockDataMatchesDeclaredDimensions(t *testing.T) {
+	root := map[string]any{
+		"Width": int16(1), "Height": int16(1), "Length": int16(1),
+		"Blocks": map[string]any{
+			"Palette": map[string]any{"minecraft:stone": int32(0), "minecraft:dirt": int32(1)},
+			"Data":    []byte{0, 1},
+		},
+	}
+	raw, _, err := encodeGzipNBT(root, "Schematic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = decodeBlueprint(raw, "schem", "Two blocks"); err == nil {
+		t.Fatal("two palette entries must not be silently shortened to one block")
+	}
+	root["Width"] = int16(2)
+	raw, _, err = encodeGzipNBT(root, "Schematic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := decodeBlueprint(raw, "schem", "Two blocks")
+	if err != nil || len(document.Blocks) != 2 || document.Blocks[1].State.ID != "minecraft:dirt" {
+		t.Fatalf("valid two-block schematic: %+v, %v", document.Blocks, err)
+	}
+}
+
+func BenchmarkFinalizeBlueprintDense(b *testing.B) {
+	blocks := make([]blueprintBlock, 100_000)
+	for i := range blocks {
+		blocks[i] = blueprintBlock{Position: [3]int{i % 100, i / 100 % 100, i / 10000}, State: blueprintBlockState{ID: "minecraft:stone"}}
+	}
+	document := blueprintDocument{Size: [3]int{100, 100, 10}, Blocks: blocks}
+	b.ReportAllocs()
+	for b.Loop() {
+		if len(finalizeBlueprint(document, "Dense", "nbt").Blocks) != len(blocks) {
+			b.Fatal("lost a non-air block")
+		}
+	}
+}
