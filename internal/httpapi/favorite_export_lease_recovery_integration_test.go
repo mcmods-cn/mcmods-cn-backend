@@ -99,3 +99,80 @@ func TestFavoriteExportExhaustedLeaseRecoveryIntegration(t *testing.T) {
 	}
 
 }
+
+func TestFavoriteExportLeaseDuringNotificationIntegration(t *testing.T) {
+	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
+		t.Skip("requires an isolated PostgreSQL database")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	pool, userID := newPostgresUserFixture(t, ctx, "favorite-notification-lease")
+	cfg := config.Load()
+	worker := NewFavoriteModpackExportWorker(cfg, pool, nil)
+	for _, terminal := range []string{"ready", "failed"} {
+		t.Run(terminal, func(t *testing.T) {
+			var taskID string
+			var fileID int64
+			if err := pool.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,source,status,scan_status)
+				values('fixture','oss.example','region',$1,'favorite_modpack_export','active','trusted_generated') returning id`, terminal+".mrpack").Scan(&fileID); err != nil {
+				t.Fatal(err)
+			}
+			blocker, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer blocker.Rollback(ctx)
+			if _, err = blocker.Exec(ctx, "lock table nats_outbox in share mode"); err != nil {
+				t.Fatal(err)
+			}
+			if err = pool.QueryRow(ctx, `insert into favorite_modpack_export_tasks(owner_user_id,collection_public_id_snapshot,pack_name,pack_version_id,
+				minecraft_version,loader_type,loader_version,status,attempt_count,lease_token,lease_expires_at)
+				values($1,'snapshot','pack','1','1.20.1','fabric','0.16','processing',$2,'holder',clock_timestamp()+interval '3 seconds') returning public_id`,
+				userID, favoriteExportMaxAttempts(cfg.FavoriteExport.MaxBuildAttempts)).Scan(&taskID); err != nil {
+				t.Fatal(err)
+			}
+			result := make(chan error, 1)
+			go func() {
+				if terminal == "ready" {
+					_, err := worker.finalizeFavoriteExportArtifact(ctx, taskID, "holder", fileID, 10, "fixture", time.Now().Add(time.Hour))
+					result <- err
+				} else {
+					result <- worker.fail(ctx, taskID, "holder", "BUILD_FAILED", errors.New("fixture build failure"))
+				}
+			}()
+			var waitedWhileLive bool
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				var waiting, expired bool
+				if err := pool.QueryRow(ctx, `select exists(select 1 from pg_stat_activity where datname=current_database() and $1=any(pg_blocking_pids(pid))),
+					lease_expires_at<=clock_timestamp() from favorite_modpack_export_tasks where public_id=$2`, int64(blocker.Conn().PgConn().PID()), taskID).Scan(&waiting, &expired); err != nil {
+					t.Fatal(err)
+				}
+				waitedWhileLive = waitedWhileLive || waiting && !expired
+				if expired {
+					break
+				}
+				select {
+				case <-ticker.C:
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				}
+			}
+			if err := blocker.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if !waitedWhileLive {
+				t.Fatal("worker never reached the notification lock during its lease")
+			}
+			if err := <-result; !errors.Is(err, errFavoriteExportLeaseLost) {
+				t.Fatalf("terminal write after notification lock = %v", err)
+			}
+			var unchanged bool
+			if err := pool.QueryRow(ctx, `select status='processing' and result_file_id is null and not exists(
+				select 1 from nats_outbox where payload#>>'{data,taskId}'=$1) from favorite_modpack_export_tasks where public_id=$1`, taskID).Scan(&unchanged); err != nil || !unchanged {
+				t.Fatalf("expired worker changed task, artifact or notification: unchanged=%t error=%v", unchanged, err)
+			}
+		})
+	}
+}
