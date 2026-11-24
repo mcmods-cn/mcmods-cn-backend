@@ -34,6 +34,7 @@ type catalogPresentationBatchItem struct {
 	PublicID       string                    `json:"publicId"`
 	ID             string                    `json:"id"`
 	Registry       string                    `json:"registry"`
+	Namespace      string                    `json:"namespace,omitempty"`
 	Kind           string                    `json:"kind"`
 	Names          map[string]string         `json:"names"`
 	ResolvedName   string                    `json:"resolvedName,omitempty"`
@@ -166,7 +167,7 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 			order by case when entity.public_id=input.public_id then 0 else 1 end limit 1
 		) match on true
 	), `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
-	select selected.input_index,entity.public_id,resource.canonical_id,resource.namespace,resource.kind_code,entity.default_locale,
+	select selected.input_index,entity.public_id,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),resource.kind_code,entity.default_locale,
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		coalesce(imported.names,'{}'::jsonb) || coalesce((select jsonb_object_agg(candidate.locale,candidate.name)
 			from content_localizations candidate where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb),
@@ -191,10 +192,11 @@ func (s *Server) loadCatalogResourcePresentations(ctx context.Context, items []c
 		var inputIndex int
 		var defaultLocale, locale, name, iconFileID, importedIconPath string
 		var names []byte
-		if err = rows.Scan(&inputIndex, &item.PublicID, &item.ID, &item.Registry, &item.Kind, &defaultLocale, &locale, &name, &names,
+		if err = rows.Scan(&inputIndex, &item.PublicID, &item.ID, &item.Namespace, &item.Registry, &item.Kind, &defaultLocale, &locale, &name, &names,
 			&iconFileID, &importedIconPath, &item.Source.PublicID, &item.Source.SiteID, &item.Source.Name); err != nil {
 			return nil, err
 		}
+		item.Registry = catalogResourceRegistry(item.Kind, item.Registry)
 		if resolvedLocale, resolvedName := catalogResolvedName(names, primary, secondary, defaultLocale); resolvedName != "" {
 			locale, name = resolvedLocale, resolvedName
 		}

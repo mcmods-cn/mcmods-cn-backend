@@ -164,7 +164,8 @@ func (s *Server) hydrateAuthoritativeRecipeRenderLayouts(ctx context.Context, re
 		candidate["publicId"] = resourcePublicID.String
 		candidate["id"] = canonicalID.String
 		candidate["kind"] = kindCode.String
-		candidate["registry"] = namespace.String
+		candidate["namespace"] = namespace.String
+		candidate["registry"] = catalogResourceRegistry(kindCode.String, "")
 		candidate["amount"] = nullableSQLFloat(amount)
 		candidate["probability"] = nullableSQLFloat(probability)
 		candidate["chance_available"] = probability.Valid

@@ -69,7 +69,7 @@ func TestCatalogResourcePresentationBatchHasConstantQueryBudgetIntegration(t *te
 	resourceReferences := make([]catalogPresentationBatchReference, 0, maxCatalogPresentationBatchItems)
 	for value := 1; value <= maxCatalogPresentationBatchItems; value++ {
 		resourceReferences = append(resourceReferences, catalogPresentationBatchReference{
-			ID: fmt.Sprintf("perf068:item_%04d", value), Kind: "minecraft.item", Registry: "perf068",
+			ID: fmt.Sprintf("perf068:item_%04d", value), Kind: "minecraft.item", Registry: "items",
 		})
 	}
 	started := time.Now()
@@ -80,13 +80,16 @@ func TestCatalogResourcePresentationBatchHasConstantQueryBudgetIntegration(t *te
 	if resourceBytes > maxCatalogResponseBytes {
 		t.Fatalf("resource presentation response=%d bytes budget=%d", resourceBytes, maxCatalogResponseBytes)
 	}
+	if resourceItems[0].Registry != "items" || resourceItems[0].Namespace != "perf068" {
+		t.Fatalf("resource family/namespace = %s/%s", resourceItems[0].Registry, resourceItems[0].Namespace)
+	}
 	if resourceItems[0].ResolvedName == "" || resourceItems[0].Names["zh-CN"] == "" {
 		t.Fatalf("resource presentation omitted localized display fields: %+v", resourceItems[0])
 	}
 	t.Logf("1000 resource presentations: queries=1 bytes=%d wall=%s", resourceBytes, time.Since(started))
 
 	mixedReferences := []catalogPresentationBatchReference{
-		{ID: "perf068:item_0001", Kind: "minecraft.item", Registry: "perf068"},
+		{ID: "perf068:item_0001", Kind: "minecraft.item", Registry: "items"},
 		{ID: "#perf068:all", Kind: "tag", Registry: "minecraft:item"},
 		{PublicID: "p68mod001", Kind: "mod"},
 	}

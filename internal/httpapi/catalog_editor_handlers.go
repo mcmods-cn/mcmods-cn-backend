@@ -28,7 +28,11 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 	if kindCode == "" {
 		kindCode = strings.TrimSpace(r.URL.Query().Get("kind"))
 	}
-	registry := strings.TrimSpace(r.URL.Query().Get("registry"))
+	if r.URL.Query().Has("registry") {
+		writeError(w, http.StatusBadRequest, "filter catalog resources by namespace or kindCode")
+		return
+	}
+	namespaceFilter := strings.TrimSpace(r.URL.Query().Get("namespace"))
 	status := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("status")))
 	if status == "" {
 		status = "active"
@@ -63,7 +67,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 	offset := boundedOffset(r.URL.Query().Get("offset"))
 	indexed := indexedSearchPage{}
 	if status == "active" && hasBindings == "" {
-		indexed = s.searchResourcePage(r.Context(), query, kindCode, registry, limit, offset)
+		indexed = s.searchResourcePage(r.Context(), query, kindCode, namespaceFilter, limit, offset)
 	}
 	databaseOffset := offset
 	if indexed.Used {
@@ -81,12 +85,12 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		 or ($5='false' and not exists(select 1 from mod_resource_version_details detail where detail.resource_id=resource.entity_id))) and
 		($2='' or entity.public_id=$2 or resource.canonical_id ilike '%'||$2||'%' or exists(select 1 from content_localizations localization
 		 where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name ilike '%'||$2||'%')
-		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')`, kindCode, query, registry, status, hasBindings).Scan(&total); err != nil {
+		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')`, kindCode, query, namespaceFilter, status, hasBindings).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count resources")
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
-		select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,entity.default_locale,
+		select entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),entity.default_locale,
 		(select revision.public_id from content_revisions revision where revision.id=entity.published_revision_id),
 		coalesce(localization.locale,''),coalesce(localization.name,''),
 		(select public_id from oss_files where id=definition.icon_file_id),
@@ -110,7 +114,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name ilike '%'||$2||'%')
 		 or coalesce(imported.names,'{}'::jsonb)::text ilike '%'||$2||'%')))
 		order by case when $6 then array_position($7::bigint[],entity.id) end,resource.kind_code,resource.canonical_id
-		limit $8 offset $9`, kindCode, query, registry, primary, secondary, indexed.Used, indexed.IDs, limit, databaseOffset, status, hasBindings)
+		limit $8 offset $9`, kindCode, query, namespaceFilter, primary, secondary, indexed.Used, indexed.IDs, limit, databaseOffset, status, hasBindings)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read resources")
 		return
@@ -119,13 +123,13 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0, limit)
 	for rows.Next() {
 		var entityID int64
-		var publicID, kind, canonicalID, namespace, defaultLocale, contentLocale, name string
+		var publicID, kind, canonicalID, namespace, registry, defaultLocale, contentLocale, name string
 		var ownerPublicID, ownerSiteID, ownerName, importedIconPath string
 		var names, provenances []byte
 		var revisionID sql.NullString
 		var iconID, renderID sql.NullString
 		var bindingCount int
-		if err = rows.Scan(&entityID, &publicID, &kind, &canonicalID, &namespace, &defaultLocale, &revisionID, &contentLocale, &name,
+		if err = rows.Scan(&entityID, &publicID, &kind, &canonicalID, &namespace, &registry, &defaultLocale, &revisionID, &contentLocale, &name,
 			&iconID, &renderID, &names, &provenances, &ownerPublicID, &ownerSiteID, &ownerName, &importedIconPath, &bindingCount); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to decode resource")
 			return
@@ -140,7 +144,7 @@ func (s *Server) catalogResources(w http.ResponseWriter, r *http.Request) {
 		}
 		provenance := catalogLocalizationProvenance(provenances, contentLocale, name)
 		items = append(items, map[string]any{"publicId": publicID, "id": canonicalID,
-			"kind": kind, "registry": namespace, "names": json.RawMessage(names),
+			"kind": kind, "registry": catalogResourceRegistry(kind, registry), "namespace": namespace, "names": json.RawMessage(names),
 			"defaultLocale": defaultLocale, "publishedRevisionId": nullableCatalogString(revisionID), "locale": contentLocale,
 			"name": name, "provenance": provenance, "iconUrl": iconURL, "renderUrl": renderURL, "bindingCount": bindingCount,
 			"iconFileId": nullableCatalogString(iconID), "renderFileId": nullableCatalogString(renderID),
@@ -239,12 +243,12 @@ func normalizeCatalogResourceEdit(ctx context.Context, query modContentTemplateR
 }
 
 func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Request, entity catalogEditorEntity) {
-	var kindCode, canonicalID string
+	var kindCode, canonicalID, namespace, registry string
 	var definition, importedNames []byte
 	var definitionSchemaVersion int
 	var iconID, renderID sql.NullString
 	err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
-		select resource.kind_code,resource.canonical_id,
+		select resource.kind_code,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),
 		case when definition.resource_id is not null then definition.definition
 		 when imported.resource_id is not null then imported.data
 		 else '{}'::jsonb end,
@@ -255,7 +259,7 @@ func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Reque
 		left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
 		left join latest_resource_snapshots imported on imported.resource_id=resource.entity_id
 		where resource.entity_id=$1`, entity.ID).
-		Scan(&kindCode, &canonicalID, &definition, &definitionSchemaVersion, &iconID, &renderID, &importedNames)
+		Scan(&kindCode, &canonicalID, &namespace, &registry, &definition, &definitionSchemaVersion, &iconID, &renderID, &importedNames)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "resource not found")
 		return
@@ -299,7 +303,7 @@ func (s *Server) writeCatalogResourceDetail(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"publicId": entity.PublicID, "status": entity.Status, "defaultLocale": defaultLocale,
 		"publishedRevisionId": publishedRevisionPublicID, "reviewStatus": reviewStatus,
-		"kindCode": kindCode, "canonicalId": canonicalID, "definitionSchemaVersion": definitionSchemaVersion, "definition": json.RawMessage(definition), "iconFileId": nullableCatalogString(iconID),
+		"kindCode": kindCode, "canonicalId": canonicalID, "namespace": namespace, "registry": catalogResourceRegistry(kindCode, registry), "definitionSchemaVersion": definitionSchemaVersion, "definition": json.RawMessage(definition), "iconFileId": nullableCatalogString(iconID),
 		"renderFileId": nullableCatalogString(renderID), "iconUrl": iconURL, "renderUrl": renderURL, "localizations": localizations})
 }
 
@@ -502,14 +506,14 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allo
 		 row_number() over(partition by member.tag_id order by member.ordinal,member.resource_id) preview_rank
 		from catalog_tag_members member where member.tag_id=any($1::bigint[])
 	)
-	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
+	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),member.ordinal,
 	 entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(imported.mod_site_id,''),
 	 coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 	  where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''),imported.names,'{}'::jsonb)
 	from selected_members member join game_resources resource on resource.entity_id=member.resource_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
-	left join lateral (select snapshot.names,snapshot.revision_id,snapshot.icon_path,mod.slug mod_site_id
+	left join lateral (select snapshot.registry,snapshot.names,snapshot.revision_id,snapshot.icon_path,mod.slug mod_site_id
 	 from resource_import_snapshots snapshot join catalog_import_revisions revision on revision.id=snapshot.revision_id
 	 join mods mod on mod.id=revision.mod_id where snapshot.resource_id=resource.entity_id
 	 and revision.is_active and revision.status in ('ready','partial') and exists(select 1 from mods public_source where public_source.id=revision.mod_id and public_source.review_status='approved')
@@ -541,14 +545,14 @@ func (s *Server) catalogTagPreviewRows(ctx context.Context, tagIDs []int64, allo
 	), ranked_members as (
 		select selected_members.*,row_number() over(partition by tag_id order by ordinal,resource_id) preview_rank from selected_members
 	)
-	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,member.ordinal,
+	select member.tag_id,entity.id,entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),member.ordinal,
 	 entity.default_locale,(select public_id from oss_files where id=definition.icon_file_id),coalesce(imported.revision_id,''),coalesce(imported.icon_path,''),coalesce(mod.slug,''),
 	 coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
 	  where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''),imported.names,'{}'::jsonb)
 	from ranked_members member join game_resources resource on resource.entity_id=member.resource_id
 	join catalog_entities entity on entity.id=resource.entity_id
 	left join catalog_resource_definitions definition on definition.resource_id=resource.entity_id
-	left join lateral (select snapshot.names,snapshot.revision_id,snapshot.icon_path from resource_import_snapshots snapshot
+	left join lateral (select snapshot.registry,snapshot.names,snapshot.revision_id,snapshot.icon_path from resource_import_snapshots snapshot
 	 join catalog_import_revisions source_revision on source_revision.id=snapshot.revision_id
 	 join mods source_mod on source_mod.id=source_revision.mod_id and source_mod.review_status='approved'
 	 where source_revision.is_active and source_revision.status in ('ready','partial') and snapshot.resource_id=resource.entity_id order by (snapshot.revision_id=member.revision_id) desc,
@@ -569,11 +573,11 @@ func scanCatalogTagPreviewRows(rows pgx.Rows, result map[int64][]map[string]any,
 	defer rows.Close()
 	for rows.Next() {
 		var tagID, entityID int64
-		var publicID, kindCode, canonicalID, registry, defaultLocale, revisionID, iconPath, modSiteID string
+		var publicID, kindCode, canonicalID, namespace, registry, defaultLocale, revisionID, iconPath, modSiteID string
 		var iconID sql.NullString
 		var names []byte
 		var ordinal int
-		if err := rows.Scan(&tagID, &entityID, &publicID, &kindCode, &canonicalID, &registry, &ordinal, &defaultLocale,
+		if err := rows.Scan(&tagID, &entityID, &publicID, &kindCode, &canonicalID, &namespace, &registry, &ordinal, &defaultLocale,
 			&iconID, &revisionID, &iconPath, &modSiteID, &names); err != nil {
 			return err
 		}
@@ -590,7 +594,7 @@ func scanCatalogTagPreviewRows(rows pgx.Rows, result map[int64][]map[string]any,
 			iconURL = "/api/v1/catalog/resources/" + publicID + "/icon"
 		}
 		result[tagID] = append(result[tagID], map[string]any{
-			"publicId": publicID, "id": canonicalID, "kind": kindCode, "registry": registry, "ordinal": ordinal,
+			"publicId": publicID, "id": canonicalID, "kind": kindCode, "registry": catalogResourceRegistry(kindCode, registry), "namespace": namespace, "ordinal": ordinal,
 			"locale": locale, "name": name, "names": compactNames, "iconFileId": nullableCatalogString(iconID),
 			"iconUrl": iconURL, "revisionId": revisionID, "iconPath": iconPath, "modSiteId": modSiteID,
 		})

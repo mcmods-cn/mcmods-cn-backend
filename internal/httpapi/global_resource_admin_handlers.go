@@ -19,10 +19,10 @@ func (s *Server) catalogResourcePresentation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	primary, secondary := s.requestContentLocales(r)
-	var publicID, kind, canonicalID, namespace, defaultLocale, locale, name, iconFileID, importedIconPath string
+	var publicID, kind, canonicalID, namespace, registry, defaultLocale, locale, name, iconFileID, importedIconPath string
 	var names []byte
 	err := s.db.QueryRow(r.Context(), `with `+latestGlobalExportScopeCTE+`, `+latestGlobalResourceSnapshotCTE+`
-		select entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,entity.default_locale,
+		select entity.public_id,resource.kind_code,resource.canonical_id,resource.namespace,coalesce(imported.registry,''),entity.default_locale,
 		coalesce(localization.locale,''),coalesce(localization.name,''),coalesce((select public_id from oss_files where id=definition.icon_file_id),''),
 		coalesce(imported.icon_path,''),coalesce(imported.names,'{}'::jsonb) || coalesce((select jsonb_object_agg(candidate.locale,candidate.name)
 		 from content_localizations candidate where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' and candidate.name<>''),'{}'::jsonb)
@@ -33,7 +33,7 @@ func (s *Server) catalogResourcePresentation(w http.ResponseWriter, r *http.Requ
 		 where candidate.catalog_entity_id=entity.id and candidate.review_status='approved' order by case candidate.locale when $2 then 0 when $3 then 1
 		 when entity.default_locale then 2 when 'en-US' then 3 else 4 end limit 1) localization on true
 		where entity.status='active' and `+publicCatalogEntitySQL("entity", "resource")+` and (entity.public_id=$1 or lower(resource.canonical_id)=$1) limit 1`, reference, primary, secondary).
-		Scan(&publicID, &kind, &canonicalID, &namespace, &defaultLocale, &locale, &name, &iconFileID, &importedIconPath, &names)
+		Scan(&publicID, &kind, &canonicalID, &namespace, &registry, &defaultLocale, &locale, &name, &iconFileID, &importedIconPath, &names)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "resource presentation not found")
@@ -46,7 +46,7 @@ func (s *Server) catalogResourcePresentation(w http.ResponseWriter, r *http.Requ
 		locale, name = resolvedLocale, resolvedName
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"publicId": publicID, "kind": kind, "id": canonicalID, "registry": namespace,
+		"publicId": publicID, "kind": kind, "id": canonicalID, "registry": catalogResourceRegistry(kind, registry), "namespace": namespace,
 		"locale": locale, "name": name, "iconUrl": catalogRecipeResourceIconURL(publicID, iconFileID, "", importedIconPath),
 	})
 }

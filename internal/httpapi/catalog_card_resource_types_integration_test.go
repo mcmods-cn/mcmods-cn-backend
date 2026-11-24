@@ -75,6 +75,7 @@ func TestPublicRecipeRenderKeepsManualCandidateResourceKindIntegration(t *testin
 	}
 	candidate := result.Layout.Slots[0].Alternatives[0]
 	if candidate["kind"] != "minecraft.fluid" || candidate["publicId"] != fluid.PublicID ||
+		candidate["registry"] != "fluids" || candidate["namespace"] != "example" ||
 		candidate["amount"] != float64(250) || candidate["probability"] != float64(0) {
 		t.Fatalf("canonical fluid resolved incorrectly: %#v", candidate)
 	}
@@ -153,6 +154,9 @@ func TestResourcePresentationUsesPublishedDisplayNameIntegration(t *testing.T) {
 	}
 	raw := f.require(t, "", http.MethodGet, "/api/v1/catalog/resource-presentation?ref="+identity.PublicID+"&locale=zh-CN", nil, http.StatusOK)
 	display := decodeTEST022Data[map[string]any](t, raw)
+	if display["registry"] != "items" || display["namespace"] != "example" {
+		t.Errorf("resource family and identifier namespace = %q/%q", display["registry"], display["namespace"])
+	}
 	if display["name"] != "Published translation" || display["locale"] != "en-US" {
 		t.Fatalf("expected the approved fallback language, got name=%q locale=%q", display["name"], display["locale"])
 	}

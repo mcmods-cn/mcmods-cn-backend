@@ -122,6 +122,45 @@ func catalogSnapshotID(kind, revisionID, entityID, qualifier string) string {
 	return "snp_" + strings.TrimPrefix(identity.ID, "doc_")
 }
 
+// Catalog cards use stable resource families. A source registry can identify
+// an extension kind, while the namespace belongs to the object's canonical ID.
+func catalogResourceRegistry(kind, observed string) string {
+	switch kind {
+	case "minecraft.item", "item":
+		return "items"
+	case "minecraft.block", "block":
+		return "blocks"
+	case "minecraft.fluid", "fluid":
+		return "fluids"
+	case "minecraft.entity_type", "entity":
+		return "entity_types"
+	case "minecraft.mob_effect", "effect":
+		return "mob_effects"
+	case "minecraft.potion":
+		return "potions"
+	case "minecraft.enchantment":
+		return "enchantments"
+	case "minecraft.biome":
+		return "biomes"
+	case "minecraft.dimension":
+		return "dimensions"
+	case "minecraft.key_mapping":
+		return "key_mappings"
+	case "minecraft.advancement":
+		return "advancements"
+	case "minecraft.loot_table":
+		return "loot_tables"
+	case "minecraft.game_setting":
+		return "game_settings"
+	case "minecraft.structure":
+		return "world_structures"
+	case "minecraft.natural_generation":
+		return "natural_generation"
+	default:
+		return observed
+	}
+}
+
 func resourceKindForRegistry(registry string) string {
 	normalized := strings.ToLower(strings.TrimSpace(registry))
 	// Tag exports use registry keys such as minecraft:item, while registry

@@ -347,7 +347,8 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 				key := recipeRenderResourceKey(recipe, slot, alternative)
 				alternative["id"] = key.ResourceID
 				alternative["kind"] = key.Kind
-				alternative["registry"] = resourceNamespace(key.ResourceID)
+				alternative["namespace"] = resourceNamespace(key.ResourceID)
+				alternative["registry"] = catalogResourceRegistry(key.Kind, "")
 				for _, alias := range []string{"entityId", "item", "resource_location", "canonicalId", "kindCode", "sourceRegistry", "sourceObjectId"} {
 					delete(alternative, alias)
 				}
@@ -361,7 +362,8 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 				alternative["publicId"] = source.PublicID
 				alternative["id"] = source.ObjectID
 				alternative["kind"] = source.KindCode
-				alternative["registry"] = source.Registry
+				alternative["registry"] = catalogResourceRegistry(source.KindCode, source.Registry)
+				alternative["namespace"] = resourceNamespace(source.ObjectID)
 				alternative["sourceRevisionId"] = source.RevisionID
 				alternative["sourceModSiteId"] = source.ModSiteID
 				alternative["sourceVersionPublicId"] = source.VersionPublicID
@@ -555,9 +557,8 @@ func (s *Server) decorateCatalystBatches(ctx context.Context, batches []catalogC
 			if _, exists := catalyst["kind"]; !exists {
 				catalyst["kind"] = "minecraft.item"
 			}
-			if _, exists := catalyst["registry"]; !exists {
-				catalyst["registry"] = resourceNamespace(itemID)
-			}
+			catalyst["registry"] = catalogResourceRegistry("minecraft.item", "")
+			catalyst["namespace"] = resourceNamespace(itemID)
 			for _, alias := range []string{"entityId", "item", "resource_location", "canonicalId", "kindCode"} {
 				delete(catalyst, alias)
 			}
@@ -571,7 +572,8 @@ func (s *Server) decorateCatalystBatches(ctx context.Context, batches []catalogC
 			catalyst["publicId"] = source.PublicID
 			catalyst["id"] = source.ObjectID
 			catalyst["kind"] = source.KindCode
-			catalyst["registry"] = source.Registry
+			catalyst["registry"] = catalogResourceRegistry(source.KindCode, source.Registry)
+			catalyst["namespace"] = resourceNamespace(source.ObjectID)
 			catalyst["names"] = source.Names
 			catalyst["revisionId"] = source.RevisionID
 			catalyst["modSiteId"] = source.ModSiteID
