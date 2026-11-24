@@ -24,8 +24,7 @@ func TestProjectAutomationMirrorStreamsThroughBoundedGlobalSlots(t *testing.T) {
 	for _, required := range []string{
 		"spoolProviderFile", "os.CreateTemp", "io.CopyBuffer", "projectAutomationMirrorBufferBytes",
 		"acquireProjectAutomationMirrorSlot", "pg_try_advisory_lock", "projectAutomationMirrorGlobalConcurrency",
-		"errors.Is(err, pgx.ErrNoRows)", "cleanupUnregisteredProjectMirror", "context.WithoutCancel(ctx)",
-		"project-automation-registration-failed",
+		"errors.Is(err, pgx.ErrNoRows)",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("streaming mirror boundary is missing %q", required)

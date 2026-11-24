@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -57,7 +58,40 @@ func TestDownloadedMirrorUsesCurrentRedistributionDecisionIntegration(t *testing
 	if _, err = f.db.Exec(f.ctx, `update mods set review_status='approved' where id=$1`, job.InternalID); err != nil {
 		t.Fatal(err)
 	}
-	if err = register(); err != nil {
+	// Hold a real registration at COMMIT, when another connection can still see
+	// the old due receipt and cannot yet see the registered file.
+	if _, err = f.db.Exec(f.ctx, `update oss_object_deletion_outbox set next_attempt_at=now() where object_key='owned/test.jar';
+		create table mirror_registration_barrier(id int primary key);
+		insert into mirror_registration_barrier values(1);
+		create function wait_for_mirror_registration() returns trigger language plpgsql as $$
+		begin perform id from mirror_registration_barrier where id=1 for update; return null; end $$;
+		create constraint trigger mirror_registration_at_commit after insert on mirrored_project_files
+		deferrable initially deferred for each row execute function wait_for_mirror_registration()`); err != nil {
+		t.Fatal(err)
+	}
+	barrier, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollbackIntegrationTransaction(barrier)
+	if _, err = barrier.Exec(f.ctx, `select id from mirror_registration_barrier where id=1 for update`); err != nil {
+		t.Fatal(err)
+	}
+	go func() { completed <- register() }()
+	auditCompletionAwaitLocks(t, f.test013Fixture, 1)
+	var visible bool
+	if err = f.db.QueryRow(f.ctx, `select not exists(select 1 from oss_files where object_key=$1)
+		and exists(select 1 from oss_object_deletion_outbox where object_key=$1 and next_attempt_at<=now())`, key).Scan(&visible); err != nil || !visible {
+		t.Fatalf("second connection did not observe the pre-commit facts: visible=%v err=%v", visible, err)
+	}
+	cleanup := NewOSSDeletionWorker(worker.server.cfg, f.db)
+	if _, err = cleanup.claim(f.ctx); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("claimed a transfer while registration was committing: %v", err)
+	}
+	if err = barrier.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-completed; err != nil {
 		t.Fatal(err)
 	}
 	if err = f.db.QueryRow(f.ctx, `select count(*) from oss_object_deletion_outbox where bucket=$1 and object_key=$2`, cfg.Bucket, key).Scan(&rows); err != nil || rows != 0 {
@@ -82,6 +116,12 @@ func TestDownloadedMirrorUsesCurrentRedistributionDecisionIntegration(t *testing
 	}
 	if err = f.db.QueryRow(f.ctx, `select count(*) from oss_files where object_key=$1`, retiredKey).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("lost cleanup ownership still produced a file: rows=%d err=%v", rows, err)
+	}
+	if _, err = f.db.Exec(f.ctx, `update oss_object_deletion_outbox set attempts=0,replay_count=1 where id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err = worker.registerDownloadedProjectMirror(f.ctx, job, cfg, file, retiredKey, 4, digest); err == nil {
+		t.Fatal("a replayed deletion became eligible for registration again")
 	}
 
 }

@@ -2,12 +2,7 @@ package httpapi
 
 import (
 	"context"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -97,63 +92,20 @@ func TestProjectMirrorIdentityAndUploadCompensationIntegration(t *testing.T) {
 		t.Fatalf("project-scoped provider identity constraints=%d global constraints=%d", providerIdentityConstraints, globalConstraints)
 	}
 
-	var requestMu sync.Mutex
-	requests := make([]string, 0)
-	ossHTTP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestMu.Lock()
-		requests = append(requests, r.Method+" "+r.URL.Path)
-		requestMu.Unlock()
-		if strings.Contains(r.URL.Path, "cleanup-fails") {
-			w.Header().Set("Content-Type", "application/xml")
-			w.WriteHeader(http.StatusForbidden)
-			_, _ = fmt.Fprint(w, `<Error><Code>AccessDenied</Code><Message>denied</Message></Error>`)
-			return
+	// Registration identity remains independent of content identity. Unbound transfers
+	// keep their own expiry even if an unrelated file has exactly the same bytes.
+	cfg := ossConfigPayload{Bucket: "owned", Endpoint: "https://owned.invalid", Region: "cn-test"}
+	for _, key := range []string{"project/first-attempt.jar", "project/second-attempt.jar"} {
+		if _, err = scheduleOSSUploadExpiry(ctx, pool, cfg, key, projectMirrorUploadExpiryReason, nil); err != nil {
+			t.Fatal(err)
 		}
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer ossHTTP.Close()
-	ossConfig := ossConfigPayload{
-		Enabled: true, Region: "cn-test", Endpoint: ossHTTP.URL, Bucket: "mirror-bucket",
-		AccessKeyID: "test-access-key", AccessKeySecret: "test-secret", UseCName: true,
 	}
-	ossClient := newOSSClient(ossConfig, ossConfig.Endpoint, true)
-	worker := &ProjectAutomationWorker{server: &Server{db: pool}}
-	canceledContext, cancelCleanup := context.WithCancel(ctx)
-	cancelCleanup()
-	if err = worker.cleanupUnregisteredProjectMirror(canceledContext, ossClient, ossConfig, "project/cleanup-succeeds.jar"); err != nil {
-		t.Fatalf("detached direct cleanup: %v", err)
-	}
-	requestMu.Lock()
-	directRequests := len(requests)
-	requestMu.Unlock()
-	if directRequests != 1 {
-		t.Fatalf("direct cleanup requests=%d want 1", directRequests)
-	}
-
-	if _, err = pool.Exec(ctx, `insert into oss_files(object_key) values('project/already-registered.jar')`); err != nil {
-		t.Fatal(err)
-	}
-	if err = worker.cleanupUnregisteredProjectMirror(ctx, ossClient, ossConfig, "project/already-registered.jar"); err != nil {
-		t.Fatal(err)
-	}
-	requestMu.Lock()
-	requestsAfterRegistered := len(requests)
-	requestMu.Unlock()
-	if requestsAfterRegistered != directRequests {
-		t.Fatal("cleanup deleted an object that already had a persistent OSS record")
-	}
-
-	err = worker.cleanupUnregisteredProjectMirror(ctx, ossClient, ossConfig, "project/cleanup-fails.jar")
-	if err == nil || !strings.Contains(err.Error(), "durable deletion queued") {
-		t.Fatalf("failed direct cleanup did not report its durable fallback: %v", err)
-	}
-	var cleanupStatus, cleanupReason string
-	if err = pool.QueryRow(ctx, `select status,reason from oss_object_deletion_outbox
-		where object_key='project/cleanup-fails.jar'`).Scan(&cleanupStatus, &cleanupReason); err != nil {
-		t.Fatal(err)
-	}
-	if cleanupStatus != "pending" || cleanupReason != "project-automation-registration-failed" {
-		t.Fatalf("durable cleanup status=%q reason=%q", cleanupStatus, cleanupReason)
+	var receipts int
+	if err = pool.QueryRow(ctx, `select count(*) from oss_object_deletion_outbox where bucket=$1 and reason=$2
+		and oss_file_id is null and status='pending' and attempts=0
+		and next_attempt_at>now()+interval '23 hours' and object_key in ('project/first-attempt.jar','project/second-attempt.jar')`,
+		cfg.Bucket, projectMirrorUploadExpiryReason).Scan(&receipts); err != nil || receipts != 2 {
+		t.Fatalf("independent delayed upload receipts=%d err=%v", receipts, err)
 	}
 
 	if err = database.DropEphemeralSchema(ctx, pool); err != nil {

@@ -946,7 +946,8 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			return result(), downloadErr
 		}
 		if err = worker.registerDownloadedProjectMirror(ctx, job, ossCfg, file, objectKey, size, digest); err != nil {
-			return result(), errors.Join(err, worker.cleanupUnregisteredProjectMirror(ctx, client, ossCfg, objectKey))
+			// The registration may still commit. Only its precommitted expiry owns deletion.
+			return result(), err
 		}
 		queued++
 	}
@@ -1006,7 +1007,7 @@ func (worker *ProjectAutomationWorker) registerDownloadedProjectMirror(ctx conte
 	// Register only while this exact transfer's unclaimed receipt can be canceled.
 	tag, err := tx.Exec(ctx, `delete from oss_object_deletion_outbox
 		where bucket=$1 and endpoint=$2 and object_key=$3 and oss_file_id is null and reason=$4
-		  and status='pending' and attempts=0`, cfg.Bucket, cfg.Endpoint, objectKey, projectMirrorUploadExpiryReason)
+		  and status='pending' and attempts=0 and replay_count=0`, cfg.Bucket, cfg.Endpoint, objectKey, projectMirrorUploadExpiryReason)
 	if err != nil {
 		return err
 	}
@@ -1014,42 +1015,6 @@ func (worker *ProjectAutomationWorker) registerDownloadedProjectMirror(ctx conte
 		return errors.New("project mirror upload is no longer available for registration")
 	}
 	return tx.Commit(ctx)
-}
-
-func (worker *ProjectAutomationWorker) cleanupUnregisteredProjectMirror(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-	defer cancel()
-	var registered bool
-	if err := worker.server.db.QueryRow(cleanupCtx, `select exists(select 1 from oss_files where object_key=$1)`, objectKey).Scan(&registered); err != nil {
-		return fmt.Errorf("verify failed project mirror registration before cleanup: %w", err)
-	}
-	if registered {
-		return nil
-	}
-	if _, err := client.DeleteObject(cleanupCtx, &aliyunoss.DeleteObjectRequest{
-		Bucket: aliyunoss.Ptr(cfg.Bucket),
-		Key:    aliyunoss.Ptr(objectKey),
-	}); err == nil {
-		return nil
-	} else {
-		directDeleteErr := err
-		tx, beginErr := worker.server.db.Begin(cleanupCtx)
-		if beginErr != nil {
-			return errors.Join(fmt.Errorf("delete unregistered project mirror: %w", directDeleteErr), fmt.Errorf("begin durable cleanup: %w", beginErr))
-		}
-		defer tx.Rollback(cleanupCtx)
-		queueErr := enqueueOSSObjectDeletionTx(cleanupCtx, tx, ossDeletionTarget{
-			Bucket: cfg.Bucket, Endpoint: cfg.Endpoint, Region: cfg.Region, UseCName: cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint),
-			ObjectKey: objectKey, Reason: "project-automation-registration-failed",
-		})
-		if queueErr == nil {
-			queueErr = tx.Commit(cleanupCtx)
-		}
-		if queueErr != nil {
-			return errors.Join(fmt.Errorf("delete unregistered project mirror: %w", directDeleteErr), fmt.Errorf("queue durable cleanup: %w", queueErr))
-		}
-		return fmt.Errorf("direct project mirror cleanup failed; durable deletion queued: %w", directDeleteErr)
-	}
 }
 
 func providerFileHashSignature(file providerProjectFile) string {
@@ -1119,7 +1084,7 @@ func putSpooledProjectMirror(ctx context.Context, conn *pgxpool.Conn, client *al
 	}
 	defer guard.Rollback(ctx)
 	if err = guard.QueryRow(ctx, `select id from oss_object_deletion_outbox
-		where id=$1 and status='pending' and attempts=0 for update`, id).Scan(&id); err != nil {
+		where id=$1 and status='pending' and attempts=0 and replay_count=0 for update`, id).Scan(&id); err != nil {
 		return err
 	}
 	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{

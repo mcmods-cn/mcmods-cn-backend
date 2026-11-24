@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +21,15 @@ func TestUnacknowledgedProjectMirrorRetainsOnlyItsOwnDelayedCleanupIntegration(t
 	const oldKey, replacement = "project/attempt-one.jar", "project/attempt-two.jar"
 	received := make(chan struct{})
 	release := make(chan struct{})
+	var denyDelete atomic.Bool
+	denyDelete.Store(true)
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, oldKey) && denyDelete.Swap(false) {
+			w.Header().Set("Content-Type", "application/xml")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("<Error><Code>AccessDenied</Code><Message>test object policy</Message></Error>"))
+			return
+		}
 		if r.Method == http.MethodPut && strings.HasSuffix(r.URL.Path, oldKey) {
 			// Store the bytes through the same OSS fixture, then hold its response.
 			f.provider.Config.Handler.ServeHTTP(httptest.NewRecorder(), r)
@@ -90,6 +99,21 @@ func TestUnacknowledgedProjectMirrorRetainsOnlyItsOwnDelayedCleanupIntegration(t
 	job, err := cleanup.claim(ctx)
 	if err != nil || job.ID != expiryID {
 		t.Fatalf("wrong expired transfer selected: %v", err)
+	}
+	if err = cleanup.deleteObject(ctx, job); err == nil {
+		t.Fatal("provider rejected deletion but it was reported complete")
+	}
+	if dead, persistErr := cleanup.recordFailure(ctx, job, err); persistErr != nil || !dead {
+		t.Fatalf("provider rejection was not retained: dead=%v err=%v", dead, persistErr)
+	}
+	var publicID, failureClass string
+	if err = f.db.QueryRow(ctx, `select public_id,failure_class from oss_object_deletion_outbox where id=$1 and status='dead'`, expiryID).Scan(&publicID, &failureClass); err != nil || failureClass != "authorization" {
+		t.Fatalf("unrecovered deletion class=%q err=%v", failureClass, err)
+	}
+	grantTEST044Permissions(t, ctx, f.db, f.userIDs[f.reviewer], "admin.config.write")
+	f.require(t, f.reviewer, http.MethodPost, "/api/v1/admin/infrastructure/oss-deletions/"+publicID+"/replay", nil, http.StatusAccepted)
+	if job, err = cleanup.claim(ctx); err != nil || job.ID != expiryID {
+		t.Fatalf("replay selected another transfer: %v", err)
 	}
 	if err = cleanup.deleteObject(ctx, job); err != nil {
 		t.Fatal(err)
