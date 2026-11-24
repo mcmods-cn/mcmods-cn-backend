@@ -365,12 +365,7 @@ func (s *Server) decorateRecipeResources(ctx context.Context, recipes []map[stri
 				alternative["kind"] = key.Kind
 				alternative["namespace"] = resourceNamespace(key.ResourceID)
 				alternative["registry"] = catalogResourceRegistry(key.Kind, "")
-				for _, alias := range []string{"entityId", "item", "resource_location", "canonicalId", "kindCode", "sourceRegistry", "sourceObjectId"} {
-					delete(alternative, alias)
-				}
-				for _, field := range []string{"publicId", "detailUrl", "names", "iconPath", "iconUrl", "iconURL", "previewPath", "previewUrl", "sourceRevisionId", "sourceModSiteId", "sourceVersionPublicId"} {
-					delete(alternative, field)
-				}
+				clearImportedResourcePresentation(alternative)
 				source, exists := resolved[key]
 				if !exists {
 					continue
@@ -484,9 +479,26 @@ func (s *Server) localizedEntityContent(ctx context.Context, entityID int64, pri
 	return content, locale, revisionID, err
 }
 
-func (s *Server) decorateCatalysts(ctx context.Context, raw []byte, revisionID string) ([]map[string]any, error) {
-	decorated, err := s.decorateCatalystBatches(ctx, []catalogCatalystBatch{{TypeID: 0, Raw: raw, RevisionID: revisionID}})
-	return decorated[0], err
+func clearImportedResourcePresentation(item map[string]any) {
+	for _, key := range []string{
+		"entityId", "item", "resource_location", "canonicalId", "kindCode", "sourceRegistry", "sourceObjectId",
+		"publicId", "detailUrl", "names", "iconPath", "iconUrl", "iconURL", "previewPath", "previewUrl",
+		"revisionId", "modSiteId", "versionPublicId", "sourceRevisionId", "sourceModSiteId", "sourceVersionPublicId",
+	} {
+		delete(item, key)
+	}
+}
+
+func importedCatalystIdentity(catalyst map[string]any, revisionID string) (exportResourceKey, string) {
+	ingredientKind := exportString(catalyst["ingredient_kind"])
+	ingredientType := firstCatalogString(catalyst, nil, "ingredient_type", "type")
+	kindCode := "minecraft.item"
+	if ingredientKind != "" || ingredientType != "" {
+		kindCode = resourceKindForIngredient(ingredientKind, ingredientType)
+	}
+	return exportResourceKey{
+		RevisionID: revisionID, ResourceID: recipeAlternativeItemID(catalyst), Kind: normalizeExportResourceKind(kindCode),
+	}, kindCode
 }
 
 type catalogCatalystBatch struct {
@@ -506,12 +518,16 @@ func decodeCatalogCatalysts(raw []byte, revisionID string) ([]map[string]any, er
 	if catalysts == nil {
 		return nil, fmt.Errorf("decode recipe catalysts for revision %s: expected array", revisionID)
 	}
+	for _, catalyst := range catalysts {
+		if catalyst == nil {
+			return nil, fmt.Errorf("decode recipe catalysts for revision %s: expected catalyst object", revisionID)
+		}
+	}
 	return catalysts, nil
 }
 
 func (s *Server) decorateCatalystBatches(ctx context.Context, batches []catalogCatalystBatch) (map[int64][]map[string]any, error) {
 	result := make(map[int64][]map[string]any, len(batches))
-	entityIDs := make([]string, 0)
 	keys := make([]exportResourceKey, 0)
 	for _, batch := range batches {
 		catalysts, err := decodeCatalogCatalysts(batch.Raw, batch.RevisionID)
@@ -520,46 +536,8 @@ func (s *Server) decorateCatalystBatches(ctx context.Context, batches []catalogC
 		}
 		result[batch.TypeID] = catalysts
 		for _, catalyst := range catalysts {
-			publicID, _ := catalyst["publicId"].(string)
-			if publicID == "" {
-				publicID, _ = catalyst["entityId"].(string)
-			}
-			if strings.TrimSpace(publicID) != "" {
-				entityIDs = append(entityIDs, publicID)
-			}
-			keys = append(keys, exportResourceKey{RevisionID: batch.RevisionID, ResourceID: recipeAlternativeItemID(catalyst), Kind: "item"})
-		}
-	}
-	if len(entityIDs) > 0 {
-		rows, err := s.db.Query(ctx, `select entity.public_id,resource.canonical_id from game_resources resource
-			join catalog_entities entity on entity.id=resource.entity_id where entity.public_id=any($1::text[])`, entityIDs)
-		if err != nil {
-			return nil, err
-		}
-		canonicalByEntity := make(map[string]string, len(entityIDs))
-		for rows.Next() {
-			var entityID, canonicalID string
-			if err = rows.Scan(&entityID, &canonicalID); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			canonicalByEntity[entityID] = canonicalID
-		}
-		if err = rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
-		for _, catalysts := range result {
-			for _, catalyst := range catalysts {
-				publicID, _ := catalyst["publicId"].(string)
-				if publicID == "" {
-					publicID, _ = catalyst["entityId"].(string)
-				}
-				if canonicalID := canonicalByEntity[publicID]; canonicalID != "" {
-					catalyst["id"] = canonicalID
-				}
-			}
+			key, _ := importedCatalystIdentity(catalyst, batch.RevisionID)
+			keys = append(keys, key)
 		}
 	}
 	resolved, err := s.resolveExportResources(publicCatalogContext(ctx), keys)
@@ -568,20 +546,13 @@ func (s *Server) decorateCatalystBatches(ctx context.Context, batches []catalogC
 	}
 	for _, batch := range batches {
 		for _, catalyst := range result[batch.TypeID] {
-			itemID := recipeAlternativeItemID(catalyst)
-			catalyst["id"] = itemID
-			if _, exists := catalyst["kind"]; !exists {
-				catalyst["kind"] = "minecraft.item"
-			}
-			catalyst["registry"] = catalogResourceRegistry("minecraft.item", "")
-			catalyst["namespace"] = resourceNamespace(itemID)
-			for _, alias := range []string{"entityId", "item", "resource_location", "canonicalId", "kindCode"} {
-				delete(catalyst, alias)
-			}
-			for _, field := range []string{"publicId", "detailUrl", "names", "iconPath", "iconUrl", "iconURL", "previewPath", "previewUrl", "revisionId", "modSiteId", "versionPublicId"} {
-				delete(catalyst, field)
-			}
-			source, exists := resolved[exportResourceKey{RevisionID: batch.RevisionID, ResourceID: itemID, Kind: "item"}]
+			key, kindCode := importedCatalystIdentity(catalyst, batch.RevisionID)
+			clearImportedResourcePresentation(catalyst)
+			catalyst["id"] = key.ResourceID
+			catalyst["kind"] = kindCode
+			catalyst["registry"] = catalogResourceRegistry(kindCode, "")
+			catalyst["namespace"] = resourceNamespace(key.ResourceID)
+			source, exists := resolved[key]
 			if !exists {
 				continue
 			}

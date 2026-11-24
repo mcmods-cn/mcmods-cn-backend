@@ -11,9 +11,8 @@ import (
 )
 
 func TestInvalidImportedCatalystsAreNotSilentlyEmpty(t *testing.T) {
-	server := &Server{}
-	for _, raw := range []string{`{"not":"an array"}`, `[1]`, `null`, ``} {
-		if _, err := server.decorateCatalysts(context.Background(), []byte(raw), "revision-test"); err == nil || !strings.Contains(err.Error(), "revision-test") {
+	for _, raw := range []string{`{"not":"an array"}`, `[1]`, `[null]`, `null`, ``} {
+		if _, err := decodeCatalogCatalysts([]byte(raw), "revision-test"); err == nil || !strings.Contains(err.Error(), "revision-test") {
 			t.Fatalf("invalid catalysts %q returned %v", raw, err)
 		}
 	}

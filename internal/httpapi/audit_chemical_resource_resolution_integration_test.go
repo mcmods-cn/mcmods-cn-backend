@@ -55,7 +55,7 @@ func auditChemicalSharedCanonicalZIP(t *testing.T) []byte {
 	collection := documents["recipes/jei/recipes/example/pressing.json"]
 	recipeSource, _ := json.Marshal(collection["recipes"].([]any)[0])
 	summarySource, _ := json.Marshal(category["recipes"].([]any)[0])
-	recipes, summaries, types := []any{}, []any{}, []any{}
+	recipes, summaries, types, catalysts := []any{}, []any{}, []any{}, []any{}
 	for index, kind := range auditChemicalKinds {
 		var recipe, summary map[string]any
 		if err := json.Unmarshal(recipeSource, &recipe); err != nil {
@@ -64,6 +64,7 @@ func auditChemicalSharedCanonicalZIP(t *testing.T) []byte {
 		if err := json.Unmarshal(summarySource, &summary); err != nil {
 			t.Fatal(err)
 		}
+		catalysts = append(catalysts, map[string]any{"type": kind.class, "resource_location": "example:chemical_shared", "amount": 1000 + index})
 		id := "example:collision_" + kind.suffix
 		recipe["recipe_id"], recipe["recipe_key"], summary["recipe_id"], summary["recipe_key"] = id, id, id, id
 		recipe["bindings"].([]any)[1].(map[string]any)["alternatives"] = []any{map[string]any{"type": kind.class, "resource_location": "example:chemical_shared", "amount": 1000 + index}}
@@ -76,6 +77,7 @@ func auditChemicalSharedCanonicalZIP(t *testing.T) []byte {
 	collection["count"], collection["recipes"] = 4, recipes
 	category["recipe_count"], category["layout_sample_count"], category["recipes"] = 4, 4, summaries
 	group := category["categories"].([]any)[0].(map[string]any)
+	group["catalysts"] = catalysts
 	for _, key := range []string{"source_recipe_count", "recipe_count", "exported_recipe_count"} {
 		group[key] = 4
 	}
@@ -102,6 +104,12 @@ func TestAuditF002FourChemicalKindsResolveTheirOwnCanonicalIdentityAndImageHTTPP
 	f := newAuditFixGRFixture(t)
 	_, revision := f.imported(t, auditChemicalSharedCanonicalZIP(t))
 	f.reviewGR(t, revision, "approved")
+	page := decodeTEST022Data[struct {
+		Items []struct{ Catalysts []map[string]any }
+	}](t, f.require(t, "", "GET", "/api/v1/recipe-types?canonicalId=example:pressing", nil, 200))
+	if len(page.Items) != 1 || len(page.Items[0].Catalysts) != len(auditChemicalKinds) {
+		t.Fatalf("public category catalysts = %#v", page.Items)
+	}
 	seen := map[string]bool{}
 	for index, kind := range auditChemicalKinds {
 		var publicID, recipeID, iconPath string
@@ -114,6 +122,10 @@ func TestAuditF002FourChemicalKindsResolveTheirOwnCanonicalIdentityAndImageHTTPP
 			t.Fatal("different chemical kinds shared a canonical identity or lost source icon")
 		}
 		seen[publicID] = true
+		catalyst := page.Items[0].Catalysts[index]
+		if catalyst["publicId"] != publicID || catalyst["kind"] != kind.code || catalyst["iconPath"] != iconPath || catalyst["amount"] != float64(1000+index) {
+			t.Errorf("wrong category catalyst for %s: %#v", kind.code, catalyst)
+		}
 		resolved, err := f.server.resolveExportResources(f.ctx, []exportResourceKey{{RevisionID: revision, ResourceID: "example:chemical_shared", Kind: kind.ingredient}})
 		if err != nil {
 			t.Fatal(err)

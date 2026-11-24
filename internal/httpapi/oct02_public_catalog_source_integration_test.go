@@ -300,12 +300,12 @@ func TestOCT02PublicRecipeDecoratorsDiscardUnresolvedPresentationFieldsIntegrati
 			t.Errorf("unresolved recipe retained untrusted %s", field)
 		}
 	}
-	decorated, err := server.decorateCatalysts(f.ctx, []byte(`[{"id":"missing:unresolved","detailUrl":"javascript:untrusted","names":{"en-US":"untrusted"},"iconPath":"private.png"}]`), "")
+	decorated, err := server.decorateCatalystBatches(f.ctx, []catalogCatalystBatch{{Raw: []byte(`[{"id":"missing:unresolved","detailUrl":"javascript:untrusted","names":{"en-US":"untrusted"},"iconPath":"private.png"}]`)}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, field := range []string{"detailUrl", "names", "iconPath"} {
-		if _, exists := decorated[0][field]; exists {
+		if _, exists := decorated[0][0][field]; exists {
 			t.Errorf("unresolved catalyst retained untrusted %s", field)
 		}
 	}
