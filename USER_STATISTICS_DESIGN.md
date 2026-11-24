@@ -70,7 +70,7 @@
 - 原始日志删除不反向扣减累计统计。业务内容删除只调整 `current_exists`，历史 `total` 保留。
 - 审核状态变化覆盖事实表状态，不新增第二条事实。
 - `internal/userstats.Reconcile` 在单用户事务内取得 advisory lock 和用户行锁。日统计从原始事件与保留汇总重建，累计统计按日汇总和最近事件计算。校准移除缺少对应事实的日统计，并纠正偏高或偏低的计数。
-- 用 `go run ./cmd/user-statistics -user <publicId>` 校准单个用户。省略 `-user` 时按用户 ID 分批执行。
+- 用 `go run ./cmd/user-statistics -user <publicId>` 校准单个用户。省略 `-user` 时按用户 ID 分批执行。显式空值和位置参数会在连接数据库前报错。
 - 运维按需执行校准。应用启动只验证数据库基线。
 - 内容事实按当前业务记录校准。已物理删除的对象以删除时保存的事实为准。
 
