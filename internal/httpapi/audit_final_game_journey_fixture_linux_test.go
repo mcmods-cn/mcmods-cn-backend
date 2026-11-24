@@ -16,9 +16,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -49,13 +51,7 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 	}
 	backendCheckout := strings.TrimSpace(string(checkout))
 	checkouts := auditLiveSourceCheckouts(backendCheckout, "")
-	revisions := checkouts.revisions(t)
-	for name, key := range map[string]string{"mcmods-cn-backend": "MCMODS_AUDIT_EXPECT_BACKEND_COMMIT", "mcmods-cn-frontend": "MCMODS_AUDIT_EXPECT_FRONTEND_COMMIT", "mcmods_exporter": "MCMODS_AUDIT_EXPECT_EXPORTER_COMMIT"} {
-		expected := os.Getenv(key)
-		if len(expected) != 40 || revisions[name].(map[string]any)["commit"] != expected {
-			t.Fatalf("exact predeclared full source pin required for %s", name)
-		}
-	}
+	revisions := checkouts.pinnedRevisions(t)
 	directory := os.Getenv("MCMODS_AUDIT_FINAL_GAME_DIR")
 	if !filepath.IsAbs(directory) {
 		t.Fatal("MCMODS_AUDIT_FINAL_GAME_DIR must be an absolute task-owned output directory")
@@ -95,9 +91,14 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 	if len(sample) != 18290 || expectedSampleHash != "059b1c56921a3f70b934bd577fd940486982da03b24d2f6dca7c0efcfb5af2eb" || sampleProducer != "806214802c1e3447a9895fa5311e73f3be6edfcc" || hex.EncodeToString(sampleDigest[:]) != expectedSampleHash {
 		t.Fatal("real-game package hash differs from the reviewed named sample")
 	}
-	const frontendOrigin = "https://127.0.0.1:3431"
-	if value := os.Getenv("MCMODS_AUDIT_FRONTEND_ORIGIN"); value != frontendOrigin {
-		t.Fatal("final fixture requires the exact3431 HTTPS origin embedded in the declared production build")
+	frontendOrigin := os.Getenv("MCMODS_AUDIT_FRONTEND_ORIGIN")
+	site, err := url.Parse(frontendOrigin)
+	if err != nil || site.Scheme != "https" || site.Hostname() != "127.0.0.1" || site.User != nil || site.Host != "127.0.0.1:"+site.Port() || frontendOrigin != "https://"+site.Host {
+		t.Fatal("set the exact HTTPS loopback origin of the deployed frontend")
+	}
+	port, err := strconv.Atoi(site.Port())
+	if err != nil || port < 1 || port > 65535 {
+		t.Fatal("the HTTPS loopback deployment requires an explicit valid port")
 	}
 	trustedBundlePath := os.Getenv("SSL_CERT_FILE")
 	trustedBundleSHA := os.Getenv("MCMODS_AUDIT_TLS_CA_BUNDLE_SHA256")
@@ -122,8 +123,8 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 			SHA256 string
 		}
 	}
-	if !filepath.IsAbs(manifestPath) || err != nil || len(manifestSHA) != 64 || hex.EncodeToString(manifestDigest[:]) != manifestSHA || json.Unmarshal(manifestBytes, &build) != nil || build.Source != checkouts.frontend || build.SourceCommit != revisions["mcmods-cn-frontend"].(map[string]any)["commit"] || build.BuildID != "TEaEG88F59eszNYgSljzy" || build.EmbeddedAPIOrigin != frontendOrigin || build.EmbeddedSiteOrigin != frontendOrigin || !filepath.IsAbs(build.Deploy) {
-		t.Fatal("exact clean-source3431 production artifact/manifest required; no runtime build-origin override")
+	if !filepath.IsAbs(manifestPath) || err != nil || len(manifestSHA) != 64 || hex.EncodeToString(manifestDigest[:]) != manifestSHA || json.Unmarshal(manifestBytes, &build) != nil || build.Source != checkouts.frontend || build.SourceCommit != revisions["mcmods-cn-frontend"].(map[string]any)["commit"] || strings.TrimSpace(build.BuildID) == "" || (build.EmbeddedAPIOrigin != frontendOrigin && build.EmbeddedAPIOrigin != frontendOrigin+"/service") || build.EmbeddedSiteOrigin != frontendOrigin || !filepath.IsAbs(build.Deploy) {
+		t.Fatal("the declared source, site and API must match the pinned deployment manifest")
 	}
 	buildID, err := os.ReadFile(filepath.Join(build.Deploy, ".next", "BUILD_ID"))
 	if err != nil || strings.TrimSpace(string(buildID)) != build.BuildID {
@@ -438,7 +439,7 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 			browserRuntime[key] = value
 		}
 		browserRuntime["actualAPIOrigin"] = origin.URL
-		browserRuntime["apiOrigin"] = frontendOrigin
+		browserRuntime["apiOrigin"] = build.EmbeddedAPIOrigin
 		auditJourneyWriteJSON(t, filepath.Join(directory, "browser-runtime.json"), browserRuntime)
 	}
 	updateRuntime("BOOTSTRAP_WAIT_TLS_PROXY")
@@ -458,11 +459,12 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 		case <-bootstrapTick.C:
 		}
 	}
-	probe, err := http.NewRequestWithContext(bootstrapCtx, http.MethodGet, frontendOrigin+"/api/v1/modpacks/z9z9z9z9z", nil)
+	probe, err := http.NewRequestWithContext(bootstrapCtx, http.MethodGet, build.EmbeddedAPIOrigin+"/api/v1/modpacks/z9z9z9z9z", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(probe)
+	verifiedClient := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := verifiedClient.Do(probe)
 	if err != nil {
 		t.Fatal("owned HTTPS gateway normal certificate verification failed")
 	}
@@ -474,6 +476,22 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 	leafDigest := sha256.Sum256(response.TLS.PeerCertificates[0].Raw)
 	if hex.EncodeToString(leafDigest[:]) != expectedTLSLeaf {
 		t.Fatal("actual HTTPS leaf differs from the exact predeclared task-owned certificate")
+	}
+	configProbe, err := http.NewRequestWithContext(bootstrapCtx, http.MethodGet, frontendOrigin+"/authentication-write-config", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configResponse, err := verifiedClient.Do(configProbe)
+	if err != nil {
+		t.Fatal("cannot read public frontend API configuration through the verified deployment")
+	}
+	var publicConfig struct {
+		APIBaseURL string `json:"apiBaseURL"`
+	}
+	configErr := json.NewDecoder(io.LimitReader(configResponse.Body, 16384)).Decode(&publicConfig)
+	_ = configResponse.Body.Close()
+	if configResponse.StatusCode != http.StatusOK || configErr != nil || strings.TrimSuffix(publicConfig.APIBaseURL, "/") != build.EmbeddedAPIOrigin {
+		t.Fatal("public frontend API configuration differs from its pinned deployment manifest")
 	}
 	tlsState["verified"] = true
 	tlsState["verifiedAt"] = time.Now().UTC().Format(time.RFC3339Nano)

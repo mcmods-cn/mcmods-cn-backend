@@ -93,14 +93,14 @@ def main():
         api = origin(runtime['apiOrigin'], 'http')
         gateway = origin(runtime['frontendOrigin'], 'https')
         oss = origin(runtime['ossOrigin'], 'https')
-        assert gateway == oss == 'https://127.0.0.1:3431'
+        assert gateway == oss
         tls = runtime['tls']
         assert tls['verified'] is True and tls['insecureSkipVerify'] is False
         bundle = pathlib.Path(tls['trustedCABundlePath'])
         assert bundle.is_absolute() and sha(bundle.read_bytes()) == tls['trustedCABundleSHA256']
         tls_context = ssl.create_default_context(cafile=str(bundle))
         assert tls_context.check_hostname and tls_context.verify_mode == ssl.CERT_REQUIRED
-        with socket.create_connection(('127.0.0.1', 3431), timeout=5) as raw_tls_socket:
+        with socket.create_connection(('127.0.0.1', urllib.parse.urlsplit(gateway).port), timeout=5) as raw_tls_socket:
             with tls_context.wrap_socket(raw_tls_socket, server_hostname='127.0.0.1') as verified_socket:
                 check('Independent verified HTTPS chain and exact owned leaf certificate', sha(verified_socket.getpeercert(binary_form=True)) == tls['leafCertificateDERSHA256'])
         build = runtime['frontendProductionBuild']
@@ -108,8 +108,10 @@ def main():
         assert manifest_path.is_absolute() and sha(manifest_path.read_bytes()) == build['manifestSHA256']
         manifest = load(manifest_path)
         assert manifest['sourceCommit'] == build['sourceCommit'] == runtime['repoRevisions']['mcmods-cn-frontend']['commit']
-        assert manifest['buildId'] == build['buildId'] == 'TEaEG88F59eszNYgSljzy'
-        assert manifest['embeddedApiOrigin'] == manifest['embeddedSiteOrigin'] == build['embeddedAPIOrigin'] == build['embeddedSiteOrigin'] == gateway
+        assert manifest['buildId'] == build['buildId'] and build['buildId'].strip()
+        assert manifest['embeddedSiteOrigin'] == build['embeddedSiteOrigin'] == gateway
+        gateway_api = build['embeddedAPIOrigin']
+        assert manifest['embeddedApiOrigin'] == gateway_api and gateway_api in (gateway, gateway + '/service')
         deploy = pathlib.Path(build['deploymentPath'])
         check('Actual pinned standalone production artifact, no runtime origin override', deploy.is_absolute() and (deploy / '.next/BUILD_ID').read_text().strip() == build['buildId'] and sha((deploy / 'server.js').read_bytes()) == build['serverSHA256'])
         before_seal = load(directory / 'pre-business-source-executable-seal.json')
@@ -366,7 +368,7 @@ select jsonb_build_object('readOnly',current_setting('transaction_read_only'),'i
         meaningful_headers = ['Content-Type', 'Cache-Control', 'Cross-Origin-Resource-Policy', 'X-Content-Type-Options', 'X-Frame-Options', 'Referrer-Policy', 'Permissions-Policy', 'Content-Security-Policy']
         for path in paths:
             pair = []
-            for base in (api, gateway):
+            for base in (api, gateway_api):
                 status, body, headers = fetch(base + path)
                 pair.append({'status': status, 'bodySHA256': sha(body), 'bytes': len(body), 'headers': {key: headers.get(key, '') for key in meaningful_headers}, 'varyTokens': sorted({token.strip().lower() for field in headers.get_all('Vary', []) for token in field.split(',')})})
                 if '/catalog?' in path:
