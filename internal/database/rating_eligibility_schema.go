@@ -26,7 +26,7 @@ func ratingEligibilityStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_content_ratings_classify before insert or update on content_ratings
 			for each row execute function classify_rating()`,
-		`create function reclassify_user_popularity(actor_id bigint) returns void as $$
+		`create function reclassify_user_popularity(actor_id bigint,recheck_views boolean default true) returns void as $$
 		begin
 			perform 1 from users where id=actor_id for no key update;
 			-- A concurrent edit or a change of the other eligibility scope can
@@ -36,6 +36,11 @@ func ratingEligibilityStatements() []string {
 			where author_id=actor_id and counted is distinct from
 				(status='published' and content_popularity_actor_eligible(object_route_id,author_id));
 			perform reclassify_social_contributions(actor_id,null);
+			if recheck_views then
+				perform 1 from content_unique_views where viewer_user_id=actor_id order by object_route_id,viewer_hash for update;
+				update content_unique_views set counted=not counted where viewer_user_id=actor_id
+					and counted<>content_popularity_unique_view_eligible(object_route_id,actor_id);
+			end if;
 		end;
 		$$ language plpgsql`,
 		`create function reclassify_project_popularity(project_kind text,project_id bigint) returns void as $$
@@ -49,11 +54,14 @@ func ratingEligibilityStatements() []string {
 			where object_route_id=route_id and counted is distinct from
 				(status='published' and content_popularity_actor_eligible(object_route_id,author_id));
 			perform reclassify_social_contributions(null,route_id);
+			perform 1 from content_unique_views where object_route_id=route_id and viewer_user_id is not null order by viewer_hash for update;
+			update content_unique_views set counted=not counted where object_route_id=route_id and viewer_user_id is not null
+				and counted<>content_popularity_unique_view_eligible(route_id,viewer_user_id);
 		end;
 		$$ language plpgsql`,
 		`create function reclassify_popularity_from_account() returns trigger as $$
 		begin
-			perform reclassify_user_popularity(new.id);
+			perform reclassify_user_popularity(new.id,false);
 			return null;
 		end;
 		$$ language plpgsql`,

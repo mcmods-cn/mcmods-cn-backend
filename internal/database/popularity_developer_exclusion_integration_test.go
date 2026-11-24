@@ -125,6 +125,46 @@ func TestPopularityExcludesEveryEffectiveDeveloperIntegration(t *testing.T) {
 		t.Fatalf("rebuild global popularity facts: %v", err)
 	}
 	assertMultiDeveloperPopularityFacts(t, ctx, pool, routeID, "rebuild")
+	t.Run("returning viewer after a project role changes", func(t *testing.T) {
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		check := func(want int) {
+			t.Helper()
+			var incremental, actual int
+			err := tx.QueryRow(ctx, `select facts.unique_view_count,(select count(*) from content_unique_views v
+				where v.object_route_id=facts.object_route_id and content_popularity_unique_view_eligible(v.object_route_id,v.viewer_user_id))
+				from content_popularity_lifetime_facts facts where facts.object_route_id=$1`, routeID).Scan(&incremental, &actual)
+			if err != nil || incremental != want || actual != want {
+				t.Fatalf("project unique views=%d source=%d, want %d: %v", incremental, actual, want, err)
+			}
+		}
+		if _, err = tx.Exec(ctx, `update content_creator_bindings set permission_granting=false where id=957040`); err != nil {
+			t.Fatal(err)
+		}
+		check(2)
+		// This is the returning authenticated visitor upsert in recordContentRouteView.
+		if _, err = tx.Exec(ctx, `insert into content_unique_views(object_route_id,viewer_hash,viewer_user_id)
+			values ($1,decode(md5('bug057-dev-one'),'hex'),957001) on conflict(object_route_id,viewer_hash)
+			do update set last_seen_at=now(),viewer_user_id=coalesce(content_unique_views.viewer_user_id,excluded.viewer_user_id)`, routeID); err != nil {
+			t.Fatal(err)
+		}
+		check(2)
+		if _, err = tx.Exec(ctx, `update content_creator_bindings set permission_granting=true where id=957040`); err != nil {
+			t.Fatal(err)
+		}
+		check(1)
+		if _, err = tx.Exec(ctx, `update creator_claims set status='revoked' where id=957030`); err != nil {
+			t.Fatal(err)
+		}
+		check(2)
+		if _, err = tx.Exec(ctx, `update users set security_score=30 where id=957003`); err != nil {
+			t.Fatal(err)
+		}
+		check(2)
+	})
 	t.Run("existing ratings follow current eligibility", func(t *testing.T) {
 		exec := func(query string) {
 			t.Helper()

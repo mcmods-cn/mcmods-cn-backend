@@ -104,18 +104,38 @@ func popularityFactProjectionStatements() []string {
 		`create trigger trg_content_view_daily_popularity_facts
 			after insert or update of views or delete on content_view_daily
 			for each row execute function sync_content_view_popularity_fact()`,
-		`create or replace function sync_content_unique_view_popularity_fact() returns trigger as $$
-		declare old_count bigint:=0; new_count bigint:=0;
+		`create function classify_unique_view() returns trigger as $$
 		begin
-			if tg_op<>'INSERT' and content_popularity_unique_view_eligible(old.object_route_id,old.viewer_user_id) then old_count:=1; end if;
-			if tg_op<>'DELETE' and content_popularity_unique_view_eligible(new.object_route_id,new.viewer_user_id) then new_count:=1; end if;
-			if tg_op<>'INSERT' then perform adjust_content_popularity_lifetime_facts(old.object_route_id,-old_count,0,0,0,0,0,0,0); end if;
-			if tg_op<>'DELETE' then perform adjust_content_popularity_lifetime_facts(new.object_route_id,new_count,0,0,0,0,0,0,0); end if;
-			if tg_op='DELETE' then return old; end if; return new;
+			if tg_op='UPDATE' and (old.viewer_user_id,old.object_route_id,old.counted)
+				is not distinct from (new.viewer_user_id,new.object_route_id,new.counted) then return new; end if;
+			if new.viewer_user_id is not null and (tg_op='INSERT' or
+				(old.viewer_user_id,old.object_route_id) is distinct from (new.viewer_user_id,new.object_route_id)) then
+				perform 1 from users where id=new.viewer_user_id for share;
+				perform 1 from public_routes where id=new.object_route_id for share;
+			end if;
+			new.counted:=content_popularity_unique_view_eligible(new.object_route_id,new.viewer_user_id);
+			return new;
+		end;
+		$$ language plpgsql`,
+		`create trigger trg_content_unique_views_classify before insert or update of viewer_user_id,object_route_id,counted
+			on content_unique_views for each row execute function classify_unique_view()`,
+		`create or replace function sync_content_unique_view_popularity_fact() returns trigger as $$
+		begin
+			if tg_op='UPDATE' and (old.object_route_id,old.counted)=(new.object_route_id,new.counted) then return null; end if;
+			if tg_op<>'INSERT' and old.counted and exists(select 1 from public_routes where id=old.object_route_id) then
+				perform adjust_content_popularity_lifetime_facts(old.object_route_id,-1,0,0,0,0,0,0,0);
+			end if;
+			if tg_op<>'DELETE' and new.counted then
+				perform adjust_content_popularity_lifetime_facts(new.object_route_id,1,0,0,0,0,0,0,0);
+			end if;
+			if tg_op='UPDATE' and old.object_route_id=new.object_route_id then
+				perform enqueue_content_stats_refresh(new.object_route_id,true,true);
+			end if;
+			return null;
 		end;
 		$$ language plpgsql`,
 		`create trigger trg_content_unique_views_popularity_facts
-			after insert or update of viewer_user_id or delete on content_unique_views
+			after insert or update of viewer_user_id,object_route_id,counted or delete on content_unique_views
 			for each row execute function sync_content_unique_view_popularity_fact()`,
 		`create or replace function sync_content_project_page_popularity_fact() returns trigger as $$
 		begin

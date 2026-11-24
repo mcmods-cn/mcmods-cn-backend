@@ -46,6 +46,7 @@ func ratingSchemaStatements() []string {
 			object_route_id bigint not null references public_routes(id) on delete cascade,
 			viewer_hash bytea not null,
 			viewer_user_id bigint references users(id) on delete set null,
+			counted boolean not null default false,
 			first_seen_at timestamptz not null default now(),
 			last_seen_at timestamptz not null default now(),
 			primary key(object_route_id,viewer_hash)
