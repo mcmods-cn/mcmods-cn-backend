@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"errors"
-	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -32,6 +31,7 @@ type Server struct {
 	handler                        http.Handler
 	ygg                            *yggdrasilService
 	yggMu                          sync.RWMutex
+	yggPersisted                   *yggdrasilRuntime
 	natsConfigMu                   sync.Mutex
 	trustedProxies                 []*net.IPNet
 	serverProbe                    minecraftServerProbeFunc
@@ -70,13 +70,6 @@ func NewServer(ctx context.Context, cfg config.Config, db *pgxpool.Pool, queueCl
 		logShareBodyReads: make(chan struct{}, maxConcurrentLogShareBodyReads),
 	}
 	server.antiAbuse = antiabuse.New(ctx, cfg.AntiAbuse, db, server.cache)
-	yggdrasilConfig, err := server.loadYggdrasilConfig(context.Background())
-	if err != nil {
-		log.Printf("load Yggdrasil settings: %v; using environment configuration", err)
-	} else {
-		server.cfg.Yggdrasil = yggdrasilConfig
-	}
-	server.ygg = newYggdrasilService(server.cfg)
 	server.routes()
 	server.subscribeRealtimeBroadcast()
 	server.handler = server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.compression(server.logAccess(server.botTraffic(server.mux)))))))

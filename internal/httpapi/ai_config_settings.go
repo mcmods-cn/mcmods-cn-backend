@@ -3,8 +3,6 @@ package httpapi
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net"
@@ -84,10 +82,7 @@ func (s *Server) aiConfigFromSettings(ctx context.Context) aiConfigPayload {
 }
 
 func (setting aiConfigSetting) revision() string {
-	// Each encrypted write has a fresh nonce. Hash the database representation
-	// so key-only changes advance the revision without hashing any plaintext.
-	hash := sha256.Sum256(setting.encrypted)
-	return hex.EncodeToString(hash[:])
+	return encryptedSettingRevision(setting.encrypted)
 }
 
 func (setting aiConfigSetting) view() aiConfigView {

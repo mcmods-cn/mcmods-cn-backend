@@ -62,3 +62,10 @@ func TestGeneratedYggdrasilPrivateKeyRoundTrip(t *testing.T) {
 		t.Fatalf("generated signing key is too small: %d", key.N.BitLen())
 	}
 }
+
+func (s *Server) replaceYggdrasilRuntime(cfg config.YggdrasilConfig, service *yggdrasilService) {
+	s.yggMu.Lock()
+	defer s.yggMu.Unlock()
+	s.cfg.Yggdrasil = cloneYggdrasilConfig(cfg)
+	s.ygg = service
+}

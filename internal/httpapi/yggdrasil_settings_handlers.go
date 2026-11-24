@@ -2,13 +2,13 @@ package httpapi
 
 import (
 	"context"
+
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
-	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -37,11 +37,29 @@ type yggdrasilSettingsPayload struct {
 
 type updateYggdrasilSettingsRequest struct {
 	yggdrasilSettingsPayload
-	RotatePrivateKey bool `json:"rotatePrivateKey"`
+	RotatePrivateKey bool   `json:"rotatePrivateKey"`
+	Revision         string `json:"revision"`
 }
 
-func (s *Server) getYggdrasilConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.redactedYggdrasilConfig())
+type yggdrasilRuntime struct {
+	config   config.YggdrasilConfig
+	service  *yggdrasilService
+	revision string
+}
+
+type yggdrasilRequestRuntimeKey struct{}
+
+func writeYggdrasilSettingsUnavailable(w http.ResponseWriter) {
+	writeAPIError(w, http.StatusServiceUnavailable, "YGGDRASIL_SETTINGS_UNAVAILABLE", "Yggdrasil settings are temporarily unavailable", 0, nil)
+}
+
+func (s *Server) getYggdrasilConfig(w http.ResponseWriter, r *http.Request) {
+	runtime, err := s.readYggdrasilRuntime(r.Context(), s.db)
+	if err != nil {
+		writeYggdrasilSettingsUnavailable(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, runtime.redacted())
 }
 
 func (s *Server) updateYggdrasilConfig(w http.ResponseWriter, r *http.Request) {
@@ -50,8 +68,30 @@ func (s *Server) updateYggdrasilConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid Yggdrasil settings")
 		return
 	}
-
-	current, service := s.yggdrasilRuntimeSnapshot()
+	if request.Revision == "" {
+		writeAPIError(w, http.StatusPreconditionRequired, "YGGDRASIL_CONFIG_REVISION_REQUIRED", "read the current Yggdrasil settings before saving", 0, nil)
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		writeYggdrasilSettingsUnavailable(w)
+		return
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, yggdrasilSettingKey); err != nil {
+		writeYggdrasilSettingsUnavailable(w)
+		return
+	}
+	current, err := s.readYggdrasilRuntime(ctx, tx)
+	if err != nil {
+		writeYggdrasilSettingsUnavailable(w)
+		return
+	}
+	if request.Revision != current.revision {
+		writeAPIError(w, http.StatusConflict, "YGGDRASIL_CONFIG_CONFLICT", "Yggdrasil settings changed since they were read", 0, nil)
+		return
+	}
 	next := yggdrasilConfigFromPayload(request.yggdrasilSettingsPayload)
 	if request.RotatePrivateKey {
 		encoded, err := generateYggdrasilPrivateKey()
@@ -61,9 +101,9 @@ func (s *Server) updateYggdrasilConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		next.PrivateKeyBase64 = encoded
 	} else if strings.TrimSpace(next.PrivateKeyBase64) == "" {
-		next.PrivateKeyBase64 = current.PrivateKeyBase64
-		if next.PrivateKeyBase64 == "" && service != nil && service.privateKey != nil {
-			encoded, err := encodeYggdrasilPrivateKey(service.privateKey)
+		next.PrivateKeyBase64 = current.config.PrivateKeyBase64
+		if next.PrivateKeyBase64 == "" && current.service != nil && current.service.privateKey != nil {
+			encoded, err := encodeYggdrasilPrivateKey(current.service.privateKey)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to preserve Yggdrasil signing key")
 				return
@@ -97,47 +137,63 @@ func (s *Server) updateYggdrasilConfig(w http.ResponseWriter, r *http.Request) {
 
 	sealed, err := s.sealSystemSetting(yggdrasilPayloadFromConfig(next))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid Yggdrasil settings")
+		writeYggdrasilSettingsUnavailable(w)
 		return
 	}
-	if _, err = s.db.Exec(r.Context(), `insert into system_settings(key,value,updated_by,updated_at)
+	var stored []byte
+	if err = tx.QueryRow(ctx, `insert into system_settings(key,value,updated_by,updated_at)
 		values($1,$2::jsonb,$3,now()) on conflict(key) do update set value=excluded.value,
-		updated_by=excluded.updated_by,updated_at=now()`, yggdrasilSettingKey, sealed, currentClaims(r).Subject); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save Yggdrasil settings")
+		updated_by=excluded.updated_by,updated_at=now() returning value`, yggdrasilSettingKey, sealed, currentClaims(r).Subject).Scan(&stored); err != nil || tx.Commit(ctx) != nil {
+		writeYggdrasilSettingsUnavailable(w)
 		return
 	}
-
-	s.replaceYggdrasilRuntime(next, nextService)
-	s.writeAppLog(r.Context(), "admin_operation", "info", "update_yggdrasil_config", next.ServerName, currentClaims(r).Subject, r, http.StatusOK, 0, map[string]any{
-		"enabled":           next.Enabled,
-		"rotatedSigningKey": request.RotatePrivateKey,
+	s.writeAppLog(ctx, "admin_operation", "info", "update_yggdrasil_config", next.ServerName, currentClaims(r).Subject, r, http.StatusOK, 0, map[string]any{
+		"enabled": next.Enabled, "rotatedSigningKey": request.RotatePrivateKey,
 	})
-	writeJSON(w, http.StatusOK, s.redactedYggdrasilConfig())
+	receipt := yggdrasilRuntime{config: next, service: nextService, revision: encryptedSettingRevision(stored)}
+	writeJSON(w, http.StatusOK, receipt.redacted())
 }
 
-func (s *Server) loadYggdrasilConfig(ctx context.Context) (config.YggdrasilConfig, error) {
-	fallback := cloneYggdrasilConfig(s.cfg.Yggdrasil)
+// The database selects the active document for each request. Only RSA parsing
+// and decryption are cached, by the exact revision that was just read.
+func (s *Server) readYggdrasilRuntime(ctx context.Context, reader databaseQuery) (*yggdrasilRuntime, error) {
 	var stored []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key=$1`, yggdrasilSettingKey).Scan(&stored)
+	err := reader.QueryRow(ctx, `select value from system_settings where key=$1`, yggdrasilSettingKey).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fallback, nil
+		cfg, service := s.yggdrasilRuntimeSnapshot()
+		return &yggdrasilRuntime{config: cfg, service: service, revision: encryptedSettingRevision(nil)}, nil
 	}
 	if err != nil {
-		return fallback, err
+		return nil, err
+	}
+	revision := encryptedSettingRevision(stored)
+	s.yggMu.Lock()
+	defer s.yggMu.Unlock()
+	if cached := s.yggPersisted; cached != nil && cached.revision == revision {
+		return cached, nil
 	}
 	var payload yggdrasilSettingsPayload
 	if err = s.openSystemSetting(stored, &payload); err != nil {
-		return fallback, fmt.Errorf("decrypt Yggdrasil settings: %w", err)
+		return nil, err
 	}
-	loaded := yggdrasilConfigFromPayload(payload)
-	if err = normalizeYggdrasilConfig(&loaded, s.cfg.Env); err != nil {
-		return fallback, err
+	cfg := yggdrasilConfigFromPayload(payload)
+	if err = normalizeYggdrasilConfig(&cfg, s.cfg.Env); err != nil {
+		return nil, err
 	}
-	return loaded, nil
+	if cfg.Enabled && cfg.PrivateKeyBase64 == "" {
+		return nil, errors.New("stored Yggdrasil signing key is missing")
+	}
+	service := newYggdrasilService(config.Config{Env: s.cfg.Env, Yggdrasil: cfg})
+	if cfg.Enabled && service.disabledReason != nil {
+		return nil, service.disabledReason
+	}
+	runtime := &yggdrasilRuntime{config: cfg, service: service, revision: revision}
+	s.yggPersisted = runtime
+	return runtime, nil
 }
 
-func (s *Server) redactedYggdrasilConfig() map[string]any {
-	cfg, service := s.yggdrasilRuntimeSnapshot()
+func (runtime *yggdrasilRuntime) redacted() map[string]any {
+	cfg, service := runtime.config, runtime.service
 	trustedProxyCIDRs := append([]string{}, cfg.TrustedProxyCIDRs...)
 	available := cfg.Enabled && service != nil && service.privateKey != nil && service.disabledReason == nil
 	disabledReason := ""
@@ -145,6 +201,7 @@ func (s *Server) redactedYggdrasilConfig() map[string]any {
 		disabledReason = service.disabledReason.Error()
 	}
 	return map[string]any{
+		"revision":             runtime.revision,
 		"enabled":              cfg.Enabled,
 		"publicBaseUrl":        cfg.PublicBaseURL,
 		"textureBaseUrl":       cfg.TextureBaseURL,
@@ -269,14 +326,17 @@ func cloneYggdrasilConfig(cfg config.YggdrasilConfig) config.YggdrasilConfig {
 }
 
 func (s *Server) yggdrasilRuntimeSnapshot() (config.YggdrasilConfig, *yggdrasilService) {
-	s.yggMu.RLock()
-	defer s.yggMu.RUnlock()
+	s.yggMu.Lock()
+	defer s.yggMu.Unlock()
+	if s.ygg == nil {
+		s.ygg = newYggdrasilService(config.Config{Env: s.cfg.Env, Yggdrasil: s.cfg.Yggdrasil})
+	}
 	return cloneYggdrasilConfig(s.cfg.Yggdrasil), s.ygg
 }
 
-func (s *Server) replaceYggdrasilRuntime(cfg config.YggdrasilConfig, service *yggdrasilService) {
-	s.yggMu.Lock()
-	defer s.yggMu.Unlock()
-	s.cfg.Yggdrasil = cloneYggdrasilConfig(cfg)
-	s.ygg = service
+func (s *Server) yggdrasilRequestSettings(ctx context.Context) (config.YggdrasilConfig, *yggdrasilService) {
+	if runtime, ok := ctx.Value(yggdrasilRequestRuntimeKey{}).(*yggdrasilRuntime); ok {
+		return runtime.config, runtime.service
+	}
+	return s.yggdrasilRuntimeSnapshot()
 }

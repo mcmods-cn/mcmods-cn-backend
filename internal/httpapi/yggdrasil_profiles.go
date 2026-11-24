@@ -50,7 +50,7 @@ func (s *Server) buildPublicYggdrasilProfile(ctx context.Context, profileID int6
 }
 
 func (s *Server) buildYggdrasilProfileRecord(ctx context.Context, profile yggdrasilProfileRecord, signed bool) (yggdrasilProfile, error) {
-	yggdrasilConfig, service := s.yggdrasilRuntimeSnapshot()
+	yggdrasilConfig, service := s.yggdrasilRequestSettings(ctx)
 	unsignedID, ok := unsignedYggdrasilUUID(profile.UUID)
 	if !ok {
 		return yggdrasilProfile{}, errors.New("invalid profile UUID in database")
@@ -246,7 +246,7 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilInternalError(w)
 		return
 	}
-	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+	yggdrasilConfig, _ := s.yggdrasilRequestSettings(r.Context())
 	maximum := yggdrasilConfig.TextureMaxBytes
 	if maximum <= 0 {
 		maximum = 2 * 1024 * 1024

@@ -312,7 +312,7 @@ func (s *Server) yggdrasilRefresh(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilInternalError(w)
 		return
 	}
-	ttl := s.yggdrasilTokenTTL()
+	ttl := s.yggdrasilTokenTTL(r.Context())
 	var newID int64
 	var selectedProfileIDValue any
 	if selectedProfileID.Valid {
@@ -576,7 +576,7 @@ func (s *Server) issueYggdrasilToken(ctx context.Context, userID int64, profile 
 		`insert into yggdrasil_tokens
 		 (access_token_hash,user_id,player_profile_id,client_token,status,issued_at,expires_at,ip,user_agent)
 		 values ($1,$2,$3,$4,'active',now(),$5,$6,$7)`,
-		tokenHash, userID, profileID, clientToken, time.Now().Add(s.yggdrasilTokenTTL()), ip, userAgent)
+		tokenHash, userID, profileID, clientToken, time.Now().Add(s.yggdrasilTokenTTL(ctx)), ip, userAgent)
 	if err != nil {
 		return "", nil, err
 	}
@@ -593,7 +593,7 @@ func (s *Server) issueYggdrasilToken(ctx context.Context, userID int64, profile 
 }
 
 func (s *Server) revokeExcessYggdrasilTokensTx(ctx context.Context, tx pgx.Tx, userID int64) error {
-	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+	yggdrasilConfig, _ := s.yggdrasilRequestSettings(ctx)
 	maximum := yggdrasilConfig.MaxTokens
 	if maximum <= 0 {
 		maximum = 10
@@ -617,7 +617,7 @@ func yggdrasilIssueRateLimitedTx(ctx context.Context, tx pgx.Tx, userID int64) (
 }
 
 func (s *Server) pruneYggdrasilTokenHistoryTx(ctx context.Context, tx pgx.Tx, userID int64) error {
-	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+	yggdrasilConfig, _ := s.yggdrasilRequestSettings(ctx)
 	limit := yggdrasilConfig.MaxTokens * 5
 	if limit < 100 {
 		limit = 100
@@ -634,8 +634,8 @@ func (s *Server) pruneYggdrasilTokenHistoryTx(ctx context.Context, tx pgx.Tx, us
 	return err
 }
 
-func (s *Server) yggdrasilTokenTTL() time.Duration {
-	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+func (s *Server) yggdrasilTokenTTL(ctx context.Context) time.Duration {
+	yggdrasilConfig, _ := s.yggdrasilRequestSettings(ctx)
 	if yggdrasilConfig.TokenTTL <= 0 {
 		return 15 * 24 * time.Hour
 	}

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -78,7 +79,7 @@ func (s *Server) yggdrasilJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientIP := s.yggdrasilClientLocation(r).IP
-	expiresAt := time.Now().Add(s.yggdrasilJoinTTL())
+	expiresAt := time.Now().Add(s.yggdrasilJoinTTL(r.Context()))
 	command, err := tx.Exec(r.Context(),
 		`insert into yggdrasil_join_sessions
 		 (server_id,token_id,player_profile_id,client_ip,expires_at,created_at)
@@ -166,8 +167,8 @@ func (s *Server) yggdrasilHasJoined(w http.ResponseWriter, r *http.Request) {
 	writeYggdrasilJSON(w, http.StatusOK, profile)
 }
 
-func (s *Server) yggdrasilJoinTTL() time.Duration {
-	yggdrasilConfig, _ := s.yggdrasilRuntimeSnapshot()
+func (s *Server) yggdrasilJoinTTL(ctx context.Context) time.Duration {
+	yggdrasilConfig, _ := s.yggdrasilRequestSettings(ctx)
 	if yggdrasilConfig.JoinTTL <= 0 {
 		return 30 * time.Second
 	}

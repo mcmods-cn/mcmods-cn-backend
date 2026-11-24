@@ -254,8 +254,17 @@ func (s *Server) yggdrasilRoutes() {
 
 func (s *Server) requireYggdrasilService(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		_, service := s.yggdrasilRuntimeSnapshot()
-		if service == nil || service.privateKey == nil || service.disabledReason != nil {
+		runtime, ok := r.Context().Value(yggdrasilRequestRuntimeKey{}).(*yggdrasilRuntime)
+		if !ok {
+			var err error
+			runtime, err = s.readYggdrasilRuntime(r.Context(), s.db)
+			if err != nil {
+				writeYggdrasilError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication service is unavailable.", "")
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), yggdrasilRequestRuntimeKey{}, runtime))
+		}
+		if runtime.service == nil || runtime.service.privateKey == nil || runtime.service.disabledReason != nil {
 			writeYggdrasilError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication service is unavailable.", "")
 			return
 		}
@@ -265,23 +274,27 @@ func (s *Server) requireYggdrasilService(next http.HandlerFunc) http.HandlerFunc
 
 func (s *Server) yggdrasilALI(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cfg, service := s.yggdrasilRuntimeSnapshot()
-		if (r.URL.Path == "/" || r.URL.Path == "/api/yggdrasil" || r.URL.Path == "/api/yggdrasil/") &&
-			service != nil && service.privateKey != nil && service.disabledReason == nil {
-			w.Header().Set("X-Authlib-Injector-API-Location", normalizedYggdrasilBaseURL(cfg.PublicBaseURL))
+		if r.URL.Path == "/" || r.URL.Path == "/api/yggdrasil" || r.URL.Path == "/api/yggdrasil/" {
+			runtime, err := s.readYggdrasilRuntime(r.Context(), s.db)
+			if err == nil {
+				r = r.WithContext(context.WithValue(r.Context(), yggdrasilRequestRuntimeKey{}, runtime))
+				if service := runtime.service; service != nil && service.privateKey != nil && service.disabledReason == nil {
+					w.Header().Set("X-Authlib-Injector-API-Location", normalizedYggdrasilBaseURL(runtime.config.PublicBaseURL))
+				}
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (s *Server) yggdrasilMetadata(w http.ResponseWriter, _ *http.Request) {
-	cfg, service := s.yggdrasilRuntimeSnapshot()
+func (s *Server) yggdrasilMetadata(w http.ResponseWriter, r *http.Request) {
+	cfg, service := s.yggdrasilRequestSettings(r.Context())
 	textureBase := normalizedYggdrasilBaseURL(cfg.TextureBaseURL)
 	skinDomains := make([]string, 0, 1)
 	if parsed, err := url.Parse(textureBase); err == nil && parsed.Hostname() != "" {
 		skinDomains = append(skinDomains, parsed.Hostname())
 	}
-	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.Header().Set("Cache-Control", "no-cache")
 	writeYggdrasilJSON(w, http.StatusOK, map[string]any{
 		"meta": map[string]any{
 			"serverName":            defaultString(strings.TrimSpace(cfg.ServerName), "Mcmods-cn"),
@@ -415,7 +428,7 @@ func (s *Server) yggdrasilUserAllowed(ctx context.Context, userID int64) bool {
 func (s *Server) yggdrasilClientLocation(r *http.Request) clientLocation {
 	peer := normalizeIPAddress(remoteIP(r.RemoteAddr))
 	parsedPeer := net.ParseIP(peer)
-	_, service := s.yggdrasilRuntimeSnapshot()
+	_, service := s.yggdrasilRequestSettings(r.Context())
 	if service == nil || parsedPeer == nil || !service.isTrustedProxy(parsedPeer) {
 		return clientLocation{IP: peer}
 	}

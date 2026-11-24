@@ -25,3 +25,28 @@ Skin metadata revisions read review configuration through their existing write
 transaction. They do not acquire a second pool connection while holding the
 asset and user locks. A PostgreSQL regression verifies successful persistence
 with a one-connection pool; the review policy itself remains unchanged.
+
+## Signing configuration across API instances
+
+The administrator reads `GET /api/v1/admin/config/yggdrasil` before saving.
+Send the returned `revision` with the editable fields in the PUT. A missing
+revision returns 428. A competing save or rotation returns 409 and preserves
+the stored settings. Reload before choosing which edits to submit. An empty
+private-key field keeps the current signing key. Replacing it or requesting
+rotation changes the public key. Neither administrator response includes the
+private key.
+
+Each launcher protocol request reads the current encrypted setting from the
+primary database. All steps of that request use its selected configuration.
+Each API process caches RSA parsing by the exact stored revision. The public
+metadata response requires cache revalidation. An unreadable stored setting
+returns 503 for the launcher's signed API and the configuration panel. Public
+texture downloads continue to apply their independent asset visibility rules.
+
+Before the first administrative save, enabled API instances in production
+need the same `YGGDRASIL_PRIVATE_KEY_BASE64` and endpoint settings. Development
+can use a process-local temporary key. All instances need the same settings
+encryption key to read a saved configuration. Deploy the API and its admin UI
+together. On a mixed-version rollout, keep signing configuration unchanged
+until every API instance and admin client supports revisions. Existing client
+metadata cached under the previous policy may last for its prior five-minute TTL.

@@ -109,6 +109,11 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "OSS_SETTINGS_UNAVAILABLE", "OSS settings are temporarily unavailable", 0, nil)
 		return
 	}
+	yggdrasil, err := s.readYggdrasilRuntime(r.Context(), s.db)
+	if err != nil {
+		writeYggdrasilSettingsUnavailable(w)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"general":   general,
 		"auth":      s.adminAuthMethods(),
@@ -117,7 +122,7 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		"oss":       redactOSSConfig(oss),
 		"markdown":  normalizeMarkdownConfig(markdown),
 		"profile":   normalizeProfileConfig(profile),
-		"yggdrasil": s.redactedYggdrasilConfig(),
+		"yggdrasil": yggdrasil.redacted(),
 		"ai":        aiCfg.view(),
 		"permissions": map[string]any{
 			"mode":              "RBAC + user override",

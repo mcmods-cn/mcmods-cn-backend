@@ -172,7 +172,12 @@ type skinRowScanner interface {
 func (s *Server) skinService(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	w.Header().Set("Cache-Control", "private, no-store")
-	yggdrasilConfig, service := s.yggdrasilRuntimeSnapshot()
+	runtime, err := s.readYggdrasilRuntime(r.Context(), s.db)
+	if err != nil {
+		writeYggdrasilSettingsUnavailable(w)
+		return
+	}
+	yggdrasilConfig, service := runtime.config, runtime.service
 	serviceEnabled := service != nil && service.privateKey != nil && service.disabledReason == nil
 	serverName := strings.TrimSpace(yggdrasilConfig.ServerName)
 	if serverName == "" {
