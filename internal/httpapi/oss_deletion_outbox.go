@@ -159,19 +159,17 @@ func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeleti
 	if job.RawUploadBindingID != nil {
 		return worker.deleteOriginalUpload(ctx, job, cfg)
 	}
+	if job.Reason == externalImageExpiryReason && job.FileID != nil {
+		remove, err := worker.retireExternalImage(ctx, job)
+		if err != nil || !remove {
+			return err
+		}
+	}
 	tx, err := worker.server.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin OSS deletion lease guard: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	expiry := job.Reason == externalImageExpiryReason && job.FileID != nil
-	var fileStatus, scanStatus string
-	if expiry {
-		err = tx.QueryRow(ctx, `select status,scan_status from oss_files where id=$1 and bucket=$2 and object_key=$3 for update`, *job.FileID, job.Bucket, job.ObjectKey).Scan(&fileStatus, &scanStatus)
-		if err != nil {
-			return err
-		}
-	}
 	var ownedID int64
 	err = tx.QueryRow(ctx, `select id from oss_object_deletion_outbox
 		where id=$1 and status='processing' and locked_by=$2 for share`, job.ID, job.LockToken).Scan(&ownedID)
@@ -180,17 +178,6 @@ func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeleti
 	}
 	if err != nil {
 		return fmt.Errorf("lock OSS deletion lease: %w", err)
-	}
-	if expiry {
-		switch {
-		case fileStatus == "pending" && scanStatus == "pending":
-			if _, err = tx.Exec(ctx, `update oss_files set status='deleted',updated_at=now() where id=$1`, *job.FileID); err != nil {
-				return err
-			}
-		case fileStatus == "deleted":
-		default:
-			return nil
-		}
 	}
 	// Keep the current lease locked through the provider side effect. Fencing
 	// only complete() cannot stop an expired worker deleting a reused object key.
@@ -224,10 +211,40 @@ func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeleti
 		Bucket: aliyunoss.Ptr(cfg.Bucket),
 		Key:    aliyunoss.Ptr(job.ObjectKey),
 	})
-	if err == nil && expiry {
-		return tx.Commit(ctx)
-	}
 	return err
+}
+
+// Retire the key durably before the provider call. A delete can succeed remotely
+// even when its response is lost; any subsequent import must use a fresh key.
+func (worker *OSSDeletionWorker) retireExternalImage(ctx context.Context, job ossDeletionJob) (bool, error) {
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var status, scan string
+	if err = tx.QueryRow(ctx, `select status,scan_status from oss_files where id=$1 and bucket=$2 and object_key=$3 for update`, *job.FileID, job.Bucket, job.ObjectKey).Scan(&status, &scan); err != nil {
+		return false, err
+	}
+	var id int64
+	err = tx.QueryRow(ctx, `select id from oss_object_deletion_outbox where id=$1 and status='processing' and locked_by=$2 for share`, job.ID, job.LockToken).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, errOSSDeletionLeaseLost
+	}
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case status == "deleted":
+		return true, nil
+	case status == "pending" && scan == "pending":
+		if _, err = tx.Exec(ctx, `update oss_files set status='deleted',updated_at=now() where id=$1`, *job.FileID); err != nil {
+			return false, err
+		}
+		return true, tx.Commit(ctx)
+	default:
+		return false, nil
+	}
 }
 
 type ossDeletionFailureDecision struct {

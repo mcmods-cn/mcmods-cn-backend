@@ -63,6 +63,18 @@ func TestExternalAvatarKeepsIndependentUploadersAndRecoversInterruptedRegistrati
 	if err != nil || job.FileID == nil || *job.FileID != expiredID {
 		t.Fatalf("scheduled cleanup selected another file: %v", err)
 	}
+	// Simulate loss of the first deletion acknowledgement after retirement.
+	// A replacement must receive a new key while the old job is still live.
+	if retired, err := worker.retireExternalImage(f.ctx, job); err != nil || !retired {
+		t.Fatalf("cannot start expiry: %v", err)
+	}
+	if _, err := f.db.Exec(f.ctx, `drop trigger pause_import_activation on oss_files`); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := fetch(third)
+	if err != nil || replacement.FileInternalID == expiredID || len(f.objects()) != 3 {
+		t.Fatalf("replacement reused outstanding deletion: %v", err)
+	}
 	if err = worker.deleteObject(f.ctx, job); err != nil {
 		t.Fatal(err)
 	}
@@ -73,22 +85,19 @@ func TestExternalAvatarKeepsIndependentUploadersAndRecoversInterruptedRegistrati
 		t.Fatal("expired upload still exists in object storage")
 	}
 
-	if _, err := f.db.Exec(f.ctx, `drop trigger pause_import_activation on oss_files`); err != nil {
-		t.Fatal(err)
-	}
 	a, err := fetch(first)
 	if err != nil {
 		t.Fatal(err)
 	}
 	same, err := fetch(first)
-	if err != nil || same != a || len(f.objects()) != 1 {
+	if err != nil || same != a || len(f.objects()) != 2 {
 		t.Fatalf("repeat changed the first receipt or bytes: %v", err)
 	}
 	b, err := fetch(second)
-	if err != nil || a.FileInternalID == b.FileInternalID || a.URL == b.URL || len(f.objects()) != 2 {
+	if err != nil || a.FileInternalID == b.FileInternalID || a.URL == b.URL || len(f.objects()) != 3 {
 		t.Fatalf("second submission did not receive an independent image: %v", err)
 	}
-	replacement, err := fetch(third)
+	replacement, err = fetch(third)
 	if err != nil || replacement.FileInternalID == expiredID || replacement.URL == "" || len(f.objects()) != 3 {
 		t.Fatalf("new private import after expiry did not obtain its own live key: %v", err)
 	}
