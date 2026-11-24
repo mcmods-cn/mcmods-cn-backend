@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"mcmods-cn-backend/internal/activity"
 	appconfig "mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/security"
@@ -349,4 +350,73 @@ func newTEST040IsolatedDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool
 		t.Fatal(err)
 	}
 	return pool
+}
+
+func TestConcurrentFirstRatingCountsOneCreation(t *testing.T) {
+	f := newTEST013Fixture(t)
+	s := f.origin.Config.Handler.(*Server)
+	authorID := f.userIDs[f.denied]
+	grantTEST044Permissions(t, f.ctx, f.db, authorID, "rating.create")
+	if _, err := f.db.Exec(f.ctx, "update users set security_score=100 where id=$1", authorID); err != nil {
+		t.Fatal(err)
+	}
+	// Pause the first successful writer before commit while the second writer
+	// is active. Both submit an ordinary first rating for the same project.
+	gate, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Rollback(f.ctx)
+	if _, err = gate.Exec(f.ctx, "lock table activity_event_outbox in share mode"); err != nil {
+		t.Fatal(err)
+	}
+	handler := s.requirePermission("rating.create", s.ratingItem)
+	responses := make(chan *httptest.ResponseRecorder, 2)
+	for _, score := range []int{3, 5} {
+		payload := test040RatingPayload(t, score)
+		go func() {
+			responses <- performTEST040RatingRequest(t, f.ctx, f.denied, handler, http.MethodPut, "mod", f.modCode, payload)
+		}()
+	}
+	for {
+		var waiting int
+		if err = f.db.QueryRow(f.ctx, `select count(*) from pg_stat_activity
+			where datname=current_database() and wait_event_type='Lock'`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting == 2 {
+			break
+		}
+		select {
+		case response := <-responses:
+			t.Fatalf("rating returned before controlled overlap: %d %s", response.Code, response.Body.String())
+		case <-f.ctx.Done():
+			t.Fatal(f.ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err = gate.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		select {
+		case response := <-responses:
+			if response.Code != http.StatusOK {
+				t.Fatalf("concurrent save=%d %s", response.Code, response.Body.String())
+			}
+		case <-f.ctx.Done():
+			t.Fatal(f.ctx.Err())
+		}
+	}
+	var snapshots, projected, created, edited int
+	if err = f.db.QueryRow(f.ctx, `select (select count(*) from content_ratings where object_route_id=route.id and author_id=$2),
+		facts.rating_count,(select count(*) from activity_event_outbox where user_id=$2 and object_public_id=$1 and action_id=$3),
+		(select count(*) from activity_event_outbox where user_id=$2 and object_public_id=$1 and action_id=$4)
+		from public_routes route join content_popularity_lifetime_facts facts on facts.object_route_id=route.id
+		where route.entity_type='mod' and route.public_id=$1`, f.modCode, authorID, activity.ActionCreate, activity.ActionEdit).Scan(&snapshots, &projected, &created, &edited); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 1 || projected != 1 || created != 1 || edited != 1 {
+		t.Fatalf("ratings=%d projected ratings=%d create events=%d edit events=%d, want one of each", snapshots, projected, created, edited)
+	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -152,43 +153,46 @@ func (s *Server) ratingItem(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to resolve rating target")
 		return
 	}
-	if r.Method == http.MethodDelete {
-		s.deleteRating(w, r, target)
-		return
-	}
 	var request ratingUpsertRequest
-	if err = decodeJSON(r, &request); err != nil {
-		writeError(w, http.StatusBadRequest, "rating payload is invalid")
-		return
+	if r.Method != http.MethodDelete {
+		if err = decodeJSON(r, &request); err != nil {
+			writeError(w, http.StatusBadRequest, "rating payload is invalid")
+			return
+		}
+		request.Message = strings.TrimSpace(request.Message)
+		if err = validateRatingRequest(target.Type, request); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
-	request.Message = strings.TrimSpace(request.Message)
-	if err = validateRatingRequest(target.Type, request); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to begin rating update")
+		writeError(w, http.StatusInternalServerError, "failed to begin rating change")
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var existingID int64
-	var item ratingItemResponse
-	err = tx.QueryRow(r.Context(), `update content_ratings set overall_score=$3,message=$4,status='published',updated_at=now()
-		where object_route_id=$1 and author_id=$2
-		returning id,public_id,overall_score,message,created_at,updated_at`, target.RouteID, currentClaims(r).Subject,
-		request.OverallScore, request.Message).Scan(&item.ID, &item.PublicID, &item.OverallScore, &item.Message, &item.CreatedAt, &item.UpdatedAt)
-	if err == nil {
-		existingID = item.ID
-	} else if errors.Is(err, pgx.ErrNoRows) {
-		err = tx.QueryRow(r.Context(), `insert into content_ratings(object_route_id,author_id,overall_score,message)
-			values($1,$2,$3,$4)
-			on conflict(object_route_id,author_id) do update set
-				overall_score=excluded.overall_score,message=excluded.message,status='published',updated_at=now()
-			returning id,public_id,overall_score,message,created_at,updated_at`, target.RouteID, currentClaims(r).Subject,
-			request.OverallScore, request.Message).Scan(&item.ID, &item.PublicID, &item.OverallScore, &item.Message, &item.CreatedAt, &item.UpdatedAt)
+	authorID := currentClaims(r).Subject
+	// This key also serializes the first rating, when there is no row to lock.
+	if err = lockContentAggregateTx(r.Context(), tx, "rating", fmt.Sprintf("%d:%d", target.RouteID, authorID)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock rating")
+		return
 	}
+	if r.Method == http.MethodDelete {
+		deleteRating(w, r, tx, target)
+		return
+	}
+	var created bool
+	var item ratingItemResponse
+	// The BEFORE triggers update popularity facts. MERGE runs only the trigger
+	// for the chosen action, including when a concurrent writer created the row.
+	err = tx.QueryRow(r.Context(), `merge into content_ratings as rating
+		using (values ($1::bigint,$2::bigint)) as input(route_id,user_id)
+		on rating.object_route_id=input.route_id and rating.author_id=input.user_id
+		when matched then update set overall_score=$3,message=$4,status='published',updated_at=now()
+		when not matched then insert(object_route_id,author_id,overall_score,message) values(input.route_id,input.user_id,$3,$4)
+		returning merge_action()='INSERT',rating.id,rating.public_id,rating.overall_score,rating.message,rating.created_at,rating.updated_at`,
+		target.RouteID, authorID, request.OverallScore, request.Message).
+		Scan(&created, &item.ID, &item.PublicID, &item.OverallScore, &item.Message, &item.CreatedAt, &item.UpdatedAt)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save rating")
 		return
@@ -204,11 +208,11 @@ func (s *Server) ratingItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	actionID := activity.ActionCreate
-	if existingID > 0 {
-		actionID = activity.ActionEdit
+	actionID := activity.ActionEdit
+	if created {
+		actionID = activity.ActionCreate
 	}
-	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: currentClaims(r).Subject, ActionID: actionID,
+	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: authorID, ActionID: actionID,
 		ObjectTypeID: activity.ObjectRating, ObjectPublicID: target.PublicID}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to persist rating activity")
 		return
@@ -222,13 +226,7 @@ func (s *Server) ratingItem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-func (s *Server) deleteRating(w http.ResponseWriter, r *http.Request, target rateableTarget) {
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to begin rating deletion")
-		return
-	}
-	defer tx.Rollback(r.Context())
+func deleteRating(w http.ResponseWriter, r *http.Request, tx pgx.Tx, target rateableTarget) {
 	result, err := tx.Exec(r.Context(), `delete from content_ratings where object_route_id=$1 and author_id=$2`,
 		target.RouteID, currentClaims(r).Subject)
 	if err != nil {
