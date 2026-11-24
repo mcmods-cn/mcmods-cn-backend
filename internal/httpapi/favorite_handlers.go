@@ -426,6 +426,8 @@ func (s *Server) favoriteMembershipSummary(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// Membership writes are serialized for the user. Apply one collection change
+// per statement so AFTER-row popularity triggers observe each transition.
 func (s *Server) patchFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 	var request favoriteMembershipDeltaRequest
 	if decodeJSON(r, &request) != nil {
@@ -625,8 +627,6 @@ func recordFavoriteMembershipActivity(r *http.Request, tx pgx.Tx, changed bool) 
 	return enqueueRequestActivityTx(r, tx)
 }
 
-// Membership writes are serialized for the user. Apply one collection change
-// per statement so AFTER-row popularity triggers observe each transition.
 func favoriteMembershipCollectionIDsTx(ctx context.Context, tx pgx.Tx, userID int64, entityType string, entityID int64) ([]string, error) {
 	rows, err := tx.Query(ctx, `select collection.public_id from favorite_collection_items item
 		join favorite_collections collection on collection.id=item.collection_id

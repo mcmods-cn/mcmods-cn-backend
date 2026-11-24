@@ -25,6 +25,8 @@ Mod 修订历史、比较和提交/审核响应也采用相同约束。签名只
 比较的语义内容不变。批量读取先关闭业务查询结果，再最多执行一次普通图片授权与一次修订
 授权查询；隔离 PostgreSQL 单连接回归覆盖 100 个预览输入，此结果不代表生产延迟。
 
+Mod 编辑提交与审核在事务内读回完整修订。成功后若暂时无法签发图标，回执保留修订 ID、审核单和状态，返回 `iconUnavailable: true` 和空 `snapshot.iconUrl`。客户端可重新读取历史以恢复图标。比较接口一次读取同项目的两个修订；缺少修订时返回 404，数据库读取故障返回 500。
+
 错误码：400 `PROJECT_REVIEW_PREVIEW_INVALID`；404 `PROJECT_REVIEW_PREVIEW_NOT_FOUND`
 （不存在、已结束、不支持或目标已不存在/不一致）；403 `PROJECT_REVIEW_PREVIEW_FORBIDDEN`；
 503 `PROJECT_REVIEW_PREVIEW_UNAVAILABLE`；损坏的存储快照返回 500
