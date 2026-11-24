@@ -222,7 +222,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 			}
 			mirroredAvatar, mirrorErr := s.mirrorExternalCreatorAvatar(r.Context(), author.AvatarURL, kind, author.Name, claims.Subject)
 			if mirrorErr != nil {
-				log.Printf("store imported mod author avatar: provider=%s author=%q: %v", req.SubmissionMethod, author.Name, mirrorErr)
+				log.Printf("store imported mod author avatar: provider=%s error_type=%T", req.SubmissionMethod, mirrorErr)
 				author.AvatarURL = ""
 				continue
 			}

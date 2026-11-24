@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -117,5 +119,35 @@ func TestExternalAvatarKeepsIndependentUploadersAndRecoversInterruptedRegistrati
 		if err = f.db.QueryRow(f.ctx, `select uploader_id from oss_files where public_id=$1 and id=$2 and status='active' and scan_status='clean'`, entry.image.FilePublicID, entry.image.FileInternalID).Scan(&owner); err != nil || owner != entry.owner {
 			t.Fatalf("registered owner=%d expected=%d err=%v", owner, entry.owner, err)
 		}
+	}
+}
+
+func TestImportedAuthorAvatarFailureLogsProviderWithoutTheSourceURLIntegration(t *testing.T) {
+	f := newTEST016FileFixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "project.create")
+	original := http.DefaultTransport
+	transport := original.(*http.Transport).Clone()
+	transport.RegisterProtocol("https", localCreatorImage(nil))
+	http.DefaultTransport = transport
+	t.Cleanup(func() { http.DefaultTransport = original; transport.CloseIdleConnections() })
+	var logged bytes.Buffer
+	originWriter := log.Writer()
+	log.SetOutput(&logged)
+	defer log.SetOutput(originWriter)
+	// The fixture transport reports a benign download failure. net/http wraps
+	// it with the complete request URL even when the cause contains no URL.
+	const marker = "private-fixture-image-query"
+	payload := createModRequest{
+		SiteID: "fixture-mirror-redaction", PrimaryName: "Fixture mirror redaction", Environment: "bothRequired",
+		PrimaryCategory: "technology", OfficialStatus: "active", SourceStatus: "open", License: "MIT", SubmissionMethod: "modrinth",
+		Authors: []modAuthorPayload{{Kind: "author", Name: "Fixture contributor", AvatarURL: "https://cdn.modrinth.com/profile.png?signature=" + marker}},
+	}
+	f.require(t, f.editor, http.MethodPost, "/api/v1/mods", payload, http.StatusCreated)
+	out := logged.String()
+	if !strings.Contains(out, "store imported mod author avatar: provider=modrinth") {
+		t.Fatal("provider failure was not recorded")
+	}
+	if strings.Contains(out, marker) || strings.Contains(out, "cdn.modrinth.com/profile.png") {
+		t.Fatal("the diagnostic included the source image URL")
 	}
 }
