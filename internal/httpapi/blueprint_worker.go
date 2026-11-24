@@ -269,6 +269,11 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 	withdrawn := errors.Is(cause, errBlueprintJobWithdrawn)
 	terminal := withdrawn || job.attempts >= job.maxAttempts || errors.Is(cause, errBlueprintEntityDataWouldBeLost)
 	lastError := diagnostic.Text(cause.Error(), 2000)
+	if terminal && !withdrawn {
+		if err = worker.notifyAuthorizedBlueprintFailureTx(ctx, tx, job.blueprintID, job.createdBy, job.operation, lastError); err != nil {
+			return false, err
+		}
+	}
 	if err = abandonBlueprintJobArtifactsTx(ctx, tx, job.id, job.attempts, "blueprint-job-failed"); err != nil {
 		return false, err
 	}
@@ -279,11 +284,6 @@ func (worker *BlueprintWorker) failBlueprintJob(ctx context.Context, job claimed
 	if job.operation == "normalize" {
 		if _, err = tx.Exec(ctx, `update blueprints set status=$2,last_error=$3,updated_at=now()
 			where id=$1 and status in ('queued','processing')`, job.blueprintID, jobStatus, lastError); err != nil {
-			return false, err
-		}
-	}
-	if terminal && !withdrawn {
-		if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": lastError}, job.blueprintID); err != nil {
 			return false, err
 		}
 	}
@@ -696,6 +696,11 @@ func (worker *BlueprintWorker) recoverStaleBlueprintJobs(ctx context.Context) (i
 	recovered := 0
 	exhausted := make([]staleBlueprintJob, 0)
 	for _, job := range jobs {
+		if job.attempts >= job.maxAttempts {
+			if err = worker.notifyAuthorizedBlueprintFailureTx(ctx, tx, job.blueprintID, job.createdBy, job.operation, "worker lease expired"); err != nil {
+				return 0, 0, err
+			}
+		}
 		if err = abandonBlueprintJobArtifactsTx(ctx, tx, job.id, job.attempts, "blueprint-job-lease-expired"); err != nil {
 			return 0, 0, err
 		}
@@ -714,9 +719,6 @@ func (worker *BlueprintWorker) recoverStaleBlueprintJobs(ctx context.Context) (i
 					where id=$1 and status in ('queued','processing')`, job.blueprintID, failure); updateErr != nil {
 					return 0, 0, updateErr
 				}
-			}
-			if err = worker.notifyTemplateTx(ctx, tx, job.createdBy, "blueprint_conversion_failure", map[string]string{"error": "worker lease expired"}, job.blueprintID); err != nil {
-				return 0, 0, err
 			}
 			exhausted = append(exhausted, job)
 			continue
@@ -769,6 +771,20 @@ func (worker *BlueprintWorker) readOSSObject(ctx context.Context, objectKey stri
 		contentType = *result.ContentType
 	}
 	return raw, contentType, nil
+}
+
+func (worker *BlueprintWorker) notifyAuthorizedBlueprintFailureTx(ctx context.Context, tx pgx.Tx, blueprintID, actorID int64, operation, message string) error {
+	if actorID <= 0 {
+		return nil
+	}
+	err := authorizeBlueprintJobTx(ctx, tx, blueprintID, actorID, operation)
+	if errors.Is(err, errBlueprintJobWithdrawn) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return worker.notifyTemplateTx(ctx, tx, actorID, "blueprint_conversion_failure", map[string]string{"error": message}, blueprintID)
 }
 
 func (worker *BlueprintWorker) notifyTemplateTx(ctx context.Context, tx pgx.Tx, userID int64, code string, values map[string]string, blueprintID int64) error {
