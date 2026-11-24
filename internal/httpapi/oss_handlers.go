@@ -468,18 +468,6 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 
 var errReusableBlueprintCoverChanged = errors.New("reusable blueprint cover changed")
 
-func (s *Server) bindReusableBlueprintCover(ctx context.Context, blueprintID, ownerID int64, filePublicID, objectKey string) error {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if err = bindReusableBlueprintCoverTx(ctx, tx, blueprintID, ownerID, filePublicID, objectKey); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
 func bindReusableBlueprintCoverTx(ctx context.Context, tx pgx.Tx, blueprintID, ownerID int64, filePublicID, objectKey string) error {
 	var err error
 	var locked int64
