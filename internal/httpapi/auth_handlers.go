@@ -17,6 +17,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/domain"
 	"mcmods-cn-backend/internal/security"
 )
@@ -232,7 +233,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		passwordHash = loginDummyPasswordHash
 	} else if err != nil {
-		log.Printf("login account lookup failed: %T", err)
+		log.Print(database.RedactedError("login account lookup", err))
 		writeError(w, http.StatusInternalServerError, "登录服务暂时不可用")
 		return
 	}

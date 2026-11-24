@@ -3,6 +3,8 @@ package httpapi
 import (
 	"net"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +62,23 @@ func TestClientIPFromForwardedChainRejectsMalformedHop(t *testing.T) {
 	)
 	if got != "192.0.2.10" {
 		t.Fatalf("malformed forwarded chain did not fall back to peer: %q", got)
+	}
+}
+
+func TestTrustedLocationLabelsStayValidAtStorageBoundary(t *testing.T) {
+	for _, test := range []struct{ name, city, want string }{
+		{"multibyte at 128-byte boundary", url.QueryEscape(strings.Repeat("市", 43)), strings.Repeat("市", 42)},
+		{"encoded null", "City%00", ""},
+		{"invalid UTF-8", "%FF", ""},
+		{"ordinary mixed name", url.QueryEscape("武汉 City"), "武汉 City"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/api/v1/location", nil)
+			r.Header.Set("Ali-Ip-City", test.city)
+			location := requestClientLocationFromProxy(r, "192.0.2.1", nil)
+			if location.City != test.want || location.IP != "192.0.2.1" {
+				t.Fatalf("city=%q IP=%q", location.City, location.IP)
+			}
+		})
 	}
 }

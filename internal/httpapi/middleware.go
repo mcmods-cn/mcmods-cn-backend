@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -43,7 +44,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 				writeError(w, http.StatusUnauthorized, "authentication account no longer exists")
 				return
 			}
-			log.Printf("protected authentication lookup failed: %v", err)
+			log.Print(database.RedactedError("protected authentication lookup", err))
 			writeError(w, http.StatusServiceUnavailable, "authentication service is temporarily unavailable")
 			return
 		}
@@ -76,7 +77,7 @@ func (s *Server) optionalAuth(next http.HandlerFunc) http.HandlerFunc {
 				s.continueOptionalAuthAsGuest(w, r, next)
 				return
 			}
-			log.Printf("optional authentication lookup failed: %v", err)
+			log.Print(database.RedactedError("optional authentication lookup", err))
 			writeError(w, http.StatusServiceUnavailable, "authentication service is temporarily unavailable")
 			return
 		}

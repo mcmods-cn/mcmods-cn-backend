@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type clientLocation struct {
@@ -42,7 +44,7 @@ func requestClientLocationFromProxy(r *http.Request, fallbackIP string, trustedP
 	}
 
 	countryCode := strings.ToUpper(firstHeaderValue(r, "Ali-Ip-Country", "IP-Country-Code", "CF-IPCountry"))
-	if len(countryCode) > 8 {
+	if len(countryCode) > 8 || !validLocationText(countryCode) {
 		countryCode = ""
 	}
 
@@ -139,8 +141,12 @@ func decodeLocationHeader(value string) string {
 	if decoded, err := url.QueryUnescape(value); err == nil {
 		value = decoded
 	}
-	if len(value) > 128 {
-		return value[:128]
+	if !validLocationText(value) {
+		return ""
 	}
-	return value
+	return truncateValidUTF8(value, 128)
+}
+
+func validLocationText(value string) bool {
+	return utf8.ValidString(value) && strings.IndexFunc(value, unicode.IsControl) < 0
 }
