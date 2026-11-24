@@ -634,13 +634,13 @@ func publishCatalogTagTx(ctx context.Context, tx pgx.Tx, snapshot catalogEditorS
 	if _, err = tx.Exec(ctx, `delete from catalog_tag_members where tag_id=$1`, snapshot.EntityID); err != nil {
 		return err
 	}
-	for ordinal, resourceID := range resources {
-		if _, err = tx.Exec(ctx, `insert into catalog_tag_members(tag_id,resource_id,ordinal,published_revision_id) values($1,$2,$3,$4)`,
-			snapshot.EntityID, resourceID, ordinal, revisionID); err != nil {
-			return err
-		}
+	if len(resources) == 0 {
+		return nil
 	}
-	return nil
+	_, err = tx.Exec(ctx, `insert into catalog_tag_members(tag_id,resource_id,ordinal,published_revision_id)
+		select $1, member.resource_id, member.position-1, $3
+		from unnest($2::bigint[]) with ordinality as member(resource_id,position)`, snapshot.EntityID, resources, revisionID)
+	return err
 }
 
 func publishCatalogRecipeTypeTx(ctx context.Context, tx pgx.Tx, snapshot catalogEditorSnapshot, revisionID, actorID int64) error {
@@ -666,13 +666,13 @@ func publishCatalogRecipeTypeTx(ctx context.Context, tx pgx.Tx, snapshot catalog
 	if _, err = tx.Exec(ctx, `delete from recipe_type_catalysts where recipe_type_id=$1`, snapshot.EntityID); err != nil {
 		return err
 	}
-	for ordinal, resourceID := range resources {
-		if _, err = tx.Exec(ctx, `insert into recipe_type_catalysts(recipe_type_id,resource_id,ordinal,published_revision_id) values($1,$2,$3,$4)`,
-			snapshot.EntityID, resourceID, ordinal, revisionID); err != nil {
-			return err
-		}
+	if len(resources) == 0 {
+		return nil
 	}
-	return nil
+	_, err = tx.Exec(ctx, `insert into recipe_type_catalysts(recipe_type_id,resource_id,ordinal,published_revision_id)
+		select $1, member.resource_id, member.position-1, $3
+		from unnest($2::bigint[]) with ordinality as member(resource_id,position)`, snapshot.EntityID, resources, revisionID)
+	return err
 }
 
 func publishCatalogRecipeTemplateTx(
