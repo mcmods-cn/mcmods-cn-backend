@@ -102,8 +102,17 @@ try{
   assert.equal(prior.http,404,'unpublished subject cannot be read by designated audience');
   events.push({action:'preapproval read',scope:reader,http:prior.http});
   location=kind+' independent queue';
-  await reviewer.goto(origin.origin+'/reviews');
-  const row=reviewer.locator('main article').filter({hasText:reason});
+  const [queue]=await Promise.all([
+   reviewer.waitForResponse(r=>r.request().method()==='GET' && new URL(r.url()).pathname==='/api/v1/reviews/content'),
+   reviewer.goto(origin.origin+'/reviews')
+  ]);
+  assert.equal(queue.status(),200);
+  const candidates=(await queue.json()).data.items;
+  const target=candidates.find(item=>item.id===receipt.revisionId);
+  assert(target,'the submitted revision must appear in the reviewer queue');
+  assert.equal(target.summary,reason);
+  events.push({action:'target appeared in the authenticated review queue',revisionId:target.id});
+  const row=reviewer.getByRole('article').filter({hasText:reason});
   await row.waitFor();
   await row.locator('textarea').fill('Independently verified '+kind+' catalogue contents.');
   const decisionPath='/api/v1/content-revisions/'+receipt.revisionId;
