@@ -26,7 +26,8 @@ func TestPublicRecipeRenderKeepsManualCandidateResourceKindIntegration(t *testin
 		return id
 	}
 
-	recipeType := createEntity(recipeTypeIdentity("example:mixing"), "recipe_type")
+	recipeTypeRef := recipeTypeIdentity("example:mixing")
+	recipeType := createEntity(recipeTypeRef, "recipe_type")
 	recipe := recipeIdentity("", "example:mixing", "example:manual_mixing", true)
 	recipeID := createEntity(recipe, "recipe")
 	templateID := createEntity(catalogIdentity{ID: "test:catalog-card:template", PublicID: randomCatalogPublicID()}, "recipe_template")
@@ -50,6 +51,9 @@ func TestPublicRecipeRenderKeepsManualCandidateResourceKindIntegration(t *testin
 			values($1,$2,'mixing-test',50,50,1)`, []any{templateID, recipeType}},
 		{`insert into recipe_template_slots(identity_key,template_id,slot_key,role,ordinal,x,y,width,height)
 			values('test:catalog-card:output',$1,'output','output',0,1,1,16,16)`, []any{templateID}},
+		{`insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,content_markdown,review_status)
+			values ('recipe',$1,$1,'en-US','Mixing','Use the listed amount.','approved'),
+				('recipe',$1,$1,'zh-CN','待审','Unpublished text.','pending')`, []any{recipeID}},
 		{`insert into recipe_definitions(recipe_id,template_id,definition) values($1,$2,'{}')`, []any{recipeID, templateID}},
 		{`insert into recipe_bindings(identity_key,recipe_id,template_slot_id,ordinal)
 			select 'test:catalog-card:binding',$1,id,0 from recipe_template_slots where template_id=$2`, []any{recipeID, templateID}},
@@ -64,14 +68,20 @@ func TestPublicRecipeRenderKeepsManualCandidateResourceKindIntegration(t *testin
 		t.Fatal(err)
 	}
 
-	raw := f.require(t, "", http.MethodGet, "/api/v1/catalog/recipes/"+recipe.PublicID+"/render", nil, http.StatusOK)
+	raw := f.require(t, "", http.MethodGet, "/api/v1/catalog/recipes/"+recipe.PublicID+"/render?locale=zh-CN&secondaryLocale=en-US", nil, http.StatusOK)
 	result := decodeTEST022Data[struct {
+		Note   string
 		Layout struct {
 			Slots []struct {
 				Alternatives []map[string]any
 			}
 		}
 	}](t, raw)
+	page := decodeTEST022Data[struct{ Recipes []struct{ Note string } }](t,
+		f.require(t, "", http.MethodGet, "/api/v1/recipe-types/"+recipeTypeRef.PublicID+"/catalog?locale=zh-CN&secondaryLocale=en-US", nil, http.StatusOK))
+	if result.Note != "Use the listed amount." || len(page.Recipes) != 1 || page.Recipes[0].Note != result.Note {
+		t.Errorf("published recipe note: single=%q category=%#v", result.Note, page.Recipes)
+	}
 	if len(result.Layout.Slots) != 1 || len(result.Layout.Slots[0].Alternatives) != 1 {
 		t.Fatalf("expected one canonical result slot and candidate: %#v", result)
 	}

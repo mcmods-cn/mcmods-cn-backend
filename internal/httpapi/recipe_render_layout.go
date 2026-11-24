@@ -176,9 +176,6 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 	snapshotIDs := make([]string, 0, len(recipes))
 	states := make(map[string]*recipeRenderState, len(recipes))
 	for _, recipe := range recipes {
-		if _, overridden := recipe["layout"]; overridden {
-			continue
-		}
 		snapshotID, _ := recipe["recipeSnapshotId"].(string)
 		if snapshotID == "" {
 			continue
@@ -442,11 +439,4 @@ func nullableSQLFloat(value sql.NullFloat64) any {
 		return nil
 	}
 	return value.Float64
-}
-
-func scanOptionalRecipeOverride(raw []byte) (map[string]any, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-	return decodeRecipeJSONObject(raw, "layout override")
 }

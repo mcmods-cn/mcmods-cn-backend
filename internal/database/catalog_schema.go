@@ -426,13 +426,5 @@ func catalogSchemaStatements() []string {
 			updated_at timestamptz not null default now(),
 			primary key(entity_id,locale)
 		)`,
-		`create table recipe_content_overrides (
-			recipe_id bigint primary key references recipes(entity_id) on delete cascade,
-			note text not null default '',
-			layout_override jsonb,
-			updated_by bigint references users(id) on delete set null,
-			published_revision_id bigint,
-			updated_at timestamptz not null default now()
-		)`,
 	}
 }

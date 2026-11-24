@@ -34,3 +34,10 @@ Both resource directories accept `?namespace=example` and `?kindCode=minecraft.i
 For a single icon, pass a resource public ID in `ref`, or specify the canonical identifier and its exact kind, for example `?ref=example:plate&kind=minecraft.item`. An untyped identifier matching multiple visible resources returns HTTP 409 with `resource_reference_ambiguous`. Batch hydration lists ambiguous positions in `unresolvedInputIndices`. A known family or exact kind distinguishes resources in a batch. For tags, supply the registry as well as the canonical ID.
 
 The public recipe-type directory searches canonical identifiers and displayed titles in every available language. An approved manual name replaces the import title in its own language. Other import languages stay available, and pending or rejected names stay out of the directory and its search results.
+
+
+### Manual recipe content
+
+The manual editor publishes recipes through `publishCatalogRecipeTx`. The reviewed definition, selected template, bindings and candidates supply the canonical layout. Recipe cards and category pages display the approved localized recipe body in `note`; the preferred language wins, followed by the secondary and the recipe default. Imported recipe observations supply layouts where a canonical definition is absent.
+
+The former global recipe editor last wrote `recipe_content_overrides` before commit `c63c22a` in August 2026. The current empty-database installation omits that development table. New corrections belong to the reviewed editor and the existing localization or import history.

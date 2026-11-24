@@ -51,14 +51,13 @@ latest_recipe_observations as (
 		case when recipe.canonical_source_id is null then recipe.identity_source else 'canonical' end source_id_kind,
 		(recipe.canonical_source_id is not null) recipe_id_canonical,recipe.semantic_fingerprint,
 		''::text snapshot_id,coalesce(revision.public_id,'') source_revision_id,coalesce(mod.slug,'') mod_site_id,
-		coalesce(override.note,'') note,override.layout_override,true authoritative
+		entity.default_locale,true authoritative
 	from recipes recipe
 	join recipe_definitions definition on definition.recipe_id=recipe.entity_id
 	join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active'
 	join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id and type_entity.status='active'
 	left join content_revisions revision on revision.id=definition.published_revision_id
 	left join mods mod on mod.id=recipe.owner_mod_id and mod.review_status='approved'
-	left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
 	union all
 	select recipe.entity_id,entity.public_id,type_entity.public_id,
 		coalesce(recipe.canonical_source_id,observation.source_recipe_id),observation.source_id_kind,
@@ -69,9 +68,15 @@ latest_recipe_observations as (
 	join recipes recipe on recipe.entity_id=observation.entity_id
 	join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active'
 	join catalog_entities type_entity on type_entity.id=recipe.recipe_type_id and type_entity.status='active'
-	left join recipe_content_overrides override on override.recipe_id=recipe.entity_id
 	where not exists(select 1 from recipe_definitions definition where definition.recipe_id=recipe.entity_id)
 )`
+
+// Both public render endpoints use the reviewed recipe text edited by the
+// canonical recipe editor. $2 and $3 are the requested content languages.
+const publicRecipeNoteSQL = `coalesce((select localization.content_markdown from content_localizations localization
+	where localization.catalog_entity_id=public_recipe.entity_id and localization.review_status='approved'
+	order by case localization.locale when $2 then 0 when $3 then 1 when public_recipe.default_locale then 2
+	when 'en-US' then 3 else 4 end,localization.locale limit 1),'')`
 
 // A reviewed manual title replaces only the matching import language. Older
 // exports use Minecraft locale keys such as en_us alongside the site's en-US.
@@ -191,7 +196,7 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 	if !s.requirePublicCatalogEntity(w, r, entity) {
 		return
 	}
-	key := fmt.Sprintf("recipe-types:v9:detail:%s:%s:%s:%d:%d", publicID, primary, secondary, limit, offset)
+	key := fmt.Sprintf("recipe-types:v10:detail:%s:%s:%s:%d:%d", publicID, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var entityID int64
 		var canonicalID string
@@ -236,10 +241,9 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 		rows, err := s.db.Query(ctx, `with `+publicRecipeSelectionCTE+`
 		select public_recipe.entity_id,public_recipe.public_id,public_recipe.recipe_id,public_recipe.source_id_kind,
 			public_recipe.recipe_id_canonical,public_recipe.semantic_fingerprint,public_recipe.snapshot_id,
-			public_recipe.source_revision_id,public_recipe.mod_site_id,public_recipe.note,
-			public_recipe.layout_override,public_recipe.authoritative
+			public_recipe.source_revision_id,public_recipe.mod_site_id,`+publicRecipeNoteSQL+`,public_recipe.authoritative
 		from public_recipes public_recipe join recipes recipe on recipe.entity_id=public_recipe.entity_id
-		where recipe.recipe_type_id=$1 order by public_recipe.entity_id limit $2 offset $3`, entityID, limit, offset)
+		where recipe.recipe_type_id=$1 order by public_recipe.entity_id limit $4 offset $5`, entityID, primary, secondary, limit, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -249,23 +253,15 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			var recipeEntityID int64
 			var recipePublicID, recipeID, sourceKind, fingerprint, snapshotID, sourceRevisionID, siteID, note string
 			var canonical, authoritative bool
-			var raw []byte
 			if err = rows.Scan(&recipeEntityID, &recipePublicID, &recipeID, &sourceKind, &canonical, &fingerprint,
-				&snapshotID, &sourceRevisionID, &siteID, &note, &raw, &authoritative); err != nil {
+				&snapshotID, &sourceRevisionID, &siteID, &note, &authoritative); err != nil {
 				return nil, err
-			}
-			layout, layoutErr := scanOptionalRecipeOverride(raw)
-			if layoutErr != nil {
-				return nil, layoutErr
 			}
 			recipeResult := map[string]any{"publicId": recipePublicID, "recipeTypePublicId": publicID,
 				"recipeId": recipeID, "recipeIdSource": sourceKind,
 				"recipeIdCanonical": canonical, "semanticFingerprint": fingerprint, "recipeSnapshotId": snapshotID,
 				"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note,
 				"_recipeEntityId": recipeEntityID, "_authoritative": authoritative}
-			if layout != nil {
-				recipeResult["layout"] = layout
-			}
 			recipes = append(recipes, recipeResult)
 		}
 		if err = s.hydratePublicRecipeRenderLayouts(ctx, recipes); err != nil {
@@ -292,12 +288,11 @@ func (s *Server) globalRecipeRender(w http.ResponseWriter, r *http.Request) {
 	var recipeEntityID int64
 	var recipePublicID, recipeTypePublicID, recipeID, sourceKind, fingerprint, snapshotID, sourceRevisionID, siteID, note string
 	var canonical, authoritative bool
-	var raw []byte
 	err := s.db.QueryRow(r.Context(), `with `+publicRecipeSelectionCTE+`
 	select entity_id,public_id,recipe_type_public_id,recipe_id,source_id_kind,recipe_id_canonical,
-		semantic_fingerprint,snapshot_id,source_revision_id,mod_site_id,note,layout_override,authoritative
-	from public_recipes where public_id=$1 limit 1`, publicID).Scan(&recipeEntityID, &recipePublicID, &recipeTypePublicID, &recipeID, &sourceKind, &canonical,
-		&fingerprint, &snapshotID, &sourceRevisionID, &siteID, &note, &raw, &authoritative)
+		semantic_fingerprint,snapshot_id,source_revision_id,mod_site_id,`+publicRecipeNoteSQL+`,authoritative
+	from public_recipes public_recipe where public_id=$1 limit 1`, publicID, primary, secondary).Scan(&recipeEntityID, &recipePublicID, &recipeTypePublicID, &recipeID, &sourceKind, &canonical,
+		&fingerprint, &snapshotID, &sourceRevisionID, &siteID, &note, &authoritative)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "renderable recipe not found")
 		return
@@ -306,20 +301,12 @@ func (s *Server) globalRecipeRender(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to read recipe")
 		return
 	}
-	layout, err := scanOptionalRecipeOverride(raw)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to decode recipe layout")
-		return
-	}
 	result := map[string]any{
 		"publicId": recipePublicID, "recipeTypePublicId": recipeTypePublicID,
 		"recipeId": recipeID, "recipeIdSource": sourceKind, "recipeIdCanonical": canonical,
 		"semanticFingerprint": fingerprint, "recipeSnapshotId": snapshotID,
 		"revisionId": sourceRevisionID, "modSiteId": siteID, "note": note,
 		"_recipeEntityId": recipeEntityID, "_authoritative": authoritative,
-	}
-	if layout != nil {
-		result["layout"] = layout
 	}
 	recipes := []map[string]any{result}
 	if err = s.hydratePublicRecipeRenderLayouts(r.Context(), recipes); err != nil {

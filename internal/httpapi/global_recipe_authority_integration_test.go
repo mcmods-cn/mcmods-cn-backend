@@ -168,7 +168,6 @@ func createGlobalRecipeAuthorityTestTables(t *testing.T, ctx context.Context, db
 			owner_mod_id bigint,identity_source text not null);
 		create temp table recipe_import_snapshots(
 			id text primary key,recipe_id bigint not null,revision_id text not null,source_recipe_id text not null,source_id_kind text not null);
-		create temp table recipe_content_overrides(recipe_id bigint primary key,note text,layout_override jsonb);
 		create temp table recipe_layout_templates(
 			entity_id bigint primary key,recipe_type_id bigint not null,template_key text not null,canvas_width integer not null,
 			canvas_height integer not null,image_scale integer not null);
