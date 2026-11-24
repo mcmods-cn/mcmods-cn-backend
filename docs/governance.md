@@ -34,12 +34,14 @@
 
 ### 发行文件、逐文件记录与复验
 
-exporter 的 `e751c8b` 在 JDK 17 上完成 JUnit、两种加载器构建与 Python 契约校验。从同一次 GitHub 构建下载发行包后，Fabric Loader 0.16.14 和 Forge 47.4.21 均识别了 0.10.2。两个标准实例在 Minecraft 登录处停止。配对文件的 SHA-256 如下。[发行构建与下载](https://github.com/mcmods-cn/mcmods_exporter/actions/runs/45390514931)
+exporter 的 `1e00e8b` 在 JDK 17 上完成 JUnit、Fabric/Forge 构建与 Python 契约检查。下载该次 GitHub Actions 的原始产物，核对归档 SHA-256 后，把两个 remapped JAR 分别装入独立标准 Minecraft 1.20.1 实例。Fabric Loader 0.16.14 和 Forge 47.4.21 均识别 0.10.2。实例在游戏会话登录处停止。[发行构建与下载](https://github.com/mcmods-cn/mcmods_exporter/actions/runs/45398625511) · [游戏帧与导出 tick 的原始对照](https://github.com/mcmods-cn/mcmods_exporter/blob/1e00e8b/docs/contract-validation.md#matched-client-traces-from-24-november-2026)
 
-| Minecraft 1.20.1 加载器 | 发行 JAR SHA-256 |
+| 加载器 | 该次发行 JAR 的 SHA-256 |
 | --- | --- |
-| Fabric | `be598e163a2cbf8808cac00d5d6f659de2730b487eda6a3cc49a81cd1fb57cd8` |
-| Forge | `b81d484aa10ae36f152b8758ff8799682f075e96009e8513b2b5e93b573069bb` |
+| Fabric | `3c5f6e36bb78cc6c727cf62b0da41025b22ad8cdd97ee22b700287fba290dc18` |
+| Forge | `df04c2fea15b0021499667c6eefe16e4e1ca32f60628e853b05d36878cbbbcae` |
+
+早先 `e751c8b` 的构建也通过加载识别。两次构建间的 JAR 字节差异限于 Architectury 注入类的随机名称和该类对自身的引用。安装或回退时核对选定工作流的 SHA256SUMS。[早先构建](https://github.com/mcmods-cn/mcmods_exporter/actions/runs/45390514931)
 
 PostgreSQL 18.6 上，131 条待解析 Mod 关系原需 268 次 SQL，已有目标的关系会得到错误回执。现在按锁定的实际关系生成回执，同一输入共 8 次 SQL。清理队列按失败时间和 ID 读取死信；十万条工单、五千条死信的同一热缓存样本，取最近 50 条的通用计划从 1,968 个共享缓存页降至 23 个，返回的 ID 和顺序一致。[对象死信恢复](queue-recovery.md#oss-对象删除)
 
@@ -52,7 +54,15 @@ PostgreSQL 18.6 上，131 条待解析 Mod 关系原需 268 次 SQL，已有目�
 | 蓝图转换 | API 和 Worker 在同一张蓝图行上协调。转换请求等待行锁时，若 Worker 已发布目标格式，请求直接返回现有版本。应用连接池固定 UTC 与 READ COMMITTED，显式请求更强隔离的只读事务保留原设置。运行 `TestBlueprintConversionUsesTheVariantPublishedWhileAdmissionWaits`。 |
 | 图像、目录与操作区 | 前端共用 Mod 和整合包卡片，保留缺失值与 0 的区别，长翻译随容器宽度换行。提供同组三条合成目录记录的真实 Chromium 桌面和手机对照。[截图与复跑命令](https://github.com/mcmods-cn/mcmods-cn-frontend/blob/main/docs/ui/README.md#mod-与整合包目录卡片) |
 
-`2daeee3` 后端 OCI 镜像与 `0c31c4b` 前端 OCI 镜像在隔离 Linux 中以 UID 65532 和 1001 运行，有效 capabilities 为零。TLS 1.3 下匿名目录、登录退出和实际通知任务均完成。提交返回 202，Worker 发布一次，随后列表可读。两进程收到 TERM 后停止。容量抽样使用单独的 `9bda905` 后端，同一前端，以 1、4 并发对健康、匿名目录和认证各发 80 次，共 480 次返回 200；单并发认证 P99 为 362 ms。目标宿主的时延与跨主机故障仍须独立验证。[后端镜像构建](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45396552869) · [前端镜像构建](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45395690764)
+`2daeee3` 后端与 `0ef6b61` 前端的 OCI 镜像在隔离 Linux 中以 UID 65532 和 1001 运行，有效 capabilities 为零。TLS 1.3 下匿名目录、登录退出、通知投递和 Markdown 页面及 KaTeX 字体均通过。通知提交返回 202，Worker 发布一次，随后列表可读。两进程收到 TERM 后停止。前端 `8e04f9f` 只新增锁文件测试断言，发行镜像内 3,125 份运行文件和 907 份运行追踪及清单均不含该测试。[后端镜像构建](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45396552869) · [前端镜像构建](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45398316297)
+
+同一未修改 Fabric 开发包经这份前端镜像、真实后端 HTTP 业务、Worker、PostgreSQL 18.6 和单节点 JetStream 完成全程。浏览器在第 1、3 片确认后离开，仅续传第 2、4、5、6、7 片。完成确认依次得到 201 和 200，只计一次配额。独立审核前匿名读取返回 403，批准后匿名目录含 5,830 项，公开模型的 1,110 个数值和火把图像像素与包内来源相符。此联调使用受控对象存储协议，后端运行在固定版本的 Go 集成程序中。正式玩家会话产包、目标 OSS 和跨主机恢复各自待验。[浏览器与游戏包验证入口](testing-isolated-environment.md#真实游戏包经浏览器和-jetstream-的验证)
+
+容量抽样使用 `9bda905` 后端及 `0c31c4b` 前端，在 1、4 并发下对健康、匿名目录和认证各发 80 次，共 480 次返回 200。单并发认证 P99 为 362 ms。这一负载只覆盖本机样本。
+
+前端 `8e04f9f` 的云端完整门通过 439 项单测。在真实 Chromium 中，424 个用例有 423 个通过，1 个因没有注入原始游戏几何 ZIP 而跳过。KaTeX 的公式、字体、错误恢复和手机 AI 后台只读操作均通过，依赖扫描的同一低危公告从 4 条锁文件记录降为 0。[完整前端门](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45398621877) · [锁文件审计](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45398621846)
+
+后端 `0c9e61f` 的质量、并行 race、容器构建及四种服务专项均通过。真实服务专项为 31 项顶层和 6 项子用例，零跳过。完整 PostgreSQL 门使用独立数据库、全部发现的批次和逐名输出。维护者可从指定运行的 PostgreSQL 步骤分别核对各用例终态和 `DB_SUITE runner_exit`。此前本机冻结版本 `9cfab4d` 的完整门运行了 99 批，2,434 个顶层用例中有 2,372 个通过、21 个失败、41 个跳过，退出码为 1。对已暴露的配方查询、自动化回执、收藏额度及创作者修订夹具按各自版本留证。[当前完整数据库门](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45399009308) · [当前真实服务专项](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45399009326) · [当前 Go 依赖审计](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45399009317)
 
 逐文件记录包含三个固定 Git SHA、每份文件的 Git blob、SHA-256、分类、连续阅读区间或格式核验依据。条目保留实际阅读者的职责与调用链记录。将三仓完整 Git 克隆放在同一目录，打开下列命令所在的后端仓库。命令会重新读取记录中的 Git 对象并检查区间，输出中单列运行验证。[逐文件记录](audit/current-review.json.gz) · [核对工具](../tools/audit/review_snapshot.py)
 
