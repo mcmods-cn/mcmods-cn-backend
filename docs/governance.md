@@ -20,6 +20,8 @@
 | 收藏夹导出完成或失败 | 终态、产物引用和通知在同一事务完成。测试在准备通知时等待数据库行锁，恢复后检查此尝试仍持有有效租约。归属已变或租约自然截止时，该尝试回滚。见 `TestFavoriteExportLeaseDuringNotificationIntegration`。 |
 | 资料模板更改类型 | 已部署根目录的子类型标识须保留。检查和写入同一事务持有目录表锁，其他资料页仍可修改资源与详情。删除整个模板时会检查所有直接引用。见 `TestTemplateSchemaGuardDistinguishesDisableDeleteAndReferencesIntegration`。 |
 | 运行时间与分配 | Forge/NeoForge 的稳定构建版本选择保留原比较规则，改为一次扫描。相同 Go 1.26.11、单线程、2,048 个合成版本各测六次，中位耗时从 6.44 ms 降至 0.553 ms，每次分配从 4,406,376 字节降至 393,024 字节。复跑 `go test ./internal/httpapi -run '^$' -bench '^BenchmarkSelectLoaderArtifactVersion$' -benchmem -count=6`。 |
+| 目录布局深分页 | PostgreSQL 18.6，同一回滚事务、十万行和两个栏目。先对每个范围取主键页，再统一截取 501 项并补详情。五次交替执行、剔除首对后，中间页的 SQL 执行中位数从 1,538 ms 降至 19 ms，500 个结果的内容与顺序一致。稀有词从 18 ms 升至 29 ms，无结果从 4 ms 升至 9 ms。完整 HTTP 门另跑 `TestModContentSectionCursorSearchAndGraphIntegration`。 |
+| 蓝图归一化和封面 | 相同十万个非空气方块，Go 单线程六轮测量，每次额外分配从 4,800,512 字节降至 0。解码拒绝方块索引数量与声明体积不符的 Sponge 数据。封面回归解码实际 PNG 检查细长结构两端的方块颜色。[蓝图生命周期](blueprint-and-comment-lifecycle.md) |
 
 完整 PostgreSQL 门禁按一次运行的固定提交计数。运行中止、测试断言失败、条件跳过分别保留。合并修复后需重新运行整门，所需服务和隔离步骤见[测试环境](testing-isolated-environment.md)。正式 Fabric 和 Forge 发行包的入世界导出、目标云服务与跨主机恢复仍待验收。
 
