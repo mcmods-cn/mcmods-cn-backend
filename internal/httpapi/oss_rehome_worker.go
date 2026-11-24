@@ -135,15 +135,24 @@ func (worker *OSSRehomeWorker) claim(ctx context.Context) (ossRehomeJob, error) 
 	return job, err
 }
 
+// First take the job lock, then test the wall clock. A settlement which
+// waited behind a row lock can outlive its lease even with the same token.
+const liveOSSRehomeJobSQL = `with locked_rehome_job as materialized (
+	select id,lease_expires_at from oss_rehome_jobs
+	where id=$1 and status='processing' and locked_by=$2 for no key update
+), live_rehome_job as (
+	select id from locked_rehome_job where lease_expires_at>clock_timestamp()
+) `
+
 func (worker *OSSRehomeWorker) complete(ctx context.Context, job ossRehomeJob) (string, error) {
 	var state string
-	err := worker.server.db.QueryRow(ctx, `update oss_rehome_jobs set
+	err := worker.server.db.QueryRow(ctx, liveOSSRehomeJobSQL+`update oss_rehome_jobs set
 		status=case when generation=$3 then 'completed' else 'queued' end,
 		attempts=case when generation=$3 then attempts else 0 end,
 		next_attempt_at=now(),locked_by='',lease_expires_at=null,claimed_generation=null,
 		last_error='',failure_class='',completed_at=case when generation=$3 then now() else null end,
 		dead_at=null,updated_at=now()
-		where id=$1 and status='processing' and locked_by=$2 returning status`, job.ID, job.LockToken, job.Generation).
+		where id in (select id from live_rehome_job) returning status`, job.ID, job.LockToken, job.Generation).
 		Scan(&state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", errOSSRehomeLeaseLost
@@ -162,7 +171,7 @@ func (worker *OSSRehomeWorker) recordFailure(ctx context.Context, job ossRehomeJ
 	}
 	defer tx.Rollback(ctx)
 	var state string
-	err = tx.QueryRow(ctx, `update oss_rehome_jobs set
+	err = tx.QueryRow(ctx, liveOSSRehomeJobSQL+`update oss_rehome_jobs set
 		status=case when generation<>$3 then 'queued' when $4 then 'dead' else 'queued' end,
 		attempts=case when generation<>$3 then 0 else attempts end,
 		next_attempt_at=case when generation<>$3 then now() else $5 end,
@@ -170,7 +179,7 @@ func (worker *OSSRehomeWorker) recordFailure(ctx context.Context, job ossRehomeJ
 		last_error=case when generation<>$3 then '' else $6 end,
 		failure_class=case when generation<>$3 then '' else $7 end,
 		completed_at=null,dead_at=case when generation=$3 and $4 then now() else null end,updated_at=now()
-		where id=$1 and status='processing' and locked_by=$2 returning status`,
+		where id in (select id from live_rehome_job) returning status`,
 		job.ID, job.LockToken, job.Generation, dead, nextAttempt, lastError, decision.class).Scan(&state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", errOSSRehomeLeaseLost
