@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/diagnostic"
@@ -28,16 +29,43 @@ const popularityDueStatsEnqueueSQL = `insert into content_stats_refresh_queue(ob
 		status='pending',attempts=case when content_stats_refresh_queue.status='failed' then 0 else content_stats_refresh_queue.attempts end,
 		available_at=least(content_stats_refresh_queue.available_at,now()),locked_at=null,updated_at=now()`
 
+// A completed queue row can be recreated at attempt one. Match the claiming
+// UPDATE's PostgreSQL row version and lease timestamp until its transaction
+// removes the row. A superseded transaction rolls back its projection writes.
+type statsRefreshClaim struct {
+	attempt  int
+	lockedAt time.Time
+	xid      uint32
+}
+
+const (
+	statsLeaseIntervalSQL = `interval '5 minutes'`
+	currentStatsLeaseSQL  = `status='processing' and locked_at=$2 and xmin=$3 and locked_at>=clock_timestamp()-` + statsLeaseIntervalSQL
+)
+
+var errStatsLeaseLost = errors.New("statistics refresh lease superseded")
+
+func (claim statsRefreshClaim) finish(ctx context.Context, tx pgx.Tx, statement string, id int64) error {
+	result, err := tx.Exec(ctx, statement, id, claim.lockedAt, claim.xid)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() == 0 {
+		return errStatsLeaseLost
+	}
+	return nil
+}
+
 type contentStatsRefreshTask struct {
 	routeID           int64
 	refreshMetrics    bool
 	refreshPopularity bool
-	attempt           int
+	statsRefreshClaim
 }
 
 type commentHeatRefreshTask struct {
 	commentID int64
-	attempt   int
+	statsRefreshClaim
 }
 
 // StartPopularityRefreshScheduler drains durable, coalescing queues. Request
@@ -136,16 +164,16 @@ func claimContentStatsTasks(ctx context.Context, db *pgxpool.Pool, limit int) ([
 	rows, err := db.Query(ctx, `with exhausted as (
 		update content_stats_refresh_queue set status='failed',locked_at=null,
 			last_error=case when last_error='' then 'processing lease expired at retry limit' else last_error end,updated_at=now()
-		where status='processing' and attempts>=$2 and locked_at<now()-interval '5 minutes'
+		where status='processing' and attempts>=$2 and locked_at<now()-`+statsLeaseIntervalSQL+`
 	), candidates as (
 		select object_route_id from content_stats_refresh_queue
 		where (status='pending' and available_at<=now())
-			or (status='processing' and attempts<$2 and locked_at<now()-interval '5 minutes')
+			or (status='processing' and attempts<$2 and locked_at<now()-`+statsLeaseIntervalSQL+`)
 		order by available_at,updated_at,object_route_id
 		for update skip locked limit $1
 	) update content_stats_refresh_queue queue set status='processing',locked_at=now(),attempts=queue.attempts+1,updated_at=now()
 	from candidates where queue.object_route_id=candidates.object_route_id
-	returning queue.object_route_id,queue.refresh_metrics,queue.refresh_popularity,queue.attempts`, limit, popularityRefreshMaxAttempts)
+	returning queue.object_route_id,queue.refresh_metrics,queue.refresh_popularity,queue.attempts,queue.locked_at,queue.xmin`, limit, popularityRefreshMaxAttempts)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +181,7 @@ func claimContentStatsTasks(ctx context.Context, db *pgxpool.Pool, limit int) ([
 	tasks := make([]contentStatsRefreshTask, 0, limit)
 	for rows.Next() {
 		var task contentStatsRefreshTask
-		if err = rows.Scan(&task.routeID, &task.refreshMetrics, &task.refreshPopularity, &task.attempt); err != nil {
+		if err = rows.Scan(&task.routeID, &task.refreshMetrics, &task.refreshPopularity, &task.attempt, &task.lockedAt, &task.xid); err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, task)
@@ -164,25 +192,21 @@ func claimContentStatsTasks(ctx context.Context, db *pgxpool.Pool, limit int) ([
 func processContentStatsTask(ctx context.Context, db *pgxpool.Pool, task contentStatsRefreshTask) error {
 	taskCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	tx, err := db.Begin(taskCtx)
-	if err == nil {
+	err := pgx.BeginFunc(taskCtx, db, func(tx pgx.Tx) error {
 		if task.refreshMetrics {
-			_, err = tx.Exec(taskCtx, `select refresh_content_route_metrics($1)`, task.routeID)
+			if _, err := tx.Exec(taskCtx, `select refresh_content_route_metrics($1)`, task.routeID); err != nil {
+				return err
+			}
 		}
-		if err == nil && task.refreshPopularity {
-			_, err = tx.Exec(taskCtx, `select refresh_content_popularity($1)`, task.routeID)
+		if task.refreshPopularity {
+			if _, err := tx.Exec(taskCtx, `select refresh_content_popularity($1)`, task.routeID); err != nil {
+				return err
+			}
 		}
-		if err == nil {
-			_, err = tx.Exec(taskCtx, `delete from content_stats_refresh_queue
-				where object_route_id=$1 and attempts=$2 and status='processing' and locked_at is not null`, task.routeID, task.attempt)
-		}
-		if err == nil {
-			err = tx.Commit(taskCtx)
-		} else {
-			_ = tx.Rollback(taskCtx)
-		}
-	}
-	if err == nil {
+		return task.finish(taskCtx, tx, `delete from content_stats_refresh_queue
+			where object_route_id=$1 and `+currentStatsLeaseSQL, task.routeID)
+	})
+	if err == nil || errors.Is(err, errStatsLeaseLost) {
 		return nil
 	}
 	return errors.Join(err, retryContentStatsTask(ctx, db, task, err))
@@ -191,10 +215,10 @@ func processContentStatsTask(ctx context.Context, db *pgxpool.Pool, task content
 func retryContentStatsTask(ctx context.Context, db *pgxpool.Pool, task contentStatsRefreshTask, cause error) error {
 	delaySeconds := 1 << min(task.attempt, 8)
 	_, err := db.Exec(ctx, `update content_stats_refresh_queue set locked_at=null,
-		status=case when attempts>=$5 then 'failed' else 'pending' end,
-		available_at=case when attempts>=$5 then available_at else now()+make_interval(secs=>$3) end,
-		last_error=$4,updated_at=now()
-		where object_route_id=$1 and attempts=$2 and status='processing'`, task.routeID, task.attempt, delaySeconds,
+		status=case when attempts>=$6 then 'failed' else 'pending' end,
+		available_at=case when attempts>=$6 then available_at else now()+make_interval(secs=>$4) end,
+		last_error=$5,updated_at=now()
+		where object_route_id=$1 and `+currentStatsLeaseSQL, task.routeID, task.lockedAt, task.xid, delaySeconds,
 		truncateWorkerError(cause), popularityRefreshMaxAttempts)
 	if err != nil {
 		return fmt.Errorf("persist content statistics retry: %w", err)
@@ -206,16 +230,16 @@ func claimCommentHeatTasks(ctx context.Context, db *pgxpool.Pool, limit int) ([]
 	rows, err := db.Query(ctx, `with exhausted as (
 		update comment_heat_refresh_queue set status='failed',locked_at=null,
 			last_error=case when last_error='' then 'processing lease expired at retry limit' else last_error end,updated_at=now()
-		where status='processing' and attempts>=$2 and locked_at<now()-interval '5 minutes'
+		where status='processing' and attempts>=$2 and locked_at<now()-`+statsLeaseIntervalSQL+`
 	), candidates as (
 		select comment_id from comment_heat_refresh_queue
 		where (status='pending' and available_at<=now())
-			or (status='processing' and attempts<$2 and locked_at<now()-interval '5 minutes')
+			or (status='processing' and attempts<$2 and locked_at<now()-`+statsLeaseIntervalSQL+`)
 		order by available_at,updated_at,comment_id
 		for update skip locked limit $1
 	) update comment_heat_refresh_queue queue set status='processing',locked_at=now(),attempts=queue.attempts+1,updated_at=now()
 	from candidates where queue.comment_id=candidates.comment_id
-	returning queue.comment_id,queue.attempts`, limit, popularityRefreshMaxAttempts)
+	returning queue.comment_id,queue.attempts,queue.locked_at,queue.xmin`, limit, popularityRefreshMaxAttempts)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +247,7 @@ func claimCommentHeatTasks(ctx context.Context, db *pgxpool.Pool, limit int) ([]
 	tasks := make([]commentHeatRefreshTask, 0, limit)
 	for rows.Next() {
 		var task commentHeatRefreshTask
-		if err = rows.Scan(&task.commentID, &task.attempt); err != nil {
+		if err = rows.Scan(&task.commentID, &task.attempt, &task.lockedAt, &task.xid); err != nil {
 			return nil, err
 		}
 		tasks = append(tasks, task)
@@ -234,20 +258,14 @@ func claimCommentHeatTasks(ctx context.Context, db *pgxpool.Pool, limit int) ([]
 func processCommentHeatTask(ctx context.Context, db *pgxpool.Pool, task commentHeatRefreshTask) error {
 	taskCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	tx, err := db.Begin(taskCtx)
-	if err == nil {
-		_, err = tx.Exec(taskCtx, `select refresh_comment_heat($1)`, task.commentID)
-		if err == nil {
-			_, err = tx.Exec(taskCtx, `delete from comment_heat_refresh_queue
-				where comment_id=$1 and attempts=$2 and status='processing' and locked_at is not null`, task.commentID, task.attempt)
+	err := pgx.BeginFunc(taskCtx, db, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(taskCtx, `select refresh_comment_heat($1)`, task.commentID); err != nil {
+			return err
 		}
-		if err == nil {
-			err = tx.Commit(taskCtx)
-		} else {
-			_ = tx.Rollback(taskCtx)
-		}
-	}
-	if err == nil {
+		return task.finish(taskCtx, tx, `delete from comment_heat_refresh_queue
+			where comment_id=$1 and `+currentStatsLeaseSQL, task.commentID)
+	})
+	if err == nil || errors.Is(err, errStatsLeaseLost) {
 		return nil
 	}
 	return errors.Join(err, retryCommentHeatTask(ctx, db, task, err))
@@ -256,10 +274,10 @@ func processCommentHeatTask(ctx context.Context, db *pgxpool.Pool, task commentH
 func retryCommentHeatTask(ctx context.Context, db *pgxpool.Pool, task commentHeatRefreshTask, cause error) error {
 	delaySeconds := 1 << min(task.attempt, 8)
 	_, err := db.Exec(ctx, `update comment_heat_refresh_queue set locked_at=null,
-		status=case when attempts>=$5 then 'failed' else 'pending' end,
-		available_at=case when attempts>=$5 then available_at else now()+make_interval(secs=>$3) end,
-		last_error=$4,updated_at=now()
-		where comment_id=$1 and attempts=$2 and status='processing'`, task.commentID, task.attempt, delaySeconds,
+		status=case when attempts>=$6 then 'failed' else 'pending' end,
+		available_at=case when attempts>=$6 then available_at else now()+make_interval(secs=>$4) end,
+		last_error=$5,updated_at=now()
+		where comment_id=$1 and `+currentStatsLeaseSQL, task.commentID, task.lockedAt, task.xid, delaySeconds,
 		truncateWorkerError(cause), popularityRefreshMaxAttempts)
 	if err != nil {
 		return fmt.Errorf("persist comment heat retry: %w", err)

@@ -251,6 +251,130 @@ func TestOPS010PopularityQueuesTerminateRecoverAndClaimOnceIntegration(t *testin
 	}
 }
 
+// Completing a task removes its row. The first claim after the same object
+// becomes dirty again starts at attempt one, like the original expired claim.
+func TestPopularityQueuesIgnoreRecreatedLeaseIntegration(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	pool := newOPS010IsolatedDatabase(t, ctx)
+	if _, err := pool.Exec(ctx, `insert into users(id,username,email,password_hash)
+		values(12345,'lease-owner','lease-owner@example.invalid','fixture');
+		insert into mods(id,project_code,slug,primary_name,review_status,submitted_by)
+		values(12345,'lease0001','lease-mod','Lease Mod','approved',12345);
+		insert into comments(id,target_type,target_id,author_id,body)
+		values(12345,'mod',12345,12345,'ordinary comment')`); err != nil {
+		t.Fatal(err)
+	}
+	var routeID int64
+	if err := pool.QueryRow(ctx, `select id from public_routes where entity_type='mod' and internal_id=12345`).Scan(&routeID); err != nil {
+		t.Fatal(err)
+	}
+	claim := func(t *testing.T, attempt int) (contentStatsRefreshTask, commentHeatRefreshTask) {
+		t.Helper()
+		routes, err := claimContentStatsTasks(ctx, pool, 1)
+		if err != nil || len(routes) != 1 || routes[0].attempt != attempt {
+			t.Fatalf("route claim at attempt %d: %v, %v", attempt, routes, err)
+		}
+		comments, err := claimCommentHeatTasks(ctx, pool, 1)
+		if err != nil || len(comments) != 1 || comments[0].attempt != attempt {
+			t.Fatalf("comment claim at attempt %d: %v, %v", attempt, comments, err)
+		}
+		return routes[0], comments[0]
+	}
+	for _, outcome := range []string{"late completion", "late failure"} {
+		t.Run(outcome, func(t *testing.T) {
+			if _, err := pool.Exec(ctx, `truncate content_stats_refresh_queue,comment_heat_refresh_queue`); err != nil {
+				t.Fatal(err)
+			}
+			enqueue := func() {
+				t.Helper()
+				if _, err := pool.Exec(ctx, `select enqueue_content_stats_refresh($1,true,false),enqueue_comment_heat_refresh(12345)`, routeID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			enqueue()
+			oldRoute, oldComment := claim(t, 1)
+			// Return the expired tuples' actual identities. The worker must
+			// respect the deadline even before another transaction claims them.
+			expiredRoute, expiredComment := oldRoute, oldComment
+			if err := pool.QueryRow(ctx, `update content_stats_refresh_queue set locked_at=now()-interval '6 minutes'
+				where object_route_id=$1 returning locked_at,xmin`, routeID).Scan(&expiredRoute.lockedAt, &expiredRoute.xid); err != nil {
+				t.Fatal(err)
+			}
+			if err := pool.QueryRow(ctx, `update comment_heat_refresh_queue set locked_at=now()-interval '6 minutes'
+				where comment_id=12345 returning locked_at,xmin`).Scan(&expiredComment.lockedAt, &expiredComment.xid); err != nil {
+				t.Fatal(err)
+			}
+			if outcome == "late completion" {
+				if err := processContentStatsTask(ctx, pool, expiredRoute); err != nil {
+					t.Fatal(err)
+				}
+				if err := processCommentHeatTask(ctx, pool, expiredComment); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := retryContentStatsTask(ctx, pool, expiredRoute, errors.New("expired route")); err != nil {
+					t.Fatal(err)
+				}
+				if err := retryCommentHeatTask(ctx, pool, expiredComment, errors.New("expired comment")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recoveredRoute, recoveredComment := claim(t, 2)
+			if err := processContentStatsTask(ctx, pool, recoveredRoute); err != nil {
+				t.Fatal(err)
+			}
+			if err := processCommentHeatTask(ctx, pool, recoveredComment); err != nil {
+				t.Fatal(err)
+			}
+			enqueue()
+			currentRoute, currentComment := claim(t, 1)
+			var routeVersion, commentVersion string
+			if err := pool.QueryRow(ctx, `select m.xmin::text,c.xmin::text from content_route_metrics m cross join comments c
+				where m.object_route_id=$1 and c.id=12345`, routeID).Scan(&routeVersion, &commentVersion); err != nil {
+				t.Fatal(err)
+			}
+			if outcome == "late completion" {
+				if err := processContentStatsTask(ctx, pool, oldRoute); err != nil {
+					t.Fatal(err)
+				}
+				if err := processCommentHeatTask(ctx, pool, oldComment); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				staleFailure := errors.New("expired worker")
+				if err := retryContentStatsTask(ctx, pool, oldRoute, staleFailure); err != nil {
+					t.Fatal(err)
+				}
+				if err := retryCommentHeatTask(ctx, pool, oldComment, staleFailure); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var routeStillClaimed, commentStillClaimed, metricsUnchanged, heatUnchanged bool
+			if err := pool.QueryRow(ctx, `select
+				exists(select 1 from content_stats_refresh_queue where object_route_id=$1 and status='processing' and last_error=''),
+				exists(select 1 from comment_heat_refresh_queue where comment_id=12345 and status='processing' and last_error=''),
+				exists(select 1 from content_route_metrics where object_route_id=$1 and xmin::text=$2),
+				exists(select 1 from comments where id=12345 and xmin::text=$3)`, routeID, routeVersion, commentVersion).
+				Scan(&routeStillClaimed, &commentStillClaimed, &metricsUnchanged, &heatUnchanged); err != nil {
+				t.Fatal(err)
+			}
+			if !routeStillClaimed || !commentStillClaimed || !metricsUnchanged || !heatUnchanged {
+				t.Fatalf("current leases intact route=%t comment=%t, projections unchanged metrics=%t heat=%t",
+					routeStillClaimed, commentStillClaimed, metricsUnchanged, heatUnchanged)
+			}
+			if err := processContentStatsTask(ctx, pool, currentRoute); err != nil {
+				t.Fatal(err)
+			}
+			if err := processCommentHeatTask(ctx, pool, currentComment); err != nil {
+				t.Fatal(err)
+			}
+			assertOPS010QueueDeleted(t, ctx, pool, "content_stats_refresh_queue", "object_route_id", routeID)
+			assertOPS010QueueDeleted(t, ctx, pool, "comment_heat_refresh_queue", "comment_id", 12345)
+		})
+	}
+}
+
 func assertOPS010QueueState(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table, idColumn string, id int64, attempt int) {
 	t.Helper()
 	query := fmt.Sprintf(`select status,attempts,locked_at is null,last_error from %s where %s=$1`, table, idColumn)
