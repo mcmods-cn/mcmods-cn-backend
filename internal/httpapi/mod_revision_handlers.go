@@ -27,6 +27,7 @@ type reviewModRevisionRequest struct {
 }
 
 type modRevisionResponse struct {
+	IconUnavailable       bool             `json:"iconUnavailable,omitempty"`
 	ID                    string           `json:"id"`
 	ModID                 string           `json:"modId"`
 	ModInternalID         int64            `json:"-"`
@@ -96,21 +97,27 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ossCfg := s.ossConfigFromSettings(r.Context())
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start revision")
 		return
 	}
 	defer tx.Rollback(r.Context())
-	request.Snapshot.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, request.Snapshot.IconURL, "", claims.Subject)
-	if errors.Is(err, errInvalidStoredProjectIcon) {
-		writeError(w, http.StatusBadRequest, errInvalidStoredProjectIcon.Error())
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "failed to validate project icon")
-		return
+	if request.Snapshot.IconURL != "" {
+		ossCfg, configErr := s.ossConfigFromSettingsStrictWithQueryer(r.Context(), tx)
+		if configErr != nil {
+			writeError(w, http.StatusServiceUnavailable, "failed to validate project icon")
+			return
+		}
+		request.Snapshot.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, request.Snapshot.IconURL, "", claims.Subject)
+		if errors.Is(err, errInvalidStoredProjectIcon) {
+			writeError(w, http.StatusBadRequest, errInvalidStoredProjectIcon.Error())
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "failed to validate project icon")
+			return
+		}
 	}
 	snapshot, err := json.Marshal(request.Snapshot)
 	if err != nil {
@@ -119,8 +126,12 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	requestedBaseRevisionID, resolveErr := resolveRevisionPublicID(r.Context(), tx, request.BaseRevisionID)
-	if resolveErr != nil {
+	if errors.Is(resolveErr, pgx.ErrNoRows) || errors.Is(resolveErr, errInvalidRevisionPublicID) {
 		writeError(w, http.StatusConflict, "the proposed base revision is no longer current")
+		return
+	}
+	if resolveErr != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read the proposed base revision")
 		return
 	}
 	if err = validateModGalleryFilesTx(r.Context(), tx, identity.ID, claims.Subject, request.Snapshot.GalleryImages); err != nil {
@@ -173,6 +184,11 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to persist project activity")
 		return
 	}
+	revision, err := scanModRevision(tx.QueryRow(r.Context(), modRevisionSelect+`where revision.id=$1 and revision.aggregate_type='mod'`, created.RevisionID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read revision")
+		return
+	}
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit revision")
 		return
@@ -181,18 +197,7 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		s.refreshProjectACLVersion(r.Context())) {
 		return
 	}
-	revision, err := s.modRevisionByID(r.Context(), created.RevisionID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read revision")
-		return
-	}
-	// Resolve on the transport copy; the immutable snapshot remains unchanged.
-	items := []modRevisionResponse{revision}
-	if err = s.resolveModRevisionIconURLs(r.Context(), items); err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate revision icon URL")
-		return
-	}
-	writeJSON(w, http.StatusCreated, items[0])
+	s.writeModRevisionOutcome(w, r, http.StatusCreated, revision)
 }
 
 func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
@@ -255,8 +260,12 @@ func (s *Server) modRevisionHistory(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 	identity, err := s.readableModIdentity(r.Context(), normalizeModSiteID(r.PathValue("siteId")), currentClaims(r), "project.review")
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "mod not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load mod")
 		return
 	}
 	beforeID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("before")))
@@ -265,13 +274,33 @@ func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid revision comparison")
 		return
 	}
-	before, err := s.modRevisionByPublicID(r.Context(), beforeID)
-	if err != nil || before.ModInternalID != identity.ID {
+	rows, err := s.db.Query(r.Context(), modRevisionSelect+`where revision.aggregate_type='mod'
+		and revision.entity_id=$1 and revision.public_id=any($2::text[])`, identity.ID, []string{beforeID, afterID})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read revision comparison")
+		return
+	}
+	revisions, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (modRevisionResponse, error) {
+		return scanModRevision(row)
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read revision comparison")
+		return
+	}
+	var before, after modRevisionResponse
+	for _, revision := range revisions {
+		if revision.ID == beforeID {
+			before = revision
+		}
+		if revision.ID == afterID {
+			after = revision
+		}
+	}
+	if before.ID == "" {
 		writeError(w, http.StatusNotFound, "base revision not found")
 		return
 	}
-	after, err := s.modRevisionByPublicID(r.Context(), afterID)
-	if err != nil || after.ModInternalID != identity.ID {
+	if after.ID == "" {
 		writeError(w, http.StatusNotFound, "target revision not found")
 		return
 	}
@@ -415,21 +444,35 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		s.refreshProjectACLVersion(r.Context())) {
 		return
 	}
-	items := []modRevisionResponse{updated}
-	if err = s.resolveModRevisionIconURLs(r.Context(), items); err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate revision icon URL")
-		return
+	s.writeModRevisionOutcome(w, r, http.StatusOK, updated)
+}
+
+// The decision and its IDs have committed. A failed image read cannot undo it
+// or authorize returning the stable storage URL in the transport copy.
+func (s *Server) writeModRevisionOutcome(w http.ResponseWriter, r *http.Request, status int, revision modRevisionResponse) {
+	items := []modRevisionResponse{revision}
+	if err := s.resolveModRevisionIconURLs(r.Context(), items); err != nil {
+		items[0].Snapshot.IconURL = ""
+		items[0].IconUnavailable = true
 	}
-	writeJSON(w, http.StatusOK, items[0])
+	writeJSON(w, status, items[0])
 }
 
 // Resolve only HTTP response copies, after comparisons and transactions have
 // finished, so stored snapshots/hashes and semantic diffs retain stable URLs.
 func (s *Server) resolveModRevisionIconURLs(ctx context.Context, items []modRevisionResponse) error {
-	cfg := s.ossConfigFromSettings(ctx)
 	icons := make([]storedProjectRevisionIcon, len(items))
+	hasIcon := false
 	for i := range items {
 		icons[i] = storedProjectRevisionIcon{"mod", items[i].ModInternalID, items[i].ID, items[i].Snapshot.IconURL}
+		hasIcon = hasIcon || items[i].Snapshot.IconURL != ""
+	}
+	if !hasIcon {
+		return nil
+	}
+	cfg, err := s.ossConfigFromSettingsStrictWithQueryer(ctx, s.db)
+	if err != nil {
+		return err
 	}
 	urls, err := s.resolveStoredProjectRevisionIconURLs(ctx, cfg, icons)
 	if err != nil {
@@ -486,14 +529,6 @@ const modRevisionSelect = `select
 		order by event.created_at desc,event.id desc limit 1
 	) latest_review on true
 	left join users reviewer on reviewer.id=latest_review.actor_id `
-
-func (s *Server) modRevisionByID(ctx context.Context, id int64) (modRevisionResponse, error) {
-	return scanModRevision(s.db.QueryRow(ctx, modRevisionSelect+`where revision.id=$1 and revision.aggregate_type='mod'`, id))
-}
-
-func (s *Server) modRevisionByPublicID(ctx context.Context, publicID string) (modRevisionResponse, error) {
-	return scanModRevision(s.db.QueryRow(ctx, modRevisionSelect+`where revision.public_id=$1 and revision.aggregate_type='mod'`, publicID))
-}
 
 func scanModRevision(row scanner) (modRevisionResponse, error) {
 	var result modRevisionResponse
