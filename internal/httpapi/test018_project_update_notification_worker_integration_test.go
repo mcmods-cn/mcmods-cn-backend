@@ -2,18 +2,12 @@ package httpapi
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"regexp"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	appconfig "mcmods-cn-backend/internal/config"
@@ -252,106 +246,7 @@ func assertTEST018CachedUnread(t *testing.T, ctx context.Context, cache *queryca
 	}
 }
 
-type test018DatabaseIdentity struct {
-	Name   string
-	OID    uint32
-	Owner  string
-	Marker string
-}
-
-var test018DatabaseNamePattern = regexp.MustCompile(`^test018_project_update_[0-9]+$`)
-var test018DatabaseMarkerPattern = regexp.MustCompile(`^mcmods-test018-owned:[0-9a-f]{32}$`)
-var errTEST018DatabaseOwnership = errors.New("refuse TEST018 database cleanup: identity is unknown or changed")
-
-type test018DatabaseAdmin interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}
-
-func readTEST018DatabaseIdentity(ctx context.Context, admin test018DatabaseAdmin, name string) (test018DatabaseIdentity, bool, error) {
-	identity := test018DatabaseIdentity{Name: name}
-	err := admin.QueryRow(ctx, `select oid,pg_catalog.pg_get_userbyid(datdba),coalesce(pg_catalog.shobj_description(oid,'pg_database'),'') from pg_catalog.pg_database where datname=$1`, name).Scan(&identity.OID, &identity.Owner, &identity.Marker)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return identity, false, nil
-	}
-	return identity, err == nil, err
-}
-
-func createTEST018OwnedDatabase(ctx context.Context, admin test018DatabaseAdmin) (test018DatabaseIdentity, error) {
-	identity := test018DatabaseIdentity{Name: fmt.Sprintf("test018_project_update_%d", time.Now().UnixNano())}
-	var nonce [16]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
-		return identity, err
-	}
-	identity.Marker = "mcmods-test018-owned:" + hex.EncodeToString(nonce[:])
-	if err := admin.QueryRow(ctx, `select current_user::pg_catalog.text`).Scan(&identity.Owner); err != nil {
-		return identity, err
-	}
-	if _, err := admin.Exec(ctx, "create database "+pgx.Identifier{identity.Name}.Sanitize()); err != nil {
-		return identity, err
-	}
-	actual, exists, err := readTEST018DatabaseIdentity(ctx, admin, identity.Name)
-	if err != nil || !exists || actual.Owner != identity.Owner || actual.OID == 0 || actual.Marker != "" {
-		// A CREATE success alone cannot authorize a later unverified removal.
-		// Leave a partially recorded resource for explicit scoped diagnosis.
-		return identity, fmt.Errorf("created isolated database but cannot record its original ownership: %w", errors.Join(errTEST018DatabaseOwnership, err))
-	}
-	identity.OID = actual.OID
-	// The comment is a fixed prefix plus cryptographic hexadecimal digits; no
-	// externally supplied string enters this SQL literal.
-	if _, err = admin.Exec(ctx, "comment on database "+pgx.Identifier{identity.Name}.Sanitize()+" is '"+identity.Marker+"'"); err != nil {
-		return identity, fmt.Errorf("created isolated database but could not persist its ownership nonce: %w", err)
-	}
-	return identity, nil
-}
-
-func dropTEST018OwnedDatabase(ctx context.Context, admin test018DatabaseAdmin, expected test018DatabaseIdentity) error {
-	if !test018DatabaseNamePattern.MatchString(expected.Name) || expected.OID == 0 || expected.Owner == "" || !test018DatabaseMarkerPattern.MatchString(expected.Marker) {
-		return errTEST018DatabaseOwnership
-	}
-	actual, exists, err := readTEST018DatabaseIdentity(ctx, admin, expected.Name)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errTEST018DatabaseOwnership, err)
-	}
-	if !exists || actual != expected {
-		return errTEST018DatabaseOwnership
-	}
-	if err = ctx.Err(); err != nil {
-		return err
-	}
-	// An active connection is an observable cleanup failure, never permission
-	// to terminate it. PostgreSQL's ordinary DROP preserves that boundary.
-	_, err = admin.Exec(ctx, "drop database "+pgx.Identifier{expected.Name}.Sanitize())
-	if err != nil {
-		return err
-	}
-	_, exists, err = readTEST018DatabaseIdentity(ctx, admin, expected.Name)
-	if err != nil || exists {
-		return fmt.Errorf("ordinary TEST018 removal was not confirmed: %w", errors.Join(errTEST018DatabaseOwnership, err))
-	}
-	return nil
-}
-
-func closeTEST018OwnedPool(ctx context.Context, pool interface{ Close() }) error {
-	closed := make(chan struct{})
-	go func() { pool.Close(); close(closed) }()
-	select {
-	case <-closed:
-		return nil
-	case <-ctx.Done():
-		// Never start DROP while a borrowed connection from this pool remains.
-		return fmt.Errorf("owned TEST018 pool did not close: %w", ctx.Err())
-	}
-}
-
-func cleanupTEST018OwnedDatabase(ctx context.Context, admin test018DatabaseAdmin, expected test018DatabaseIdentity, closeOwn func(context.Context) error) error {
-	if closeOwn != nil {
-		if err := closeOwn(ctx); err != nil {
-			return err
-		}
-	}
-	return dropTEST018OwnedDatabase(ctx, admin, expected)
-}
+var test018DatabaseScope = auditT002DatabaseScope{Prefix: "test018_project_update_"}
 
 func newTEST018IsolatedDatabase(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
@@ -368,7 +263,7 @@ func newTEST018IsolatedDatabaseWithConfig(t *testing.T, ctx context.Context, bas
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := createTEST018OwnedDatabase(ctx, adminPool)
+	identity, err := createAuditT002OwnedDatabase(ctx, adminPool, test018DatabaseScope)
 	if err != nil {
 		adminPool.Close()
 		t.Fatalf("create isolated TEST018 database %s: %v; no cleanup without a complete original OID/owner/nonce", identity.Name, err)
@@ -379,9 +274,9 @@ func newTEST018IsolatedDatabaseWithConfig(t *testing.T, ctx context.Context, bas
 		defer adminPool.Close()
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cleanupCancel()
-		if dropErr := cleanupTEST018OwnedDatabase(cleanupCtx, adminPool, identity, func(ctx context.Context) error {
+		if dropErr := cleanupAuditT002OwnedDatabase(cleanupCtx, adminPool, test018DatabaseScope, identity, func(ctx context.Context) error {
 			if pool != nil {
-				if err := closeTEST018OwnedPool(ctx, pool); err != nil {
+				if err := closeAuditT002OwnedPool(ctx, pool); err != nil {
 					return err
 				}
 				pool = nil

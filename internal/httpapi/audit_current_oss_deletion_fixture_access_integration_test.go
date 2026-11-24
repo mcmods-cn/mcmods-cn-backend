@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/database"
+	"mcmods-cn-backend/tools/testing/postgrestarget"
 )
 
 // These callers own fresh connection/transaction temp fixtures and create their
@@ -101,7 +102,7 @@ func accessFixtureBusinessRows(t *testing.T, ctx context.Context, pool accessFix
 // not an ordinary-schema fixture whose public tables belong to another scope.
 func openAccessOwnedMigratedFixture(t *testing.T, ctx context.Context, connectionString string) *pgxpool.Pool {
 	t.Helper()
-	parentConfig, err := pgxpool.ParseConfig(connectionString)
+	parentConfig, err := postgrestarget.ParseSingleLoopback(connectionString)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func openAccessOwnedMigratedFixture(t *testing.T, ctx context.Context, connectio
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := createTEST018OwnedDatabase(ctx, parent)
+	identity, err := createAuditT002OwnedDatabase(ctx, parent, test018DatabaseScope)
 	if err != nil {
 		parent.Close()
 		t.Fatalf("create owned fixture database: %v; no cleanup without original identity", err)
@@ -120,9 +121,9 @@ func openAccessOwnedMigratedFixture(t *testing.T, ctx context.Context, connectio
 		defer parent.Close()
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		if err := cleanupTEST018OwnedDatabase(cleanup, parent, identity, func(ctx context.Context) error {
+		if err := cleanupAuditT002OwnedDatabase(cleanup, parent, test018DatabaseScope, identity, func(ctx context.Context) error {
 			if pool != nil {
-				return closeTEST018OwnedPool(ctx, pool)
+				return closeAuditT002OwnedPool(ctx, pool)
 			}
 			return nil
 		}); err != nil {

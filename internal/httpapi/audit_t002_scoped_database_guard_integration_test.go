@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -15,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	appconfig "mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/tools/testing/postgrestarget"
 )
 
 type auditT002ScopeIdentityRow struct{ scan func(...any) error }
@@ -57,12 +57,21 @@ func (admin *auditT002ScopeGuardAdmin) Exec(_ context.Context, statement string,
 
 var auditT002ScopeTestScope = auditT002DatabaseScope{Prefix: "audit_t002_httpapi_"}
 
-func auditT002ScopeGuardIdentity() auditT002DatabaseIdentity {
-	return auditT002DatabaseIdentity{Name: "audit_t002_httpapi_1234567890", OID: 12345, Owner: "owned_test_role", Marker: auditT002ScopeTestScope.markerPrefix() + strings.Repeat("a", 32)}
+func auditT002ScopeGuardIdentity(scope auditT002DatabaseScope) auditT002DatabaseIdentity {
+	return auditT002DatabaseIdentity{Name: scope.Prefix + "1234567890", OID: 12345, Owner: "owned_test_role", Marker: scope.markerPrefix() + strings.Repeat("a", 32)}
+}
+
+func TestAuditT002DatabaseCleanupIdentityMismatchHasZeroDropAndNoTermination(t *testing.T) {
+	assertOwnedDatabaseRejectsWrongIdentity(t, test018DatabaseScope)
 }
 
 func TestAuditT002ScopedDatabaseCleanupIdentityMismatchHasZeroDropAndNoTermination(t *testing.T) {
-	original := auditT002ScopeGuardIdentity()
+	assertOwnedDatabaseRejectsWrongIdentity(t, auditT002ScopeTestScope)
+}
+
+func assertOwnedDatabaseRejectsWrongIdentity(t *testing.T, scope auditT002DatabaseScope) {
+	t.Helper()
+	original := auditT002ScopeGuardIdentity(scope)
 	for _, field := range []string{"oid", "owner", "nonce", "missing", "query-failure", "unsafe-name", "unknown-oid", "unknown-owner", "invalid-nonce", "cross-scope-name", "cross-scope-marker"} {
 		t.Run(field, func(t *testing.T) {
 			expected, current := original, original
@@ -73,7 +82,7 @@ func TestAuditT002ScopedDatabaseCleanupIdentityMismatchHasZeroDropAndNoTerminati
 			case "owner":
 				admin.identity.Owner = "another_task_owned_role"
 			case "nonce":
-				admin.identity.Marker = auditT002ScopeTestScope.markerPrefix() + strings.Repeat("b", 32)
+				admin.identity.Marker = scope.markerPrefix() + strings.Repeat("b", 32)
 			case "missing":
 				admin.exists = false
 			case "query-failure":
@@ -92,7 +101,7 @@ func TestAuditT002ScopedDatabaseCleanupIdentityMismatchHasZeroDropAndNoTerminati
 				expected.Marker = "mcmods-testdb-owned:another_task_:" + strings.Repeat("a", 32)
 			}
 			before, present := admin.identity, admin.exists
-			if err := dropAuditT002OwnedDatabase(context.Background(), admin, auditT002ScopeTestScope, expected); !errors.Is(err, errAuditT002DatabaseOwnership) {
+			if err := dropAuditT002OwnedDatabase(context.Background(), admin, scope, expected); !errors.Is(err, errAuditT002DatabaseOwnership) {
 				t.Fatalf("ownership mismatch was not rejected precisely: %v", err)
 			}
 			if admin.drops != 0 || admin.identity != before || admin.exists != present {
@@ -107,7 +116,7 @@ func TestAuditT002ScopedDatabaseCleanupIdentityMismatchHasZeroDropAndNoTerminati
 		})
 	}
 	admin := &auditT002ScopeGuardAdmin{identity: original, exists: true}
-	if err := dropAuditT002OwnedDatabase(context.Background(), admin, auditT002ScopeTestScope, original); err != nil || admin.drops != 1 || admin.exists || len(admin.sql) != 3 {
+	if err := dropAuditT002OwnedDatabase(context.Background(), admin, scope, original); err != nil || admin.drops != 1 || admin.exists || len(admin.sql) != 3 {
 		t.Fatalf("ordinary exact-identity DROP and absence confirmation: drops=%d exists=%t sql=%d err=%v", admin.drops, admin.exists, len(admin.sql), err)
 	}
 }
@@ -120,7 +129,16 @@ func (closer auditT002ScopeBlockingCloser) Close() {
 	close(closer.finished)
 }
 
+func TestAuditT002OwnedPoolMustCloseBeforeAnyCleanupQuery(t *testing.T) {
+	assertOwnedDatabaseClosesPoolFirst(t, test018DatabaseScope)
+}
+
 func TestAuditT002ScopedOwnedPoolMustCloseBeforeAnyCleanupQuery(t *testing.T) {
+	assertOwnedDatabaseClosesPoolFirst(t, auditT002ScopeTestScope)
+}
+
+func assertOwnedDatabaseClosesPoolFirst(t *testing.T, scope auditT002DatabaseScope) {
+	t.Helper()
 	closer := auditT002ScopeBlockingCloser{make(chan struct{}), make(chan struct{}), make(chan struct{})}
 	var once sync.Once
 	release := func() { once.Do(func() { close(closer.release) }) }
@@ -132,12 +150,12 @@ func TestAuditT002ScopedOwnedPoolMustCloseBeforeAnyCleanupQuery(t *testing.T) {
 			t.Error("owned substitute closer did not finish after its release barrier")
 		}
 	}()
-	admin := &auditT002ScopeGuardAdmin{identity: auditT002ScopeGuardIdentity(), exists: true}
+	admin := &auditT002ScopeGuardAdmin{identity: auditT002ScopeGuardIdentity(scope), exists: true}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- cleanupAuditT002OwnedDatabase(ctx, admin, auditT002ScopeTestScope, admin.identity, func(ctx context.Context) error { return closeAuditT002OwnedPool(ctx, closer) })
+		done <- cleanupAuditT002OwnedDatabase(ctx, admin, scope, admin.identity, func(ctx context.Context) error { return closeAuditT002OwnedPool(ctx, closer) })
 	}()
 	select {
 	case <-closer.started:
@@ -173,18 +191,22 @@ func (admin *auditT002ScopeRecordingAdmin) Exec(ctx context.Context, statement s
 	return admin.pool.Exec(ctx, statement, args...)
 }
 
+func TestAuditT002ActualOwnedDatabaseRejectsMismatchesAndLiveConnectionWithoutForceIntegration(t *testing.T) {
+	assertOwnedDatabaseCleanupIntegration(t, test018DatabaseScope)
+}
+
 func TestAuditT002ScopedActualOwnedDatabaseRejectsMismatchesAndLiveConnectionWithoutForceIntegration(t *testing.T) {
-	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
-		t.Skip("set MCMODS_RUN_DB_INTEGRATION=1 for actual task-owned database cleanup negatives")
-	}
+	assertOwnedDatabaseCleanupIntegration(t, auditT002ScopeTestScope)
+}
+
+func assertOwnedDatabaseCleanupIntegration(t *testing.T, scope auditT002DatabaseScope) {
+	t.Helper()
+	requireOCT02DatabaseIntegration(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cfg, err := pgxpool.ParseConfig(appconfig.Load().DB.ConnString())
+	cfg, err := postgrestarget.ParseSingleLoopback(appconfig.Load().DB.ConnString())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if cfg.ConnConfig.Host != "127.0.0.1" && cfg.ConnConfig.Host != "localhost" && cfg.ConnConfig.Host != "::1" {
-		t.Fatal("owned cleanup regression requires an explicitly configured loopback test PostgreSQL server")
 	}
 	cfg.MaxConns, cfg.MinConns = 1, 0
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -192,7 +214,7 @@ func TestAuditT002ScopedActualOwnedDatabaseRejectsMismatchesAndLiveConnectionWit
 		t.Fatal(err)
 	}
 	admin := &auditT002ScopeRecordingAdmin{pool: pool}
-	identity, err := createAuditT002OwnedDatabase(ctx, admin, auditT002ScopeTestScope)
+	identity, err := createAuditT002OwnedDatabase(ctx, admin, scope)
 	if err != nil {
 		pool.Close()
 		t.Fatalf("owned substitute creation failed: %v", err)
@@ -210,7 +232,7 @@ func TestAuditT002ScopedActualOwnedDatabaseRejectsMismatchesAndLiveConnectionWit
 			}
 		}
 		if !dropped {
-			if err := dropAuditT002OwnedDatabase(cleanup, admin, auditT002ScopeTestScope, identity); err != nil {
+			if err := dropAuditT002OwnedDatabase(cleanup, admin, scope, identity); err != nil {
 				t.Errorf("owned substitute remains for diagnosis: %v", err)
 			}
 		}
@@ -227,13 +249,13 @@ func TestAuditT002ScopedActualOwnedDatabaseRejectsMismatchesAndLiveConnectionWit
 			case "owner":
 				wrong.Owner += "_mismatch"
 			case "nonce":
-				wrong.Marker = auditT002ScopeTestScope.markerPrefix() + strings.Repeat("0", 32)
+				wrong.Marker = scope.markerPrefix() + strings.Repeat("0", 32)
 				if wrong.Marker == identity.Marker {
-					wrong.Marker = auditT002ScopeTestScope.markerPrefix() + strings.Repeat("1", 32)
+					wrong.Marker = scope.markerPrefix() + strings.Repeat("1", 32)
 				}
 			}
 			admin.sql = nil
-			if err := dropAuditT002OwnedDatabase(ctx, admin, auditT002ScopeTestScope, wrong); !errors.Is(err, errAuditT002DatabaseOwnership) {
+			if err := dropAuditT002OwnedDatabase(ctx, admin, scope, wrong); !errors.Is(err, errAuditT002DatabaseOwnership) {
 				t.Fatalf("actual metadata mismatch returned an unrelated result: %v", err)
 			}
 			for _, statement := range admin.sql {
@@ -260,7 +282,7 @@ func TestAuditT002ScopedActualOwnedDatabaseRejectsMismatchesAndLiveConnectionWit
 		t.Fatal(err)
 	}
 	admin.sql = nil
-	err = dropAuditT002OwnedDatabase(ctx, admin, auditT002ScopeTestScope, identity)
+	err = dropAuditT002OwnedDatabase(ctx, admin, scope, identity)
 	var databaseError *pgconn.PgError
 	if !errors.As(err, &databaseError) || databaseError.Code != "55006" {
 		t.Fatalf("an actual live owned connection must cause exact object_in_use55006: %v", err)
@@ -283,7 +305,7 @@ func TestAuditT002ScopedActualOwnedDatabaseRejectsMismatchesAndLiveConnectionWit
 		t.Fatal(err)
 	}
 	held = nil
-	if err = dropAuditT002OwnedDatabase(ctx, admin, auditT002ScopeTestScope, identity); err != nil {
+	if err = dropAuditT002OwnedDatabase(ctx, admin, scope, identity); err != nil {
 		t.Fatal(err)
 	}
 	dropped = true

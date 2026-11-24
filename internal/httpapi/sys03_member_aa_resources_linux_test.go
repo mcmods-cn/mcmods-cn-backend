@@ -105,7 +105,7 @@ func sys03MemberAAOwnedDatabase(t *testing.T, ctx context.Context, cfg config.Co
 	if err != nil {
 		t.Fatal("owned child database admin connection unavailable")
 	}
-	original, err := createTEST018OwnedDatabase(ctx, admin)
+	original, err := createAuditT002OwnedDatabase(ctx, admin, test018DatabaseScope)
 	if err != nil {
 		admin.Close()
 		sys03MemberAAPrivateReceipt(t, input, "database-incomplete", map[string]any{"partialOriginal": original, "completeOriginalIdentity": false, "cleanupAuthorized": false})
@@ -120,11 +120,11 @@ func sys03MemberAAOwnedDatabase(t *testing.T, ctx context.Context, cfg config.Co
 			t.Error("owned server writers did not drain; preserve original child database")
 			return
 		}
-		if err := cleanupTEST018OwnedDatabase(cleanupCtx, admin, original, func(ctx context.Context) error {
+		if err := cleanupAuditT002OwnedDatabase(cleanupCtx, admin, test018DatabaseScope, original, func(ctx context.Context) error {
 			if pool == nil {
 				return nil
 			}
-			return closeTEST018OwnedPool(ctx, pool)
+			return closeAuditT002OwnedPool(ctx, pool)
 		}); err != nil {
 			t.Error("owned child database original-OID/owner/nonce/ordinary-DROP cleanup not confirmed; retain scope")
 			return

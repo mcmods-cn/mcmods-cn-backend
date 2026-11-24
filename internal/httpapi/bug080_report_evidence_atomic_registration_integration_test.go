@@ -29,9 +29,9 @@ func TestReportEvidenceFileAndMetadataCommitTogetherAndRetryIntegration(t *testi
 	databaseURL := strings.TrimSpace(os.Getenv("MCMODS_TEST_DATABASE_URL"))
 	if databaseURL == "" {
 		if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
-			t.Skip("set MCMODS_TEST_DATABASE_URL or MCMODS_RUN_DB_INTEGRATION=1 to verify report evidence registration")
+			t.Skip("set MCMODS_TEST_DATABASE_URL to the owned PostgreSQL service to verify report evidence registration")
 		}
-		databaseURL = "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable"
+		t.Fatal("MCMODS_RUN_DB_INTEGRATION=1 requires MCMODS_TEST_DATABASE_URL for report evidence registration")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
