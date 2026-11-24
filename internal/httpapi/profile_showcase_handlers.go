@@ -106,7 +106,7 @@ const userShowcaseProjectsQuery = `with qualified_access as materialized (
 		on access.project_type='blueprint' and blueprint.id=access.project_id
 	where blueprint.status in ('ready','partial') and blueprint.review_status in ('not_required','approved')
 	union all
-	select access.project_id,access.project_type,asset.display_name,asset.description,blob.object_key,asset.updated_at,
+	select access.project_id,access.project_type,asset.display_name,asset.description,blob.hash,asset.updated_at,
 		access.is_developer,access.is_editor
 	from qualified_access access join skin_assets asset
 		on access.project_type='skin' and asset.id=access.project_id
@@ -213,19 +213,7 @@ func (s *Server) loadUserClaimedAuthors(ctx context.Context, userID int64) ([]us
 		return nil, err
 	}
 	rows.Close()
-	ossCfg := s.ossConfigFromSettings(ctx)
-	urls := make([]string, len(items))
-	for i := range items {
-		urls[i] = items[i].IconURL
-	}
-	urls, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, urls)
-	if err != nil {
-		return nil, err
-	}
-	for i := range items {
-		items[i].IconURL = urls[i]
-	}
-	return items, nil
+	return s.resolveShowcaseImages(ctx, items)
 }
 
 func (s *Server) userContributions(w http.ResponseWriter, r *http.Request) {
@@ -273,19 +261,7 @@ func (s *Server) loadUserShowcaseProjects(ctx context.Context, userID int64) ([]
 		return nil, err
 	}
 	rows.Close()
-	ossCfg := s.ossConfigFromSettings(ctx)
-	urls := make([]string, len(items))
-	for i := range items {
-		urls[i] = items[i].IconURL
-	}
-	urls, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, urls)
-	if err != nil {
-		return nil, err
-	}
-	for i := range items {
-		items[i].IconURL = urls[i]
-	}
-	return items, nil
+	return s.resolveShowcaseImages(ctx, items)
 }
 
 func (s *Server) loadUserShowcaseUploads(ctx context.Context, userID int64) ([]userShowcaseItem, error) {
@@ -297,7 +273,7 @@ func (s *Server) loadUserShowcaseUploads(ctx context.Context, userID int64) ([]u
 			where blueprint.owner_id=$1 and blueprint.status in ('ready','partial')
 			  and blueprint.review_status in ('not_required','approved')
 			union all
-			select asset.id,'skin',asset.display_name,asset.description,blob.object_key,asset.updated_at
+			select asset.id,'skin',asset.display_name,asset.description,blob.hash,asset.updated_at
 			from skin_assets asset join skin_texture_blobs blob on blob.hash=asset.blob_hash
 			where asset.owner_id=$1 and asset.status='active' and asset.review_status='approved'
 			  and asset.visibility='public'
@@ -322,17 +298,33 @@ func (s *Server) loadUserShowcaseUploads(ctx context.Context, userID int64) ([]u
 		return nil, err
 	}
 	rows.Close()
-	ossCfg := s.ossConfigFromSettings(ctx)
-	urls := make([]string, len(items))
-	for i := range items {
-		urls[i] = items[i].IconURL
+	return s.resolveShowcaseImages(ctx, items)
+}
+
+// Blueprints and skins serve their media through routes that check the current
+// parent. Project and creator images use the stored raster binding policy.
+func (s *Server) resolveShowcaseImages(ctx context.Context, items []userShowcaseItem) ([]userShowcaseItem, error) {
+	if len(items) == 0 {
+		return items, nil
 	}
-	urls, err = s.resolveStoredOSSImageURLsWithConfig(ctx, ossCfg, urls)
+	urls := make([]string, len(items))
+	for i, item := range items {
+		switch {
+		case item.IconURL == "":
+		case item.EntityType == "blueprint":
+			urls[i] = blueprintCoverPath(item.PublicID, item.UpdatedAt)
+		case item.EntityType == "skin":
+			urls[i] = skinTexturePath(item.IconURL)
+		default:
+			urls[i] = item.IconURL
+		}
+	}
+	resolved, err := s.resolveStoredOSSImageURLsWithConfig(ctx, s.ossConfigFromSettings(ctx), urls)
 	if err != nil {
 		return nil, err
 	}
 	for i := range items {
-		items[i].IconURL = urls[i]
+		items[i].IconURL = resolved[i]
 	}
 	return items, nil
 }

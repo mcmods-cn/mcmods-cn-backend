@@ -521,6 +521,10 @@ func addSkinToWardrobeTx(ctx context.Context, tx pgx.Tx, userID, assetID, knownO
 	return true, nil
 }
 
+func skinTexturePath(hash string) string {
+	return "/api/yggdrasil/textures/" + hash
+}
+
 func skinAssetJSON(record skinAssetRecord, claims security.Claims) map[string]any {
 	isOwner := claims.Subject > 0 && claims.Subject == record.OwnerID
 	canEdit := isOwner || isSkinAdmin(claims)
@@ -532,7 +536,7 @@ func skinAssetJSON(record skinAssetRecord, claims security.Claims) map[string]an
 		"name": record.Name, "description": record.Description, "tags": record.Tags,
 		"visibility": record.Visibility, "reviewStatus": record.ReviewStatus, "status": record.Status,
 		"downloads": record.Downloads, "width": record.Width, "height": record.Height, "sizeBytes": record.SizeBytes,
-		"textureUrl": "/api/yggdrasil/textures/" + record.BlobHash,
+		"textureUrl": skinTexturePath(record.BlobHash),
 		"inWardrobe": record.InWardrobe, "canEdit": canEdit, "canUse": canUse,
 		"createdAt": record.CreatedAt, "updatedAt": record.UpdatedAt,
 	}
@@ -922,7 +926,7 @@ func loadPlayerTexturesForProfiles(ctx context.Context, queryer skinMetadataQuer
 		if profile == nil {
 			continue
 		}
-		texture.TextureURL = "/api/yggdrasil/textures/" + texture.TextureHash
+		texture.TextureURL = skinTexturePath(texture.TextureHash)
 		texture.CanEdit = viewerID > 0 && viewerID == texture.OwnerInternalID
 		texture.CanUse = assetStatus == "active" && (texture.CanEdit ||
 			(texture.ReviewStatus == "approved" && texture.Visibility != "private"))

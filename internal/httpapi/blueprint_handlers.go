@@ -516,7 +516,7 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 		item.Avatar = avatarURLs[index]
 		items = append(items, map[string]any{"id": item.PublicID, "title": item.Title, "description": item.Description, "sourceFormat": item.Format, "status": item.Status,
 			"size": []int{item.SizeX, item.SizeY, item.SizeZ}, "blockCount": item.BlockCount, "paletteCount": item.PaletteCount, "createdAt": item.CreatedAt, "updatedAt": item.UpdatedAt,
-			"coverUrl": "/api/v1/blueprints/" + item.PublicID + "/cover?v=" + strconv.FormatInt(item.UpdatedAt.Unix(), 10), "requiredMods": requiredMods[item.InternalID],
+			"coverUrl": blueprintCoverPath(item.PublicID, item.UpdatedAt), "requiredMods": requiredMods[item.InternalID],
 			"uploader": map[string]any{"id": item.UploaderID, "username": item.Username, "avatarUrl": item.Avatar}})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -641,7 +641,7 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 		"createdAt": createdAt, "updatedAt": updatedAt, "canEdit": claims.Subject == ownerID || claimsAllow(claims, "admin.*"),
 		"uploader": map[string]any{"id": ownerID, "username": username, "avatarUrl": avatar},
 		"variants": variants, "materials": materials, "requiredMods": requiredModsByID[blueprintID], "assetRevisions": assetRevisions, "renderAvailable": normalizedKey != "", "originalFileId": originalFileID, "originalObjectKey": originalKey,
-		"coverUrl": "/api/v1/blueprints/" + publicID + "/cover?v=" + strconv.FormatInt(updatedAt.Unix(), 10), "coverGenerated": strings.Contains(coverKey, "/cover/generated-"),
+		"coverUrl": blueprintCoverPath(publicID, updatedAt), "coverGenerated": strings.Contains(coverKey, "/cover/generated-"),
 	})
 }
 
@@ -788,6 +788,10 @@ func (s *Server) blueprintMaterialRows(ctx context.Context, blueprintID int64, l
 			"publicId": source.PublicID})
 	}
 	return result, nil
+}
+
+func blueprintCoverPath(publicID string, updatedAt time.Time) string {
+	return "/api/v1/blueprints/" + publicID + "/cover?v=" + strconv.FormatInt(updatedAt.Unix(), 10)
 }
 
 func (s *Server) blueprintCover(w http.ResponseWriter, r *http.Request) {
