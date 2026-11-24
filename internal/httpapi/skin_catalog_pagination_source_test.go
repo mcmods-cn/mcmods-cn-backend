@@ -13,12 +13,11 @@ func TestPublicSkinCatalogUsesBoundedProjectionCursorPage(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(sourceBytes)
-	start := strings.Index(source, "func (s *Server) listPublicSkins")
-	end := strings.Index(source[start:], "func (s *Server) createSkin")
-	if start < 0 || end < 0 {
+	_, tail, foundStart := strings.Cut(source, "func (s *Server) listPublicSkins")
+	body, _, foundEnd := strings.Cut(tail, "func (s *Server) createSkin")
+	if !foundStart || !foundEnd {
 		t.Fatal("public skin handler bounds missing")
 	}
-	body := source[start : start+end]
 	for _, required := range []string{"parseSkinCatalogPageRequest", "skinCatalogPageSQL", "hasMore", "nextCursor"} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("public skin handler is missing %q", required)

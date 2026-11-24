@@ -12,12 +12,11 @@ func TestSkinWardrobeHandlerUsesCursorPageEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(raw)
-	start := strings.Index(source, "func (s *Server) skinWardrobe(")
-	end := strings.Index(source[start:], "func (s *Server) skinWardrobeItem(")
-	if start < 0 || end < 0 {
+	_, tail, foundStart := strings.Cut(source, "func (s *Server) skinWardrobe(")
+	handler, _, foundEnd := strings.Cut(tail, "func (s *Server) skinWardrobeItem(")
+	if !foundStart || !foundEnd {
 		t.Fatal("skin wardrobe handler boundaries were not found")
 	}
-	handler := source[start : start+end]
 	for _, required := range []string{
 		"parseSkinWardrobePageRequest", "skinWardrobePageSQL", "skinWardrobeCountSQL",
 		`"hasMore"`, `"nextCursor"`,
