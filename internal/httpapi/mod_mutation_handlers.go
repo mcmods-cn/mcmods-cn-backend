@@ -571,47 +571,28 @@ func resolvePendingModReferencesTx(ctx context.Context, tx pgx.Tx, modID int64) 
 	if reviewStatus != "approved" {
 		return nil
 	}
-	rows, err := tx.Query(ctx, `select unresolved.id,unresolved.source_id
-		from unresolved_references unresolved
-		join mod_relationships relationship
-		  on unresolved.source_type='mod_relationship' and unresolved.source_id=relationship.id
-		where unresolved.status='pending' and unresolved.reference_type='mod'
-		  and relationship.mod_id<>$1
+	// Relationship deletion also locks the source row before removing its
+	// unresolved record. Only acknowledge a reference bound to this target.
+	_, err := tx.Exec(ctx, `with pending as materialized (
+		select unresolved.id as reference_id, relationship.id as relationship_id, relationship.related_mod_id
+		from mod_relationships relationship
+		join unresolved_references unresolved on unresolved.source_type='mod_relationship' and unresolved.source_id=relationship.id
+		where unresolved.status='pending' and unresolved.reference_type='mod' and relationship.mod_id<>$1
+		  and (relationship.related_mod_id is null or relationship.related_mod_id=$1)
 		  and exists(select 1 from mod_identifiers identifier
 			where identifier.mod_id=$1 and lower(identifier.identifier)=unresolved.normalized_identifier)
-		order by unresolved.id for update of unresolved`, modID)
+		order by relationship.id,unresolved.id for no key update of relationship
+	), attached as (
+		update mod_relationships relationship set related_mod_id=$1,related_mod_name=$2
+		from pending where relationship.id=pending.relationship_id and relationship.related_mod_id is null
+		returning relationship.id
+	)
+	update unresolved_references unresolved
+	set status='resolved',resolved_type='mod',resolved_id=$1,resolved_at=now(),updated_at=now()
+	from pending where unresolved.id=pending.reference_id and unresolved.status='pending'
+	  and (pending.related_mod_id=$1 or exists(select 1 from attached where attached.id=pending.relationship_id))`, modID, name)
 	if err != nil {
 		return err
-	}
-	type pendingReference struct {
-		id             int64
-		relationshipID int64
-	}
-	pending := make([]pendingReference, 0)
-	for rows.Next() {
-		var item pendingReference
-		if err = rows.Scan(&item.id, &item.relationshipID); err != nil {
-			rows.Close()
-			return err
-		}
-		pending = append(pending, item)
-	}
-	if err = rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-	for _, item := range pending {
-		if _, err = tx.Exec(ctx, `update mod_relationships
-			set related_mod_id=$2,related_mod_name=$3 where id=$1 and related_mod_id is null`,
-			item.relationshipID, modID, name); err != nil {
-			return err
-		}
-		if _, err = tx.Exec(ctx, `update unresolved_references
-			set status='resolved',resolved_type='mod',resolved_id=$2,resolved_at=now(),updated_at=now()
-			where id=$1 and status='pending'`, item.id, modID); err != nil {
-			return err
-		}
 	}
 	if _, err = tx.Exec(ctx, `update minecraft_server_mods server_mod
 		set mod_id=$1
