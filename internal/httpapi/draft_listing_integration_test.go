@@ -2,11 +2,16 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"mcmods-cn-backend/internal/security"
 )
 
 func TestDraftPagesUseCategoryScopedKeysetAndAuthoritativeStatuses(t *testing.T) {
@@ -135,5 +140,56 @@ func installDraftListingTempTables(t *testing.T, ctx context.Context, tx pgx.Tx)
 		submitted_at timestamptz,expires_at timestamptz not null,created_at timestamptz not null,updated_at timestamptz not null) on commit drop`)
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDraftDetailReturnsOneOwnerSnapshotIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	owner := f.userIDs[f.editor]
+	grantTEST044Permissions(t, f.ctx, f.db, owner, "user.draft.retention_seconds.3600")
+	id := auditOSS001DraftToolSave(t, f, f.editor, "creator:"+f.modCode, "author", map[string]any{"name": "Draft body"})
+	cfg := f.db.Config()
+	tracer := &integrationQueryCounter{}
+	cfg.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(f.ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	server := &Server{db: pool}
+	get := func(actor int64) *httptest.ResponseRecorder {
+		ctx := context.WithValue(f.ctx, claimsContextKey, security.Claims{Subject: actor})
+		req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/users/me/drafts/"+id, nil)
+		req.SetPathValue("draftId", id)
+		response := httptest.NewRecorder()
+		server.userDraftItem(response, req)
+		return response
+	}
+	tracer.queries.Store(0)
+	owned := get(owner)
+	queries := tracer.queries.Load()
+	if owned.Code != http.StatusOK {
+		t.Fatalf("owner read returned %d", owned.Code)
+	}
+	var envelope struct {
+		Data userDraftDetail
+	}
+	var payload struct{ Name string }
+	if json.Unmarshal(owned.Body.Bytes(), &envelope) != nil || envelope.Data.ID != id ||
+		envelope.Data.Status != "draft" || json.Unmarshal(envelope.Data.Payload, &payload) != nil || payload.Name != "Draft body" {
+		t.Fatal("draft metadata and body must come from the same owned row")
+	}
+	t.Logf("SQL reads of a current draft detail: %d", queries)
+	if queries != 1 {
+		t.Errorf("expected one snapshot, got %d SQL statements", queries)
+	}
+	if got := get(f.userIDs[f.otherEditor]).Code; got != http.StatusNotFound {
+		t.Errorf("other owner read = %d", got)
+	}
+	if _, err := f.db.Exec(f.ctx, `update user_drafts set expires_at=now() where public_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(owner).Code; got != http.StatusNotFound {
+		t.Errorf("expired draft = %d", got)
 	}
 }
