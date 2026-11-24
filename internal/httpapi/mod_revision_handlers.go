@@ -328,7 +328,7 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		from change_requests request
 		join content_revisions revision on revision.id=request.proposed_revision_id and revision.aggregate_type='mod'
 		join mods mod on mod.id=revision.entity_id
-		where revision.public_id=$1 for update of request,mod`, revisionPublicID,
+		where revision.public_id=$1 and mod.slug=$2 for update of request,mod`, revisionPublicID, normalizeModSiteID(r.PathValue("siteId")),
 	).Scan(&changeRequestID, &status, &baseRevisionID, &modID, &snapshotRaw, &publishedRevisionID, &submittedBy, &projectID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "revision not found")
@@ -391,6 +391,7 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 	} else if !allowProjectRevisionRejection(w, r, tx, "mod", modID, changeRequestID, claims.Subject) {
 		return
 	}
+	annotateActivity(r, activity.ActionEdit, activity.ObjectReview, revisionPublicID, 0)
 	if err = appendReviewResolutionTx(r.Context(), tx, changeRequestID, request.Status, claims.Subject, request.Note, r); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record review")
 		return
