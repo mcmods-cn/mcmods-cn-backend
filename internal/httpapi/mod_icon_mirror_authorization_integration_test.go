@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -67,11 +68,10 @@ func TestExternalImageReuseRequiresExactOwnerAndPurposeIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 
-	server := &Server{db: pool}
 	options := externalImageMirrorOptions{category: category, source: source}
-	record, reusable := server.authorizedReusableExternalImageRecord(ctx, objectKey, options, ownerID, digest, size)
-	if !reusable || record.result.FileInternalID != fileID || record.result.FilePublicID != filePublicID {
-		t.Fatalf("exact owner and purpose was not reusable: reusable=%t record=%+v", reusable, record)
+	record, err := loadExternalImageRecord(ctx, pool, "test", objectKey, options, ownerID, false)
+	if err != nil || record.result.FileInternalID != fileID || record.result.FilePublicID != filePublicID {
+		t.Fatalf("exact owner and purpose was not reusable: err=%v record=%+v", err, record)
 	}
 
 	tests := []struct {
@@ -86,7 +86,7 @@ func TestExternalImageReuseRequiresExactOwnerAndPurposeIntegration(t *testing.T)
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if _, allowed := server.reusableExternalImageObject(ctx, nil, ossConfigPayload{}, objectKey, test.options, test.uploaderID, digest, size); allowed {
+			if _, err := loadExternalImageRecord(ctx, pool, "test", objectKey, test.options, test.uploaderID, false); !errors.Is(err, errUnsupportedExternalModIcon) {
 				t.Fatal("cross-boundary OSS image reuse was authorized")
 			}
 		})

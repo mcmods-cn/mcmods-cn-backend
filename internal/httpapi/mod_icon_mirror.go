@@ -13,6 +13,7 @@ import (
 	"time"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
+	"github.com/jackc/pgx/v5"
 )
 
 const maxExternalModIconBytes = int64(8 << 20)
@@ -58,16 +59,22 @@ func (s *Server) mirrorExternalImage(ctx context.Context, sourceURL string, uplo
 	if sourceURL == "" {
 		return mirroredExternalImage{}, nil
 	}
-	ossCfg := s.ossConfigFromSettings(ctx)
-	if objectKey, ok := ossObjectKeyUnderEndpoint(sourceURL, ossCfg.PublicEndpoint); ok {
-		ossClient, loadedCfg, clientErr := s.ossClient(ctx)
-		if clientErr != nil {
-			return mirroredExternalImage{}, clientErr
-		}
-		if result, reusable := s.reusableExternalImageObject(ctx, ossClient, loadedCfg, objectKey, options, uploaderID, "", 0); reusable {
-			return result, nil
-		}
+	if uploaderID <= 0 {
 		return mirroredExternalImage{}, errUnsupportedExternalModIcon
+	}
+	ossClient, ossCfg, err := s.ossClient(ctx)
+	if err != nil {
+		return mirroredExternalImage{}, err
+	}
+	if objectKey, ok := ossObjectKeyUnderEndpoint(sourceURL, ossCfg.PublicEndpoint); ok {
+		record, err := loadExternalImageRecord(ctx, s.db, ossCfg.Bucket, objectKey, options, uploaderID, false)
+		if err != nil {
+			return mirroredExternalImage{}, err
+		}
+		if err = record.verify(ctx, ossClient, ossCfg, objectKey); err != nil {
+			return mirroredExternalImage{}, err
+		}
+		return record.result, nil
 	}
 	parsed, err := url.Parse(sourceURL)
 	if err != nil || parsed.Scheme != "https" || parsed.User != nil || parsed.Port() != "" || !isAllowedExternalModIconHost(parsed.Hostname()) {
@@ -103,61 +110,88 @@ func (s *Server) mirrorExternalImage(ctx context.Context, sourceURL string, uplo
 	if len(data) == 0 || int64(len(data)) > maxExternalModIconBytes {
 		return mirroredExternalImage{}, errors.New("external image is empty or too large")
 	}
+	return s.storeExternalImage(ctx, ossClient, ossCfg, parsed, options, uploaderID, data)
+}
+
+// Record ownership before a conditional upload. A failed transfer leaves a private
+// pending receipt; replay verifies any already-written bytes before activating it.
+func (s *Server) storeExternalImage(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, sourceURL *url.URL, options externalImageMirrorOptions, uploaderID int64, data []byte) (mirroredExternalImage, error) {
 	contentType, extension, err := externalModIconFormat(data)
 	if err != nil {
 		return mirroredExternalImage{}, err
 	}
 	digest := sha256Hex(data)
-	objectKey := externalImageObjectKey(ossCfg.Prefix, options.category, options.baseName, digest, extension)
-	ossClient, loadedCfg, clientErr := s.ossClient(ctx)
-	if clientErr != nil {
-		return mirroredExternalImage{}, clientErr
+	objectKey := externalImageObjectKey(cfg.Prefix, options, uploaderID, digest, extension)
+	originalName := path.Base(sourceURL.Path)
+	if originalName == "." || originalName == "/" || originalName == "" {
+		originalName = digest + extension
 	}
-	ossCfg = loadedCfg
-	result, reusable := s.reusableExternalImageObject(ctx, ossClient, ossCfg, objectKey, options, uploaderID, digest, int64(len(data)))
-	if !reusable {
-		_, err = ossClient.PutObject(ctx, &aliyunoss.PutObjectRequest{
-			Bucket:        aliyunoss.Ptr(ossCfg.Bucket),
-			Key:           aliyunoss.Ptr(objectKey),
-			ContentType:   aliyunoss.Ptr(contentType),
-			ContentLength: aliyunoss.Ptr(int64(len(data))),
-			Body:          bytes.NewReader(data),
-			Metadata:      map[string]string{"sha256": digest, "source-host": strings.ToLower(parsed.Hostname())},
-		})
-		if err != nil {
-			return mirroredExternalImage{}, fmt.Errorf("upload external image to OSS: %w", err)
-		}
-		originalName := path.Base(parsed.Path)
-		if originalName == "." || originalName == "/" || originalName == "" {
-			originalName = digest + extension
-		}
-		err = s.db.QueryRow(ctx, `
-			insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
-			values($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$9,$10,$11,'active','clean')
-			on conflict(object_key) do update set updated_at=now(),status='active',scan_status='clean'
-			returning id,public_id`,
-			ossCfg.Bucket, ossCfg.displayEndpoint(), ossCfg.Region, objectKey,
-			options.category, options.source, originalName, contentType, len(data), digest, nullableUserID(uploaderID)).
-			Scan(&result.FileInternalID, &result.FilePublicID)
-		if err != nil {
-			s.deleteOSSObjectIfUnregistered(context.Background(), ossCfg, objectKey, "external-image-registration-failed")
+	_, err = s.db.Exec(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
+        content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
+        values($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$9,$10,$11,'pending','pending')
+        on conflict(object_key) do nothing`,
+		cfg.Bucket, cfg.Endpoint, cfg.Region, objectKey, options.category, options.source, originalName, contentType, len(data), digest, uploaderID)
+	if err != nil {
+		return mirroredExternalImage{}, err
+	}
+	// Serialize only an upload to this exact key and its lifecycle changes. A
+	// bounded transaction prevents deletion or a rescan from crossing activation.
+	ioCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	tx, err := s.db.Begin(ioCtx)
+	if err != nil {
+		return mirroredExternalImage{}, err
+	}
+	defer tx.Rollback(ioCtx)
+	record, err := loadExternalImageRecord(ioCtx, tx, cfg.Bucket, objectKey, options, uploaderID, true)
+	if err != nil {
+		return mirroredExternalImage{}, err
+	}
+	if record.storedSHA256 != digest || record.size != int64(len(data)) || record.contentType != contentType {
+		return mirroredExternalImage{}, errUnsupportedExternalModIcon
+	}
+	if !record.pending {
+		if err = tx.Rollback(ioCtx); err != nil {
 			return mirroredExternalImage{}, err
 		}
-		result.URL = ossStoredObjectURL(ossCfg, objectKey)
+		if err = record.verify(ioCtx, client, cfg, objectKey); err != nil {
+			return mirroredExternalImage{}, err
+		}
+		return record.result, nil
 	}
-	return result, nil
+	_, err = client.PutObject(ioCtx, &aliyunoss.PutObjectRequest{
+		Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey),
+		ContentType: aliyunoss.Ptr(contentType), ContentLength: aliyunoss.Ptr(int64(len(data))),
+		ForbidOverwrite: aliyunoss.Ptr("true"), Body: bytes.NewReader(data),
+		Metadata: map[string]string{"sha256": digest, "source-host": strings.ToLower(sourceURL.Hostname())},
+	})
+	if err != nil {
+		var service *aliyunoss.ServiceError
+		if !errors.As(err, &service) || service.StatusCode != http.StatusConflict || service.Code != "FileAlreadyExists" {
+			return mirroredExternalImage{}, fmt.Errorf("upload external image to OSS: %w", err)
+		}
+		if err = record.verify(ioCtx, client, cfg, objectKey); err != nil {
+			return mirroredExternalImage{}, err
+		}
+	}
+	_, err = tx.Exec(ioCtx, `update oss_files set status='active',scan_status='clean',updated_at=now() where id=$1`, record.result.FileInternalID)
+	if err != nil {
+		return mirroredExternalImage{}, err
+	}
+	if err = tx.Commit(ioCtx); err != nil {
+		return mirroredExternalImage{}, err
+	}
+	record.result.URL = ossStoredObjectURL(cfg, objectKey)
+	return record.result, nil
 }
 
-func externalImageObjectKey(prefix, category, baseName, digest, extension string) string {
-	digest = strings.ToLower(strings.TrimSpace(digest))
-	if len(digest) > 16 {
-		digest = digest[:16]
+func externalImageObjectKey(prefix string, options externalImageMirrorOptions, uploaderID int64, digest, extension string) string {
+	scopedDigest := sha256Hex([]byte(fmt.Sprintf("%d\x00%s\x00%s\x00%s", uploaderID, options.source, options.category, digest)))
+	name := normalizeObjectSegment(options.baseName)
+	if name == "" {
+		name = "image"
 	}
-	baseName = normalizeObjectSegment(baseName)
-	if baseName == "" {
-		baseName = "image"
-	}
-	return path.Join(ossObjectPrefix(prefix, category), baseName+"-"+digest+extension)
+	return path.Join(ossObjectPrefix(prefix, options.category), name+"-"+scopedDigest+extension)
 }
 
 func externalModIconFormat(data []byte) (string, string, error) {
@@ -180,65 +214,58 @@ func externalModIconFormat(data []byte) (string, string, error) {
 }
 
 type reusableExternalImageRecord struct {
+	pending      bool
 	result       mirroredExternalImage
 	contentType  string
 	storedSHA256 string
 	size         int64
 }
 
-func (s *Server) authorizedReusableExternalImageRecord(ctx context.Context, objectKey string, options externalImageMirrorOptions, uploaderID int64, expectedSHA256 string, expectedSize int64) (reusableExternalImageRecord, bool) {
-	if uploaderID <= 0 || strings.TrimSpace(options.category) == "" || strings.TrimSpace(options.source) == "" {
-		return reusableExternalImageRecord{}, false
+func loadExternalImageRecord(ctx context.Context, query revisionQuery, bucket, objectKey string, options externalImageMirrorOptions, uploaderID int64, forImport bool) (reusableExternalImageRecord, error) {
+	if uploaderID <= 0 || options.source == "" || options.category == "" {
+		return reusableExternalImageRecord{}, errUnsupportedExternalModIcon
+	}
+	statement := `select id,public_id,content_type,sha256,size_bytes,(status='pending') from oss_files
+        where object_key=$1 and category=$2 and source=$3 and uploader_id=$4 and bucket=$5
+          and (status='active' and scan_status in ('clean','trusted_generated')
+               or $6 and status='pending' and scan_status='pending')
+          and lower(split_part(content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`
+	if forImport {
+		statement += " for update"
 	}
 	var record reusableExternalImageRecord
-	query := `select id,public_id,content_type,sha256,size_bytes from oss_files
-		where object_key=$1 and category=$2 and source=$3 and uploader_id=$4
-		  and status='active' and scan_status in ('clean','trusted_generated')
-		  and lower(split_part(content_type,';',1)) in ('image/png','image/jpeg','image/jpg','image/gif','image/webp')`
-	args := []any{objectKey, options.category, options.source, uploaderID}
-	if expectedSHA256 != "" {
-		args = append(args, expectedSHA256)
-		query += fmt.Sprintf(` and sha256=$%d`, len(args))
+	err := query.QueryRow(ctx, statement, objectKey, options.category, options.source, uploaderID, bucket, forImport).
+		Scan(&record.result.FileInternalID, &record.result.FilePublicID, &record.contentType, &record.storedSHA256, &record.size, &record.pending)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return reusableExternalImageRecord{}, errUnsupportedExternalModIcon
 	}
-	if expectedSize > 0 {
-		args = append(args, expectedSize)
-		query += fmt.Sprintf(` and size_bytes=$%d`, len(args))
+	if err != nil {
+		return reusableExternalImageRecord{}, err
 	}
-	if err := s.db.QueryRow(ctx, query, args...).Scan(
-		&record.result.FileInternalID,
-		&record.result.FilePublicID,
-		&record.contentType,
-		&record.storedSHA256,
-		&record.size,
-	); err != nil || record.size <= 0 || record.size > maxExternalModIconBytes {
-		return reusableExternalImageRecord{}, false
+	if record.size <= 0 || record.size > maxExternalModIconBytes || normalizeSHA256(record.storedSHA256) == "" {
+		return reusableExternalImageRecord{}, errUnsupportedExternalModIcon
 	}
-	return record, true
+	return record, nil
 }
 
-func (s *Server) reusableExternalImageObject(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string, options externalImageMirrorOptions, uploaderID int64, expectedSHA256 string, expectedSize int64) (mirroredExternalImage, bool) {
-	record, reusable := s.authorizedReusableExternalImageRecord(ctx, objectKey, options, uploaderID, expectedSHA256, expectedSize)
-	if !reusable {
-		return mirroredExternalImage{}, false
-	}
-	objectResult, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{
-		Bucket: aliyunoss.Ptr(cfg.Bucket),
-		Key:    aliyunoss.Ptr(objectKey),
-	})
+func (record *reusableExternalImageRecord) verify(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string) error {
+	result, err := client.GetObject(ctx, &aliyunoss.GetObjectRequest{Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey)})
 	if err != nil {
-		return mirroredExternalImage{}, false
+		return err
 	}
-	defer objectResult.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(objectResult.Body, maxExternalModIconBytes+1))
-	if err != nil || int64(len(data)) != record.size || sha256Hex(data) != record.storedSHA256 {
-		return mirroredExternalImage{}, false
-	}
-	_, err = validateRasterImageBytes(data, record.contentType)
+	defer result.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(result.Body, record.size+1))
 	if err != nil {
-		return mirroredExternalImage{}, false
+		return err
+	}
+	if int64(len(data)) != record.size || sha256Hex(data) != record.storedSHA256 {
+		return errUnsupportedExternalModIcon
+	}
+	if _, err = validateRasterImageBytes(data, record.contentType); err != nil {
+		return err
 	}
 	record.result.URL = ossStoredObjectURL(cfg, objectKey)
-	return record.result, true
+	return nil
 }
 
 func ossObjectKeyUnderEndpoint(rawURL, endpoint string) (string, bool) {

@@ -17,15 +17,12 @@ func TestHumanReadableOSSObjectKeys(t *testing.T) {
 	})
 
 	t.Run("imported icon has no hash shard directory", func(t *testing.T) {
-		got := externalImageObjectKey(
-			"mcmods",
-			ossProjectCategory("mod", "m123abc", "icons", "project", "original"),
-			"icon", strings.Repeat("a", 64), ".png",
-		)
-		want := "mcmods/project/mods/m123abc/icons/project/original/icon-aaaaaaaaaaaaaaaa.png"
-		if got != want {
-			t.Fatalf("unexpected icon key: got %q want %q", got, want)
+		options := externalImageMirrorOptions{category: ossProjectCategory("mod", "m123abc", "icons", "project", "original"), source: "mod_metadata_import", baseName: "icon"}
+		key := externalImageObjectKey("mcmods", options, 17, strings.Repeat("a", 64), ".png")
+		if !regexp.MustCompile(`^mcmods/project/mods/m123abc/icons/project/original/icon-[a-f0-9]{64}\.png$`).MatchString(key) {
+			t.Fatalf("unexpected imported key %q", key)
 		}
+
 	})
 
 	t.Run("user category is readable", func(t *testing.T) {
