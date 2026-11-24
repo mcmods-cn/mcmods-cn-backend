@@ -16,7 +16,6 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestOSSDeletionFailureBudgetLeaseAndDeadAlertAreAtomicIntegration(t *testing.T) {
@@ -131,7 +130,7 @@ func TestOSSDeletionReplayAndCompletedKeyReuseAreAuditedIntegration(t *testing.T
 		(22,22,'bucket','oss.example','region','dead','manual','dead',12,12,'permission denied','authorization',null,now())`); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{db: pool}
+	server := &Server{db: pool, cfg: config.Config{JWTSecret: "synthetic-oss-deletion-replay"}}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -191,11 +190,33 @@ func TestOSSDeletionReplayAndCompletedKeyReuseAreAuditedIntegration(t *testing.T
 	if err := pool.QueryRow(ctx, `select public_id from oss_object_deletion_outbox where id=$1`, 22).Scan(&publicID); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-deletions/"+publicID+"/replay", nil)
-	request.SetPathValue("id", publicID)
-	request = request.WithContext(context.WithValue(request.Context(), claimsContextKey, security.Claims{Subject: 7001}))
-	response := httptest.NewRecorder()
-	server.adminReplayOSSDeletion(response, request)
+	for _, actorID := range []int64{7001, 7002} {
+		grantTEST044Permissions(t, ctx, pool, actorID, "admin.config.write")
+	}
+	replay := func(token string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-deletions/"+publicID+"/replay", nil).WithContext(ctx)
+		request.SetPathValue("id", publicID)
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		server.requirePermission("admin.config.write", server.adminReplayOSSDeletion)(response, request)
+		return response
+	}
+	firstToken := mintTEST048Token(t, ctx, pool, server.cfg, 7001)
+	// Replaying changes the delivery budget and must leave an audit record.
+	if _, err = pool.Exec(ctx, `alter table app_logs add constraint fail_owned_replay_audit
+		check (action <> 'oss_deletion_replayed') not valid`); err != nil {
+		t.Fatal(err)
+	}
+	failed := replay(firstToken)
+	if failed.Code != http.StatusInternalServerError {
+		t.Fatalf("unavailable replay audit = %d; want rollback", failed.Code)
+	}
+	assertOSSDeletionState(t, ctx, pool, 22, "dead", 12, "authorization", 0)
+	if _, err = pool.Exec(ctx, `alter table app_logs drop constraint fail_owned_replay_audit`); err != nil {
+		t.Fatal(err)
+	}
+	response := replay(firstToken)
 	if response.Code != http.StatusAccepted {
 		t.Fatalf("replay response = %d/%s", response.Code, response.Body.String())
 	}
@@ -213,8 +234,7 @@ func TestOSSDeletionReplayAndCompletedKeyReuseAreAuditedIntegration(t *testing.T
 	if err = json.Unmarshal(payload, &audit); err != nil || int64(audit["actorUserId"].(float64)) != 7001 || audit["failureClass"] != "authorization" {
 		t.Fatalf("replay audit = %#v/error %v", audit, err)
 	}
-	secondResponse := httptest.NewRecorder()
-	server.adminReplayOSSDeletion(secondResponse, request)
+	secondResponse := replay(firstToken)
 	if secondResponse.Code != http.StatusConflict {
 		t.Fatalf("active replay response = %d, want conflict", secondResponse.Code)
 	}
@@ -222,11 +242,7 @@ func TestOSSDeletionReplayAndCompletedKeyReuseAreAuditedIntegration(t *testing.T
 		failure_class='authorization',last_error='still denied',dead_at=now() where id=22`); err != nil {
 		t.Fatal(err)
 	}
-	thirdRequest := httptest.NewRequest(http.MethodPost, "/api/v1/admin/infrastructure/oss-deletions/"+publicID+"/replay", nil)
-	thirdRequest.SetPathValue("id", publicID)
-	thirdRequest = thirdRequest.WithContext(context.WithValue(thirdRequest.Context(), claimsContextKey, security.Claims{Subject: 7002}))
-	thirdResponse := httptest.NewRecorder()
-	server.adminReplayOSSDeletion(thirdResponse, thirdRequest)
+	thirdResponse := replay(mintTEST048Token(t, ctx, pool, server.cfg, 7002))
 	if thirdResponse.Code != http.StatusAccepted {
 		t.Fatalf("second dead cycle replay = %d/%s", thirdResponse.Code, thirdResponse.Body.String())
 	}
