@@ -21,12 +21,11 @@ func TestFavoriteMembershipReplacementValidatesBeforeMutationSource(t *testing.T
 	normalizeAt := strings.Index(handler, "normalizeFavoriteCollectionIDs(request.CollectionIDs, true)")
 	beginAt := strings.Index(handler, "s.beginFavoriteMembershipTx(")
 	validateAt := strings.Index(handler, "validateFavoriteCollectionsTx(")
-	defaultAt := strings.Index(handler, "ensureDefaultFavoriteCollectionWithQueryer(")
 	deleteAt := strings.Index(handler, "delete from favorite_collection_items")
 	if normalizeAt < 0 || beginAt < 0 || normalizeAt > beginAt {
 		t.Fatal("replacement collection IDs must be normalized before opening the transaction")
 	}
-	if validateAt < 0 || defaultAt < 0 || deleteAt < 0 || validateAt > defaultAt || validateAt > deleteAt {
+	if validateAt < 0 || deleteAt < 0 || validateAt > deleteAt {
 		t.Fatal("every requested collection must be locked and validated before any replacement side effect")
 	}
 	for _, required := range []string{

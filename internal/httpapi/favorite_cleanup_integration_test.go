@@ -109,3 +109,55 @@ func TestFavoriteRemovalSurvivesTargetVisibilityChangeIntegration(t *testing.T) 
 	}
 	assertCount(0)
 }
+
+func TestFavoriteAtCollectionLimitCanListAndRemoveMembershipIntegration(t *testing.T) {
+	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
+		t.Skip("requires an isolated PostgreSQL database")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	pool, owner := newPostgresUserFixture(t, ctx, "favorite-default-stock")
+	server := &Server{db: pool}
+	server.cfg.Favorite.MaxCollectionsPerUser = 2
+	ctx = context.WithValue(ctx, claimsContextKey, security.Claims{Subject: owner})
+	create := func(name string) int {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/users/me/favorite-collections", strings.NewReader(`{"name":"`+name+`"}`)).WithContext(ctx)
+		server.createFavoriteCollection(recorder, request)
+		return recorder.Code
+	}
+	if status := create("custom"); status != http.StatusCreated {
+		t.Fatalf("create first custom folder = %d", status)
+	}
+	if status := create("second"); status != http.StatusConflict {
+		t.Errorf("custom folder consumed the default folder's reserved space, HTTP %d", status)
+	}
+	// This inventory has no default, as can happen for a previously imported
+	// account, and the operator has lowered its stock limit.
+	if _, err := pool.Exec(ctx, `delete from favorite_collections where user_id=$1 and is_default`, owner); err != nil {
+		t.Fatal(err)
+	}
+	server.cfg.Favorite.MaxCollectionsPerUser = 1
+	var projectCode string
+	var projectID int64
+	if err := pool.QueryRow(ctx, `insert into mods(slug,primary_name,review_status) values('favorite-stock-test','Stock test','approved') returning id,project_code`).Scan(&projectID, &projectCode); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `insert into favorite_collection_items(collection_id,entity_type,entity_id)
+		select id,'mod',$2 from favorite_collections where user_id=$1 and name='custom'`, owner, projectID); err != nil {
+		t.Fatal(err)
+	}
+	list := httptest.NewRecorder()
+	server.favoriteCollections(list, httptest.NewRequest(http.MethodGet, "/api/v1/users/me/favorite-collections", nil).WithContext(ctx))
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"name":"custom"`) {
+		t.Errorf("listing existing folders at quota, HTTP %d", list.Code)
+	}
+	removed := invokeBUG089FavoriteReplacement(t, ctx, server, owner, projectCode, []string{})
+	if removed.Code != http.StatusOK {
+		t.Errorf("clear existing membership at quota, HTTP %d", removed.Code)
+	}
+	var survivors int
+	if err := pool.QueryRow(ctx, "select count(*) from favorite_collection_items where entity_type='mod' and entity_id=$1", projectID).Scan(&survivors); err != nil || survivors != 0 {
+		t.Fatalf("remaining memberships = %d, %v", survivors, err)
+	}
+}

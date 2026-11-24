@@ -154,10 +154,7 @@ func validateFavoriteCollectionsTx(ctx context.Context, tx pgx.Tx, userID int64,
 func (s *Server) favoriteCollections(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	userID := claims.Subject
-	if _, err := s.ensureDefaultFavoriteCollection(r.Context(), userID); err != nil {
-		if writeFavoriteQuotaError(w, err, s.favoriteQuotaPolicy()) {
-			return
-		}
+	if _, err := s.ensureDefaultFavoriteCollection(r.Context(), userID); err != nil && !errors.Is(err, errFavoriteCollectionQuota) {
 		writeError(w, http.StatusInternalServerError, "failed to create the default favorite collection")
 		return
 	}
@@ -239,7 +236,7 @@ func (s *Server) createFavoriteCollection(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = lockFavoriteStockQuotaTx(r.Context(), tx, userID); err == nil {
+	if _, err = ensureDefaultFavoriteCollectionWithQueryer(r.Context(), tx, userID, policy); err == nil {
 		err = enforceFavoriteCollectionGrowthTx(r.Context(), tx, userID, 1, policy)
 	}
 	if err != nil {
@@ -562,13 +559,6 @@ func (s *Server) setFavoriteMembership(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to validate favorite collections")
-		return
-	}
-	if _, err = ensureDefaultFavoriteCollectionWithQueryer(r.Context(), tx, userID, policy); err != nil {
-		if writeFavoriteQuotaError(w, err, policy) {
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to create the default favorite collection")
 		return
 	}
 	if err = enforceFavoriteReplacementQuotaTx(r.Context(), tx, userID, target.Type, target.InternalID,
