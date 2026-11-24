@@ -135,7 +135,10 @@ func requestHasAuthToken(r *http.Request) bool {
 }
 
 func (s *Server) requirePermission(permission string, next http.HandlerFunc) http.HandlerFunc {
-	s.registerDeclaredPermission(permission)
+	// routes builds the catalogue before publishing this Server to callers.
+	if s.routePermissions != nil {
+		s.routePermissions = append(s.routePermissions, permission)
+	}
 	return s.requireAuth(func(w http.ResponseWriter, r *http.Request) {
 		claims := currentClaims(r)
 		if !claimsAllow(claims, permission) {
@@ -144,13 +147,6 @@ func (s *Server) requirePermission(permission string, next http.HandlerFunc) htt
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func (s *Server) registerDeclaredPermission(permission string) {
-	if s.db == nil {
-		return
-	}
-	_ = registerDeclaredPermissionWithQueryer(context.Background(), s.db, permission)
 }
 
 func currentClaims(r *http.Request) security.Claims {

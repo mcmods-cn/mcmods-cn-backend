@@ -14,6 +14,7 @@ import (
 	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/antiabuse"
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/querycache"
 	"mcmods-cn-backend/internal/queue"
 	"mcmods-cn-backend/internal/searchindex"
@@ -28,6 +29,7 @@ type Server struct {
 	antiAbuse                      *antiabuse.Service
 	search                         *searchindex.Client
 	mux                            *http.ServeMux
+	routePermissions               []string
 	handler                        http.Handler
 	ygg                            *yggdrasilService
 	yggMu                          sync.RWMutex
@@ -70,7 +72,12 @@ func NewServer(ctx context.Context, cfg config.Config, db *pgxpool.Pool, queueCl
 		logShareBodyReads: make(chan struct{}, maxConcurrentLogShareBodyReads),
 	}
 	server.antiAbuse = antiabuse.New(ctx, cfg.AntiAbuse, db, server.cache)
-	server.routes()
+	permissions := server.routes()
+	if db != nil {
+		if err := registerDeclaredPermissions(ctx, db, permissions); err != nil {
+			log.Print(database.RedactedError("register HTTP route permissions", err))
+		}
+	}
 	server.subscribeRealtimeBroadcast()
 	server.handler = server.securityHeaders(server.cors(server.cookieRequestOrigin(server.yggdrasilALI(server.compression(server.logAccess(server.botTraffic(server.mux)))))))
 	return server
@@ -94,7 +101,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return errors.Join(shutdownErrors...)
 }
 
-func (s *Server) routes() {
+func (s *Server) routes() []string {
+	s.routePermissions = []string{}
 	s.mux.HandleFunc("GET /live", s.live)
 	s.mux.HandleFunc("GET /ready", s.ready)
 	s.mux.HandleFunc("GET /api/v1/reports/reasons", reportReasons)
@@ -617,6 +625,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/admin/ai/stats", s.requirePermission("ai.read", s.adminAIStats))
 	s.mux.HandleFunc("POST /api/v1/admin/notifications", s.requirePermission("notification.system.publish", s.publishSystemNotification))
 	s.mux.HandleFunc("DELETE /api/v1/admin/notifications/{id}", s.requirePermission("notification.system.publish", s.deleteSystemNotification))
+	permissions := s.routePermissions
+	s.routePermissions = nil
+	return permissions
 }
 
 func (s *Server) live(w http.ResponseWriter, _ *http.Request) {

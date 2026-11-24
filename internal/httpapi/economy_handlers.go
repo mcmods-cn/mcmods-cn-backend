@@ -958,11 +958,9 @@ func (s *Server) saveShopItem(w http.ResponseWriter, r *http.Request, currentPub
 		writeError(w, http.StatusInternalServerError, "failed to lock economy configuration")
 		return
 	}
-	for _, permission := range []string{payload.PurchasePermission, payload.UsePermission} {
-		if err = registerDeclaredPermissionWithQueryer(r.Context(), tx, permission); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to declare shop item permission")
-			return
-		}
+	if err = registerDeclaredPermissions(r.Context(), tx, []string{payload.PurchasePermission, payload.UsePermission}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to declare shop item permission")
+		return
 	}
 	var publicID string
 	if currentPublicID == "" {
