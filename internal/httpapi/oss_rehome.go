@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -17,6 +18,7 @@ const maxOSSRehomeConcurrency = 4
 type modGalleryObjectForRehome struct {
 	galleryPublicID string
 	fileID          int64
+	filePublicID    string
 	objectKey       string
 	originalName    string
 }
@@ -26,7 +28,7 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 	if err := s.db.QueryRow(ctx, `select project_code from mods where id=$1`, modID).Scan(&projectPublicID); err != nil {
 		return err
 	}
-	rows, err := s.db.Query(ctx, `select gallery.public_id,file.id,file.object_key,file.original_name
+	rows, err := s.db.Query(ctx, `select gallery.public_id,file.id,file.public_id,file.object_key,file.original_name
 		from mod_gallery_images gallery join oss_files file on file.id=gallery.oss_file_id and file.status='active'
 		where gallery.mod_id=$1 order by gallery.id`, modID)
 	if err != nil {
@@ -35,7 +37,7 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 	items := make([]modGalleryObjectForRehome, 0)
 	for rows.Next() {
 		var item modGalleryObjectForRehome
-		if err = rows.Scan(&item.galleryPublicID, &item.fileID, &item.objectKey, &item.originalName); err != nil {
+		if err = rows.Scan(&item.galleryPublicID, &item.fileID, &item.filePublicID, &item.objectKey, &item.originalName); err != nil {
 			rows.Close()
 			return err
 		}
@@ -65,7 +67,8 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 			if extension == "" {
 				extension = strings.ToLower(filepath.Ext(item.originalName))
 			}
-			targetKey := path.Join(targetPrefix, normalizeProjectObjectSegment(item.galleryPublicID)+extension)
+			// The registered file owns its immutable bytes. Reordering or replacing a gallery entry must not reuse another file's object key.
+			targetKey := path.Join(targetPrefix, "by-file", item.filePublicID+extension)
 			if item.objectKey == targetKey {
 				return nil
 			}
@@ -84,6 +87,17 @@ func (s *Server) rehomeModGalleryOSSObjects(ctx context.Context, modID int64) er
 				return fmt.Errorf("begin gallery %s rehome transaction: %w", item.galleryPublicID, updateErr)
 			}
 			defer tx.Rollback(groupContext)
+			var galleryID int64
+			updateErr = tx.QueryRow(groupContext, `select id from mod_gallery_images
+				where mod_id=$1 and oss_file_id=$2 for key share`, modID, item.fileID).Scan(&galleryID)
+			if updateErr != nil {
+				rollbackErr := tx.Rollback(groupContext)
+				cleanupErr := s.deleteOSSObjectIfUnregistered(groupContext, cfg, targetKey, "mod-gallery-rehome-binding-changed")
+				if errors.Is(updateErr, pgx.ErrNoRows) {
+					return errors.Join(rollbackErr, cleanupErr)
+				}
+				return errors.Join(fmt.Errorf("lock gallery %s binding: %w", item.galleryPublicID, updateErr), rollbackErr, cleanupErr)
+			}
 			command, updateErr := tx.Exec(groupContext, `update oss_files set object_key=$2,category=$3,updated_at=now()
 				where id=$1 and object_key=$4 and status='active'`, item.fileID, targetKey, category, item.objectKey)
 			if updateErr != nil {
