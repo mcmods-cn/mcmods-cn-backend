@@ -1,10 +1,9 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
+	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"reflect"
 	"strings"
@@ -83,87 +82,47 @@ func TestReportProjectTypesUseCanonicalAccessIdentities(t *testing.T) {
 }
 
 func TestResolveProjectReportNotifiesDevelopersInsteadOfSubmitterIntegration(t *testing.T) {
-	databaseURL := strings.TrimSpace(os.Getenv("MCMODS_TEST_DATABASE_URL"))
-	if databaseURL == "" {
-		t.Skip("set MCMODS_TEST_DATABASE_URL to verify report resolution notifications")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	pool := governanceReviewTestPool(t, ctx, databaseURL)
-	claims := governanceReviewTestActor(t, ctx, pool, "recipientreview", "report.review", "report.action.delete")
-	if _, err := pool.Exec(ctx, `
-		create temporary table reports(
-			id bigint primary key,public_id text not null unique,target_type text not null,target_public_id text not null,
-			reporter_id bigint not null,target_actor_id bigint,target_actor_role text not null,status text not null,
-			claimed_by bigint,claimed_at timestamptz,resolved_at timestamptz,
-			updated_at timestamptz not null default now(),lock_version bigint not null default 1
-		);
-		create temporary table report_reviews(
-			id bigserial primary key,report_id bigint not null,reviewer_id bigint not null,conclusion text not null,
-			note text not null,idempotency_key text not null,created_at timestamptz not null default now(),unique(report_id,idempotency_key)
-		);
-		create temporary table report_snapshots(report_id bigint primary key,payload jsonb not null);
-		create temporary table report_evidence(report_id bigint,status text not null,cleanup_after timestamptz not null);
-		create temporary table moderation_actions(
-			id bigserial primary key,public_id text not null default 'action001',report_id bigint,action_type text not null,
-			target_type text not null,target_public_id text not null,actor_id bigint not null,before_summary jsonb not null,
-			after_summary jsonb not null,reason text not null,idempotency_key text not null,
-			unique(action_type,target_type,target_public_id,idempotency_key)
-		);
-		create temporary table mods(project_code text primary key,review_status text not null,updated_at timestamptz not null default now());
-		create temporary table effective_project_access(user_id bigint not null,project_type text not null,project_public_id text not null,access_level text not null);
-		create temporary table nats_outbox(
-			id bigserial primary key,event_id text not null unique,event_type text not null,schema_version integer not null,
-			subject text not null,aggregate_type text not null,aggregate_id text not null,trace_id text not null,
-			payload jsonb not null,occurred_at timestamptz not null,status text not null,available_at timestamptz not null
-		);
-		create temporary table app_logs(
-			category text,level text,actor_id bigint,action text,target text,ip text,user_agent text,method text,path text,
-			status integer,latency_ms bigint,payload jsonb
-		);
-		insert into reports(id,public_id,target_type,target_public_id,reporter_id,target_actor_id,target_actor_role,status,claimed_by,claimed_at)
-			values(1,'report001','mod','mod000001',1,10,'submitter','in_review',99,now());
-		insert into report_snapshots values(1,'{"targetType":"mod","submitter":{"id":"user00010"}}');
-		insert into mods(project_code,review_status) values('mod000001','approved');
-		insert into effective_project_access values
-			(10,'mod','mod000001','editor'),(20,'mod','mod000001','developer'),
-			(20,'mod','mod000001','developer'),(21,'mod','mod000001','developer')
-	`); err != nil {
-		t.Fatal(err)
-	}
-
-	server := &Server{db: pool}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/reports/report001/resolve", bytes.NewBufferString(
-		`{"conclusion":"valid","note":"confirmed","deleteTarget":true,"idempotencyKey":"bug109-resolution"}`,
-	))
-	request.SetPathValue("id", "report001")
-	if _, err := pool.Exec(ctx, `update reports set claimed_by=$1 where id=1`, claims.Subject); err != nil {
-		t.Fatal(err)
-	}
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, claims))
-	response := httptest.NewRecorder()
-	server.resolveUnifiedReport(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("resolve status = %d body=%s", response.Code, response.Body.String())
-	}
-
-	rows, err := pool.Query(ctx, `select aggregate_id from nats_outbox where event_type='report.target_action' order by aggregate_id`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	actual := make([]string, 0)
-	for rows.Next() {
-		var recipient string
-		if err = rows.Scan(&recipient); err != nil {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.denied], "report.create")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "report.review", "report.action.delete")
+	secondDeveloper, _, _ := createTEST044User(t, f.ctx, f.db, f.origin.Config.Handler.(*Server).cfg, "bug109-cocreator", "UTC")
+	developers := []int64{f.userIDs[f.otherEditor], secondDeveloper}
+	for _, userID := range developers {
+		name := fmt.Sprintf("bug109-author-%d", userID)
+		var creatorID int64
+		if err := f.db.QueryRow(f.ctx, `insert into creators(kind,name,normalized_name,review_status)
+			values('author',$1,$1,'approved') returning id`, name).Scan(&creatorID); err != nil {
 			t.Fatal(err)
 		}
-		actual = append(actual, recipient)
+		if _, err := f.db.Exec(f.ctx, `insert into creator_claims(creator_id,user_id,status,reviewed_at)
+			values($1,$2,'approved',now())`, creatorID, userID); err != nil {
+			t.Fatal(err)
+		}
+		tag, err := f.db.Exec(f.ctx, `insert into content_creator_bindings(subject_type,subject_id,creator_id,role_id,
+			name_snapshot,role_snapshot,status,permission_granting,approved_at)
+			select 'mod',$1,$2,role.id,$3,role.name,'approved',true,now()
+			from creator_role_definitions role where role.code='developer'`, f.modID, creatorID, name)
+		if err != nil || tag.RowsAffected() != 1 {
+			t.Fatalf("developer binding: %s, %v", tag, err)
+		}
 	}
-	if err = rows.Err(); err != nil {
-		t.Fatal(err)
+
+	report := decodeTEST022Data[struct{ ID string }](t, f.require(t, f.denied, http.MethodPost, "/api/v1/reports",
+		createUnifiedReportRequest{TargetType: "mod", TargetID: f.modCode, ReasonCode: "misleading_content"}, http.StatusCreated))
+	path := "/api/v1/admin/reports/" + report.ID
+	f.require(t, f.reviewer, http.MethodPost, path+"/claim", nil, http.StatusOK)
+	f.require(t, f.reviewer, http.MethodPost, path+"/resolve", resolveUnifiedReportRequest{
+		Conclusion: "valid", Note: "confirmed", DeleteTarget: true, IdempotencyKey: "bug109-resolution",
+	}, http.StatusOK)
+
+	var notified []int64
+	if err := f.db.QueryRow(f.ctx, `select array_agg(aggregate_id::bigint order by aggregate_id::bigint)
+		from nats_outbox where event_type='report.target_action'`).Scan(&notified); err != nil || !reflect.DeepEqual(notified, developers) {
+		t.Fatalf("moderation recipients = %v, want actual developers %v (submitter %d), err=%v", notified, developers, f.userIDs[f.editor], err)
 	}
-	if !reflect.DeepEqual(actual, []string{"20", "21"}) {
-		t.Fatalf("moderation notification recipients = %v, want developers 20 and 21 (not submitter 10)", actual)
+	var after int
+	if err := f.db.QueryRow(f.ctx, `select count(*) from effective_project_access where project_type='mod'
+		and project_public_id=$1 and access_level='developer'`, f.modCode).Scan(&after); err != nil || after != 0 {
+		t.Fatalf("hidden project retained live access rows: %d, err=%v", after, err)
 	}
 }
