@@ -53,6 +53,8 @@ func TestUniqueConstraintsOwnCatalogLookupIndexesIntegration(t *testing.T) {
 		table, columns, query string
 	}
 	targets := []indexTarget{
+		{table: "catalog_entities", columns: "identity_key",
+			query: `select id from catalog_entities where identity_key='missing'`},
 		{table: "resource_import_snapshots", columns: "resource_id,revision_id",
 			query: `select id from resource_import_snapshots where resource_id=1 and revision_id='missing'`},
 		{table: "resource_import_snapshots", columns: "revision_id,registry,resource_id",

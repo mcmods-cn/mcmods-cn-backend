@@ -1,5 +1,7 @@
 package database
 
+import "strconv"
+
 // modContentCanonicalDocumentSchemaStatements defines the canonical website
 // fields retained from imports and exposed to human editors. Fields default to
 // editable; administrators may explicitly mark individual fields read-only.
@@ -157,25 +159,18 @@ func modContentCanonicalDocumentSchemaStatements() []string {
 
 func appendEntryTypeFieldsSQL(templateCode string, entryTypeIndex int, fields string) string {
 	return `update mod_content_templates set definition=jsonb_set(
-		definition,'{entryTypes,` + itoaSmall(entryTypeIndex) + `,groups,0,fields}',
-		coalesce(definition#>'{entryTypes,` + itoaSmall(entryTypeIndex) + `,groups,0,fields}','[]'::jsonb)||'` + fields + `'::jsonb
+		definition,'{entryTypes,` + strconv.Itoa(entryTypeIndex) + `,groups,0,fields}',
+		coalesce(definition#>'{entryTypes,` + strconv.Itoa(entryTypeIndex) + `,groups,0,fields}','[]'::jsonb)||'` + fields + `'::jsonb
 	) where code='` + templateCode + `' and builtin`
 }
 
 func setEntryTypeStorageFieldsSQL(templateCode string, entryTypeIndex int, fields string) string {
 	return `update mod_content_templates set definition=jsonb_set(
-		definition,'{entryTypes,` + itoaSmall(entryTypeIndex) + `,groups}',
+		definition,'{entryTypes,` + strconv.Itoa(entryTypeIndex) + `,groups}',
 		'[{
 			"code":"website_data",
 			"names":{"en-US":"Website data","zh-CN":"网站资料","zh-TW":"網站資料"},
 			"fields":` + fields + `
 		}]'::jsonb
 	) where code='` + templateCode + `' and builtin`
-}
-
-func itoaSmall(value int) string {
-	if value >= 0 && value <= 9 {
-		return string(rune('0' + value))
-	}
-	return "0"
 }

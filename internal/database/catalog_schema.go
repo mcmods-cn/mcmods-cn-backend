@@ -70,7 +70,6 @@ func catalogSchemaStatements() []string {
 		`create trigger trg_catalog_entities_remove_public_route after delete on catalog_entities
 		 for each row execute function remove_catalog_public_route()`,
 		`create index idx_catalog_entities_type_status on catalog_entities(entity_type,status,id)`,
-		`create index idx_catalog_entities_identity_key on catalog_entities(identity_key)`,
 		`create or replace function catalog_entity_internal_id(value text) returns bigint as $$
 			select coalesce(
 				(select id from catalog_entities where public_id = value),

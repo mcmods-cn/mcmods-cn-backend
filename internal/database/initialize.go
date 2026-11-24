@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const schemaGeneration = 171
+const schemaGeneration = 172
 
 const applicationSearchPath = "public, pg_temp"
 
