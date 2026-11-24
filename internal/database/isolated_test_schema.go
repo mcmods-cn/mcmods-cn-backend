@@ -39,13 +39,10 @@ func NewIsolatedTestSchema(ctx context.Context, connectionString string, maxConn
 	}
 	fixture := &IsolatedTestSchema{owner: owner, name: name, marker: marker}
 	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = owner.Exec(ctx, "create schema "+quoted+" authorization current_user"); err != nil {
-		owner.Close()
-		return nil, err
-	}
-	// COMMENT cannot bind SQL parameters; the marker consists only of a fixed
-	// prefix and cryptographically generated hexadecimal digits.
-	if _, err = owner.Exec(ctx, "comment on schema "+quoted+" is '"+marker+"'"); err != nil {
+	// Submit both statements as one implicit PostgreSQL transaction: a marker
+	// failure must roll back the namespace whose cleanup would require it.
+	// COMMENT accepts a literal; marker is a fixed prefix and random hex.
+	if _, err = owner.Exec(ctx, "create schema "+quoted+" authorization current_user; comment on schema "+quoted+" is '"+marker+"'"); err != nil {
 		owner.Close()
 		return nil, err
 	}
