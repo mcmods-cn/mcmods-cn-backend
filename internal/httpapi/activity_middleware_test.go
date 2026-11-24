@@ -2,8 +2,8 @@ package httpapi
 
 import (
 	"context"
-	"net/http/httptest"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"mcmods-cn-backend/internal/activity"
@@ -154,7 +154,7 @@ func TestActivityObjectTypeForRevisionEntities(t *testing.T) {
 func TestRequestActivityTracksMatchedObjectAcrossMiddleware(t *testing.T) {
 	for _, test := range []struct {
 		name, pattern, path, want string
-		internal bool
+		internal                  bool
 	}{
 		{"community post", "GET /api/v1/community/posts/{id}", "/api/v1/community/posts/c00000001", "c00000001", false},
 		{"another post", "GET /api/v1/community/posts/{id}", "/api/v1/community/posts/c00000002", "c00000002", false},

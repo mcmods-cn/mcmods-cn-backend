@@ -23,6 +23,7 @@ type requestActivity struct {
 	objectEntityType     string
 	objectInternalID     int64
 	objectPublicID       string
+	routePublicID        string
 	markdownAddedBytes   int
 	markdownDeletedBytes int
 	skip                 bool
@@ -35,6 +36,7 @@ func markActivityUser(r *http.Request, userID int64) {
 	}
 	annotation.mu.Lock()
 	annotation.userID = userID
+	annotation.routePublicID = matchedActivityPublicID(r)
 	annotation.mu.Unlock()
 }
 
@@ -135,6 +137,9 @@ func requestActivityEvent(r *http.Request, annotation *requestActivity) (activit
 		MarkdownDeletedBytes: annotation.markdownDeletedBytes,
 		OccurredAt:           time.Now().UTC(),
 	}
+	if event.ObjectPublicID == "" && event.ObjectInternalID <= 0 {
+		event.ObjectPublicID = annotation.routePublicID
+	}
 	skip := annotation.skip
 	annotation.mu.Unlock()
 	if skip || event.UserID <= 0 {
@@ -145,9 +150,6 @@ func requestActivityEvent(r *http.Request, annotation *requestActivity) (activit
 	}
 	if event.ObjectTypeID == 0 {
 		event.ObjectTypeID = inferredActivityObject(r.URL.Path)
-	}
-	if event.ObjectPublicID == "" {
-		event.ObjectPublicID = inferredPublicID(r.URL.Path)
 	}
 	if event.ActionID == 0 || event.ObjectTypeID == 0 {
 		return activity.Event{}, false
@@ -360,20 +362,20 @@ func inferredSimpleProjectActivityObject(path string) int16 {
 	return 0
 }
 
-func inferredPublicID(path string) string {
-	for _, segment := range strings.Split(path, "/") {
-		if len(segment) != 9 {
+// Read the registered route at authentication time. Outer middleware may retain
+// a different request, and literal segments such as "community" are also nine bytes.
+func matchedActivityPublicID(r *http.Request) string {
+	for segment := range strings.SplitSeq(r.Pattern, "/") {
+		name, named := strings.CutPrefix(segment, "{")
+		if !named {
 			continue
 		}
-		valid := true
-		for _, character := range segment {
-			if (character < 'a' || character > 'z') && (character < '0' || character > '9') {
-				valid = false
-				break
-			}
+		name, named = strings.CutSuffix(name, "}")
+		if !named || !(name == "id" || strings.HasSuffix(name, "Id") || name == "targetKey") {
+			continue
 		}
-		if valid {
-			return segment
+		if value := strings.ToLower(r.PathValue(name)); validCatalogPublicID(value) {
+			return value
 		}
 	}
 	return ""
