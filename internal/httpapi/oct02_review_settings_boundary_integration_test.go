@@ -154,3 +154,46 @@ func TestOCT02ConcurrentNotificationTemplateSavesKeepDistinctSourceVersionsInteg
 		t.Fatalf("single connection template save status=%d want200", w.Code)
 	}
 }
+
+func TestReviewPolicyReplacementRequiresEveryBooleanIntegration(t *testing.T) {
+	requireOCT02DatabaseIntegration(t)
+	db := openNotificationTemplateTestDB(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := db.Exec(ctx, `create temp table system_settings(
+		key text primary key, value jsonb not null, updated_by bigint not null, updated_at timestamptz not null)`); err != nil {
+		t.Fatal(err)
+	}
+	handler := &Server{db: db}
+	put := func(raw string) int {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPut, "/api/v1/admin/config/reviews", strings.NewReader(raw))
+		r = r.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: 1}))
+		w := httptest.NewRecorder()
+		handler.updateReviewConfig(w, r)
+		return w.Code
+	}
+	intended := requireAllContentReviews()
+	intended.BlueprintCreate = false
+	full, err := json.Marshal(intended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := put(string(full)); status != http.StatusOK {
+		t.Fatalf("complete replacement with explicit false returned %d", status)
+	}
+	for _, raw := range []string{`{}`, `null`, `{"blueprintCreate":false}`,
+		strings.Replace(string(full), `"modEdit":true`, `"modEdit":null`, 1),
+		strings.Replace(string(full), `"modEdit":true`, `"nonexistent":true`, 1)} {
+		if status := put(raw); status != http.StatusBadRequest {
+			t.Errorf("incomplete or non-boolean replacement returned %d", status)
+		}
+		var unchanged bool
+		if err := db.QueryRow(ctx, `select value=$2::jsonb from system_settings where key=$1`, reviewConfigSettingKey, string(full)).Scan(&unchanged); err != nil {
+			t.Fatal(err)
+		}
+		if !unchanged {
+			t.Fatal("incomplete replacement changed previously saved moderation rules")
+		}
+	}
+}
