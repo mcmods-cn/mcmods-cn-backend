@@ -831,20 +831,19 @@ func (s *Server) ossDownloadStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ossClient(ctx context.Context) (*aliyunoss.Client, ossConfigPayload, error) {
-	cfg := s.ossConfigFromSettings(ctx)
-	if !cfg.Enabled {
-		return nil, cfg, fmt.Errorf("OSS 尚未启用: %w", errOSSConfigurationUnavailable)
-	}
-	if cfg.Region == "" || cfg.Endpoint == "" || cfg.Bucket == "" || cfg.AccessKeyID == "" || cfg.AccessKeySecret == "" {
-		return nil, cfg, fmt.Errorf("OSS 配置不完整: %w", errOSSConfigurationUnavailable)
-	}
-	if requiresSecurityToken(cfg.AccessKeyID) && cfg.SecurityToken == "" {
-		return nil, cfg, fmt.Errorf("OSS STS 临时凭证缺少 SecurityToken: %w", errOSSConfigurationUnavailable)
-	}
-	return newOSSClient(cfg, cfg.Endpoint, cfg.UseCName), cfg, nil
+	return currentOSSClient(ctx, s.db, s.cfg.SettingsEncryptionKey)
 }
 
-func (s *Server) ossDownloadClient(ctx context.Context, cfg ossConfigPayload) (*aliyunoss.Client, error) {
+func currentOSSClient(ctx context.Context, db ossConfigQueryRower, encryptionKey string) (*aliyunoss.Client, ossConfigPayload, error) {
+	cfg, err := readOSSConfig(ctx, db, encryptionKey)
+	if err != nil {
+		return nil, ossConfigPayload{}, fmt.Errorf("读取 OSS 配置失败: %w", errOSSConfigurationUnavailable)
+	}
+	client, err := configuredOSSClient(cfg, cfg.UseCName)
+	return client, cfg, err
+}
+
+func configuredOSSClient(cfg ossConfigPayload, useCName bool) (*aliyunoss.Client, error) {
 	if !cfg.Enabled {
 		return nil, fmt.Errorf("OSS 尚未启用: %w", errOSSConfigurationUnavailable)
 	}
@@ -854,8 +853,7 @@ func (s *Server) ossDownloadClient(ctx context.Context, cfg ossConfigPayload) (*
 	if requiresSecurityToken(cfg.AccessKeyID) && cfg.SecurityToken == "" {
 		return nil, fmt.Errorf("OSS STS 临时凭证缺少 SecurityToken: %w", errOSSConfigurationUnavailable)
 	}
-	endpoint := cfg.Endpoint
-	return newOSSClient(cfg, endpoint, isCustomOSSEndpoint(endpoint)), nil
+	return newOSSClient(cfg, cfg.Endpoint, useCName), nil
 }
 
 func newOSSClient(cfg ossConfigPayload, endpoint string, useCName bool) *aliyunoss.Client {

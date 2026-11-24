@@ -35,7 +35,7 @@ func TestBlueprintJobLeaseRecoveryIsBoundedAndAtomicIntegration(t *testing.T) {
 		(1002,12,3,'normalized',102,'bucket','oss.example','region','blueprints/exhausted-normalized.json','pending')`); err != nil {
 		t.Fatal(err)
 	}
-	worker := &BlueprintWorker{db: pool, api: &Server{db: pool}, workerID: "recovery-worker"}
+	worker := &BlueprintWorker{db: pool, workerID: "recovery-worker"}
 	recovered, exhausted, err := worker.recoverStaleBlueprintJobs(ctx)
 	if err != nil || recovered != 1 || exhausted != 1 {
 		t.Fatalf("recovery result = %d/%d/%v, want 1/1/nil", recovered, exhausted, err)
@@ -143,7 +143,7 @@ func TestBlueprintArtifactActivationCompletionAndFailureCompensationAreAtomicInt
 	assertBlueprintArtifactState(t, ctx, pool, 2001, "pending", "pending", 0)
 	assertBlueprintJobLeaseState(t, ctx, pool, 71, "processing", "worker:failure", boolPointer(true), 1)
 
-	worker := &BlueprintWorker{db: pool, api: &Server{db: pool}, workerID: "worker"}
+	worker := &BlueprintWorker{db: pool, workerID: "worker"}
 	terminal, err := worker.failBlueprintJob(ctx, claimedBlueprintJob{
 		id: 71, blueprintID: 51, operation: "normalize", attempts: 1, maxAttempts: 3, runToken: "worker:failure",
 	}, errors.New(strings.Repeat("错", 667)))
@@ -182,7 +182,7 @@ func TestBlueprintOrphanArtifactRecoveryIsBoundedAndAtomicIntegration(t *testing
 		(2104,null,null,1,'conversion',214,'bucket','oss.example','region','blueprints/deleted-blueprint.json','active')`); err != nil {
 		t.Fatal(err)
 	}
-	worker := &BlueprintWorker{db: pool, api: &Server{db: pool}, workerID: "recovery-worker"}
+	worker := &BlueprintWorker{db: pool, workerID: "recovery-worker"}
 	recovered, err := worker.recoverOrphanedBlueprintArtifacts(ctx)
 	if err != nil || recovered != 3 {
 		t.Fatalf("orphan artifact recovery = %d/%v, want 3/nil", recovered, err)
@@ -269,7 +269,7 @@ func TestBlueprintJobLeaseOwnershipAndHeartbeatCASIntegration(t *testing.T) {
 		values(30,'claimjob3',10,'normalize','queued',3)`); err != nil {
 		t.Fatal(err)
 	}
-	firstWorker := &BlueprintWorker{db: pool, api: &Server{db: pool}, workerID: "first-worker"}
+	firstWorker := &BlueprintWorker{db: pool, workerID: "first-worker"}
 	first, claimed, err := firstWorker.claimBlueprintJob(ctx, 30)
 	if err != nil || !claimed || first.attempts != 1 || first.runToken == "" {
 		t.Fatalf("first claim = %#v/%t/%v", first, claimed, err)
@@ -281,7 +281,7 @@ func TestBlueprintJobLeaseOwnershipAndHeartbeatCASIntegration(t *testing.T) {
 		t.Fatalf("owner heartbeat failed: %v", err)
 	}
 	assertBlueprintJobLeaseState(t, ctx, pool, 30, "processing", first.runToken, boolPointer(true), 1)
-	secondWorker := &BlueprintWorker{db: pool, api: &Server{db: pool}, workerID: "second-worker"}
+	secondWorker := &BlueprintWorker{db: pool, workerID: "second-worker"}
 	if _, claimed, err = secondWorker.claimBlueprintJob(ctx, 30); claimed || !errors.Is(err, errBlueprintJobLeaseActive) {
 		t.Fatalf("active lease duplicate claim = %t/%v", claimed, err)
 	}
@@ -414,7 +414,7 @@ func TestBlueprintJobRetryBudgetKeepsOptionalConversionAvailableIntegration(t *t
 		(40,'convert40',20,'convert','schem','queued',2),(41,'normalj41',21,'normalize','','queued',1)`); err != nil {
 		t.Fatal(err)
 	}
-	worker := &BlueprintWorker{db: pool, api: &Server{db: pool}, workerID: "failure-worker"}
+	worker := &BlueprintWorker{db: pool, workerID: "failure-worker"}
 	convertFirst, claimed, err := worker.claimBlueprintJob(ctx, 40)
 	if err != nil || !claimed {
 		t.Fatalf("claim first conversion: %t/%v", claimed, err)

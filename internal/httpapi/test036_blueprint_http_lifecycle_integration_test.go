@@ -252,7 +252,7 @@ func test036Document() blueprintDocument {
 }
 
 func (f test036Fixture) worker(name string) *BlueprintWorker {
-	return &BlueprintWorker{cfg: f.server.cfg, db: f.db, queue: f.server.queue, api: f.server, workerID: "test036-" + name}
+	return &BlueprintWorker{cfg: f.server.cfg, db: f.db, queue: f.server.queue, workerID: "test036-" + name}
 }
 func (f test036Fixture) facts(t *testing.T) map[string]string {
 	t.Helper()
@@ -667,7 +667,7 @@ func TestTEST036ExpiredLeaseRestartCompensatesActualUploadedArtifactIntegration(
 	}
 	cfg := f.server.ossConfigFromSettings(f.ctx)
 	oldKey := blueprintArtifactObjectKey(cfg.Prefix, ossBlueprintReleaseCategory(upload.publicID, "normalized"), job.id, job.attempts, blueprintArtifactNormalized, "json")
-	artifact, err := first.writePendingBlueprintArtifact(f.ctx, job.id, job.attempts, job.runToken, blueprintArtifactNormalized, oldKey, "blueprint.json", "application/json", normalized, job.createdBy, "blueprint_normalized")
+	artifact, err := first.writePendingBlueprintArtifact(f.ctx, job.id, job.attempts, job.runToken, blueprintArtifactNormalized, ossBlueprintReleaseCategory(upload.publicID, "normalized"), "json", "blueprint.json", "application/json", normalized, job.createdBy, "blueprint_normalized")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,7 +43,6 @@ type BlueprintWorker struct {
 	cfg      config.Config
 	db       *pgxpool.Pool
 	queue    *queue.Client
-	api      *Server
 	workerID string
 }
 
@@ -53,7 +52,7 @@ type blueprintJobMessage struct {
 
 func NewBlueprintWorker(cfg config.Config, db *pgxpool.Pool, queueClient *queue.Client) *BlueprintWorker {
 	return &BlueprintWorker{
-		cfg: cfg, db: db, queue: queueClient, api: &Server{cfg: cfg, db: db, queue: queueClient},
+		cfg: cfg, db: db, queue: queueClient,
 		workerID: "blueprint-worker-" + newExportID(),
 	}
 }
@@ -348,10 +347,8 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 	if err = worker.updateBlueprintJobProgress(ctx, jobID, runToken, 55); err != nil {
 		return err
 	}
-	normalizedConfig := worker.api.ossConfigFromSettings(ctx)
-	normalizedKey := blueprintArtifactObjectKey(normalizedConfig.Prefix, ossBlueprintReleaseCategory(publicID, "normalized"), jobID, attempt, blueprintArtifactNormalized, "json")
 	normalizedArtifact, err := worker.writePendingBlueprintArtifact(ctx, jobID, attempt, runToken, blueprintArtifactNormalized,
-		normalizedKey, "blueprint.json", "application/json", normalized, createdBy, "blueprint_normalized")
+		ossBlueprintReleaseCategory(publicID, "normalized"), "json", "blueprint.json", "application/json", normalized, createdBy, "blueprint_normalized")
 	if err != nil {
 		return err
 	}
@@ -361,10 +358,8 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 		if coverErr != nil {
 			log.Printf("render generated cover for blueprint %s: %v", publicID, coverErr)
 		} else {
-			generatedConfig := worker.api.ossConfigFromSettings(ctx)
-			generatedKey := blueprintArtifactObjectKey(generatedConfig.Prefix, ossBlueprintTextCategory(publicID, "cover"), jobID, attempt, blueprintArtifactCover, "png")
 			artifact, writeErr := worker.writePendingBlueprintArtifact(ctx, jobID, attempt, runToken, blueprintArtifactCover,
-				generatedKey, "blueprint-cover.png", "image/png", cover, createdBy, "blueprint_generated_cover")
+				ossBlueprintTextCategory(publicID, "cover"), "png", "blueprint-cover.png", "image/png", cover, createdBy, "blueprint_generated_cover")
 			if writeErr != nil {
 				if cleanupErr := worker.abandonBlueprintArtifact(ctx, artifact, "blueprint-generated-cover-upload-failed"); cleanupErr != nil {
 					return errors.Join(writeErr, cleanupErr)
@@ -372,7 +367,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 				log.Printf("store generated cover for blueprint %s: %v", publicID, writeErr)
 			} else {
 				generatedCoverArtifact = &artifact
-				coverFileID, coverKey = artifact.fileID, generatedKey
+				coverFileID, coverKey = artifact.fileID, artifact.objectKey
 			}
 		}
 	}
@@ -495,7 +490,7 @@ func (worker *BlueprintWorker) normalizeBlueprint(ctx context.Context, jobID int
 	tag, err := tx.Exec(ctx, `update blueprints set status=$2,normalized_file_id=$3,normalized_object_key=$4,size_x=$5,size_y=$6,size_z=$7,
 		block_count=$8,palette_count=$9,entity_count=$10,data_version=$11,review_status=$12,published_revision_id=$13,
 		cover_file_id=nullif($14,0),cover_object_key=$15,last_error='',updated_at=now() where id=$1 and status='processing'`,
-		blueprintID, status, normalizedArtifact.fileID, normalizedKey, document.Size[0], document.Size[1], document.Size[2], len(document.Blocks), len(materials), len(document.Entities), document.DataVersion, reviewStatus, publishedRevisionID, coverFileID, coverKey)
+		blueprintID, status, normalizedArtifact.fileID, normalizedArtifact.objectKey, document.Size[0], document.Size[1], document.Size[2], len(document.Blocks), len(materials), len(document.Entities), document.DataVersion, reviewStatus, publishedRevisionID, coverFileID, coverKey)
 	if err != nil {
 		return err
 	}
@@ -568,11 +563,9 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID int64
 		return err
 	}
 	extension := strings.TrimPrefix(strings.ToLower(targetFormat), ".")
-	conversionConfig := worker.api.ossConfigFromSettings(ctx)
-	objectKey := blueprintArtifactObjectKey(conversionConfig.Prefix, ossBlueprintReleaseCategory(publicID, extension), jobID, attempt, blueprintArtifactConversion, extension)
 	filename := strings.TrimSuffix(title, "."+document.SourceFormat) + "." + extension
 	artifact, err := worker.writePendingBlueprintArtifact(ctx, jobID, attempt, runToken, blueprintArtifactConversion,
-		objectKey, filename, contentType, encoded, createdBy, "blueprint_conversion")
+		ossBlueprintReleaseCategory(publicID, extension), extension, filename, contentType, encoded, createdBy, "blueprint_conversion")
 	if err != nil {
 		return err
 	}
@@ -586,7 +579,7 @@ func (worker *BlueprintWorker) convertBlueprint(ctx context.Context, jobID int64
 		return err
 	}
 	if _, err = tx.Exec(ctx, `insert into blueprint_variants(blueprint_id,format,file_id,object_key,original,recommended,status,original_name,content_type,size_bytes,sha256,created_by)
-		values($1,$2,$3,$4,false,false,'ready',$5,$6,$7,$8,$9)`, blueprintID, extension, artifact.fileID, objectKey, filename, contentType, len(encoded), hex.EncodeToString(digest[:]), createdBy); err != nil {
+		values($1,$2,$3,$4,false,false,'ready',$5,$6,$7,$8,$9)`, blueprintID, extension, artifact.fileID, artifact.objectKey, filename, contentType, len(encoded), hex.EncodeToString(digest[:]), createdBy); err != nil {
 		return err
 	}
 	if err = activateBlueprintArtifactTx(ctx, tx, artifact); err != nil {
@@ -688,7 +681,7 @@ func (worker *BlueprintWorker) recoverStaleBlueprintJobs(ctx context.Context) (i
 }
 
 func (worker *BlueprintWorker) readOSSObject(ctx context.Context, objectKey string, maximum int64) ([]byte, string, error) {
-	client, cfg, err := worker.api.ossClient(ctx)
+	client, cfg, err := currentOSSClient(ctx, worker.db, worker.cfg.SettingsEncryptionKey)
 	if err != nil {
 		return nil, "", err
 	}

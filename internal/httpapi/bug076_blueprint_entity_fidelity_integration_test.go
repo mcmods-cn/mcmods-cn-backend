@@ -20,7 +20,7 @@ func TestBlueprintEntityFidelityFailureIsTerminalOnFirstAttemptIntegration(t *te
 		(77,'fidelity4',77,'normalize','','queued',3)`); err != nil {
 		t.Fatal(err)
 	}
-	worker := &BlueprintWorker{db: pool, api: &Server{db: pool}, workerID: "fidelity-worker"}
+	worker := &BlueprintWorker{db: pool, workerID: "fidelity-worker"}
 
 	for _, testCase := range []struct {
 		jobID         int64

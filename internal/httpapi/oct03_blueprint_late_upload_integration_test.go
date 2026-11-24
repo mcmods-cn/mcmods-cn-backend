@@ -120,7 +120,7 @@ func testOCT03LateBlueprintUpload(t *testing.T, scenario string) {
 	finished := make(chan uploadResult, 1)
 	go func() {
 		artifact, uploadErr := worker.writePendingBlueprintArtifact(f.ctx, job.id, job.attempts, job.runToken,
-			blueprintArtifactNormalized, key, "blueprint.json", "application/json", normalized, job.createdBy, "blueprint_normalized")
+			blueprintArtifactNormalized, ossBlueprintReleaseCategory(upload.publicID, "normalized"), "json", "blueprint.json", "application/json", normalized, job.createdBy, "blueprint_normalized")
 		finished <- uploadResult{artifact, uploadErr}
 	}()
 	select {

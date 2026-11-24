@@ -884,7 +884,7 @@ func (s *Server) redirectModExportMedia(w http.ResponseWriter, r *http.Request, 
 			writeError(w, http.StatusRequestEntityTooLarge, "renderer texture exceeds proxy limit")
 			return
 		}
-		client, clientErr := s.ossDownloadClient(r.Context(), cfg)
+		client, clientErr := configuredOSSClient(cfg, false)
 		if clientErr != nil {
 			writeError(w, http.StatusServiceUnavailable, clientErr.Error())
 			return

@@ -527,7 +527,7 @@ func (s *Server) yggdrasilTextureContent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	cfg := s.ossConfigFromSettings(r.Context())
-	client, err := s.ossDownloadClient(r.Context(), cfg)
+	client, err := configuredOSSClient(cfg, false)
 	if err != nil {
 		writeYggdrasilInternalError(w)
 		return

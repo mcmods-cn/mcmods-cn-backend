@@ -21,7 +21,11 @@ func (s *Server) sealSystemSetting(payload any) (string, error) {
 }
 
 func (s *Server) openSystemSetting(stored []byte, target any) error {
-	raw, err := security.DecryptSetting(s.cfg.SettingsEncryptionKey, stored)
+	return openSettingJSON(s.cfg.SettingsEncryptionKey, stored, target)
+}
+
+func openSettingJSON(key string, stored []byte, target any) error {
+	raw, err := security.DecryptSetting(key, stored)
 	if err != nil {
 		return err
 	}

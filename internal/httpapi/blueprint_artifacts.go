@@ -73,18 +73,18 @@ func (worker *BlueprintWorker) writePendingBlueprintArtifact(
 	jobID int64,
 	attempt int,
 	runToken string,
-	role string,
-	objectKey string,
+	role, category, extension string,
 	originalName string,
 	contentType string,
 	data []byte,
 	uploaderID int64,
 	source string,
 ) (blueprintArtifact, error) {
-	client, cfg, err := worker.api.ossClient(ctx)
+	client, cfg, err := currentOSSClient(ctx, worker.db, worker.cfg.SettingsEncryptionKey)
 	if err != nil {
 		return blueprintArtifact{}, err
 	}
+	objectKey := blueprintArtifactObjectKey(cfg.Prefix, category, jobID, attempt, role, extension)
 	digest := sha256.Sum256(data)
 	sha := hex.EncodeToString(digest[:])
 	tx, err := worker.db.Begin(ctx)

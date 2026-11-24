@@ -26,6 +26,10 @@ func (s *Server) ossConfigFromSettingsWithQueryer(ctx context.Context, db ossCon
 }
 
 func (s *Server) ossConfigFromSettingsStrictWithQueryer(ctx context.Context, db ossConfigQueryRower) (ossConfigPayload, error) {
+	return readOSSConfig(ctx, db, s.cfg.SettingsEncryptionKey)
+}
+
+func readOSSConfig(ctx context.Context, db ossConfigQueryRower, encryptionKey string) (ossConfigPayload, error) {
 	payload := defaultOSSConfig()
 	var raw []byte
 	err := db.QueryRow(ctx, `select value from system_settings where key = 'oss.aliyun'`).Scan(&raw)
@@ -35,7 +39,7 @@ func (s *Server) ossConfigFromSettingsStrictWithQueryer(ctx context.Context, db 
 	if err != nil {
 		return ossConfigPayload{}, err
 	}
-	if err := s.openSystemSetting(raw, &payload); err != nil {
+	if err := openSettingJSON(encryptionKey, raw, &payload); err != nil {
 		return ossConfigPayload{}, err
 	}
 	payload = normalizeOSSConfig(payload)

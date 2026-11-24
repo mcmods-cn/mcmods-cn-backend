@@ -99,7 +99,7 @@ func (s *Server) resolveOSSObjectAccessWithConfig(
 	if !options.NotAfter.IsZero() && options.NotAfter.Before(access.ExpiresAt) {
 		access.ExpiresAt = options.NotAfter
 	}
-	client, err := s.ossDownloadClient(ctx, cfg)
+	client, err := configuredOSSClient(cfg, false)
 	if err != nil {
 		return ossObjectAccess{}, err
 	}
