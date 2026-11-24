@@ -138,3 +138,28 @@ func TestOSSMultipartLifecycleRequiresEnabledUnfilteredSevenDayAbort(t *testing.
 		}
 	}
 }
+
+func TestOSSMultipartLifecycleCoversIssuedObjectKeys(t *testing.T) {
+	for _, tc := range []struct {
+		applicationPrefix string
+		bucketPrefix      string
+	}{
+		{"", ""},
+		{"", "mcmods/"},
+		{"/custom/root/", "custom/root/"},
+		{"custom/root", "custom/"},
+		{"custom/root", "/custom"},
+		{"custom/root", "custom "},
+		{"custom/root", "custom/root/private/"},
+	} {
+		rule := aliyunoss.LifecycleRule{
+			Status: aliyunoss.Ptr("Enabled"), Prefix: aliyunoss.Ptr(tc.bucketPrefix),
+			AbortMultipartUpload: &aliyunoss.LifecycleRuleAbortMultipartUpload{Days: aliyunoss.Ptr(int32(7))},
+		}
+		actualKey := buildOSSObjectKeyForFile(tc.applicationPrefix, "user/42/imports", "export.zip")
+		want := strings.HasPrefix(actualKey, tc.bucketPrefix)
+		if covered := hasBoundedOSSMultipartLifecycle([]aliyunoss.LifecycleRule{rule}, tc.applicationPrefix); covered != want {
+			t.Errorf("app root %q, bucket rule %q: coverage=%t, issued key prefix matches=%t", tc.applicationPrefix, tc.bucketPrefix, covered, want)
+		}
+	}
+}

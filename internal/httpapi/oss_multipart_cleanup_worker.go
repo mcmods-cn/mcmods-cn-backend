@@ -68,14 +68,14 @@ func (worker *OSSMultipartCleanupWorker) validateBucketLifecycle(ctx context.Con
 	if err != nil {
 		return fmt.Errorf("verify OSS multipart lifecycle: %w", err)
 	}
-	if result.LifecycleConfiguration == nil || !hasBoundedOSSMultipartLifecycle(result.LifecycleConfiguration.Rules, ossRoot(cfg.Prefix)) {
+	if result.LifecycleConfiguration == nil || !hasBoundedOSSMultipartLifecycle(result.LifecycleConfiguration.Rules, cfg.Prefix) {
 		return errors.New("OSS bucket requires an enabled unfiltered AbortMultipartUpload lifecycle rule of at most 7 days")
 	}
 	return nil
 }
 
 func hasBoundedOSSMultipartLifecycle(rules []aliyunoss.LifecycleRule, objectPrefix string) bool {
-	objectPrefix = strings.TrimPrefix(strings.TrimSpace(objectPrefix), "/")
+	objectKeyPrefix := ossRoot(objectPrefix) + "/"
 	for _, rule := range rules {
 		if rule.Status == nil || !strings.EqualFold(*rule.Status, "Enabled") || rule.AbortMultipartUpload == nil ||
 			rule.AbortMultipartUpload.Days == nil || *rule.AbortMultipartUpload.Days < 1 || *rule.AbortMultipartUpload.Days > 7 ||
@@ -84,9 +84,9 @@ func hasBoundedOSSMultipartLifecycle(rules []aliyunoss.LifecycleRule, objectPref
 		}
 		prefix := ""
 		if rule.Prefix != nil {
-			prefix = strings.TrimPrefix(strings.TrimSpace(*rule.Prefix), "/")
+			prefix = *rule.Prefix
 		}
-		if prefix == "" || strings.HasPrefix(objectPrefix, prefix) {
+		if strings.HasPrefix(objectKeyPrefix, prefix) {
 			return true
 		}
 	}
