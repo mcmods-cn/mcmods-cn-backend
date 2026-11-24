@@ -120,7 +120,13 @@ func (f test039Fixture) pendingRevision(t *testing.T, asset string) string {
 func (f test039Fixture) review(t *testing.T, asset, status string) {
 	t.Helper()
 	revision := f.pendingRevision(t, asset)
-	f.require(t, f.reviewer, http.MethodPatch, "/api/v1/content-revisions/"+revision, map[string]any{"status": status, "note": "test039 independent actual review"}, 200)
+	result := decodeTEST022Data[struct {
+		RevisionID string `json:"revisionId"`
+		Status     string `json:"status"`
+	}](t, f.require(t, f.reviewer, http.MethodPatch, "/api/v1/content-revisions/"+revision, map[string]any{"status": status, "note": "test039 independent actual review"}, 200))
+	if result.RevisionID != revision || result.Status != status {
+		t.Fatalf("review receipt = (%q, %q), want (%q, %q)", result.RevisionID, result.Status, revision, status)
+	}
 }
 
 func (f test039Fixture) profile(t *testing.T, token, name, visibility string) playerProfileResponse {
@@ -271,7 +277,7 @@ func TestTEST039FullHTTPSkinReviewNotificationFailureRollsBackAllFactsIntegratio
 			if _, err := f.db.Exec(f.ctx, "alter table nats_outbox drop constraint test039_reject_review_notification"); err != nil {
 				t.Fatal(err)
 			}
-			f.require(t, f.reviewer, http.MethodPatch, "/api/v1/content-revisions/"+revision, map[string]any{"status": status, "note": "recovered independent skin review"}, 200)
+			f.review(t, asset.PublicID, status)
 			var stored string
 			var intents int
 			if err := f.db.QueryRow(f.ctx, `select review_status,(select count(*) from nats_outbox where payload->>'templateKey'=$2)

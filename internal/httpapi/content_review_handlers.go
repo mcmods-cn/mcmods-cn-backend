@@ -807,7 +807,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to commit skin review")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionID, "status": request.Status})
+		writeJSON(w, http.StatusOK, map[string]any{"revisionId": revisionPublicID, "status": request.Status})
 		return
 	}
 	if aggregateType != "catalog_resource" {
