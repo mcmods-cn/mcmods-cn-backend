@@ -123,6 +123,14 @@ func (s *Server) updateOSSFileScanStatus(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "无法读取 OSS 文件")
 		return
 	}
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if !claimsAllow(actor, "oss.write") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
 	if previousFileStatus == "deleted" {
 		writeError(w, http.StatusConflict, "deleted OSS files cannot be rescanned")
 		return
@@ -138,7 +146,7 @@ func (s *Server) updateOSSFileScanStatus(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "无法更新扫描状态")
 		return
 	}
-	if err = synchronizeProjectFilesForOSSScanTx(r.Context(), tx, internalID, currentClaims(r).Subject, request.Status); err != nil {
+	if err = synchronizeProjectFilesForOSSScanTx(r.Context(), tx, internalID, actor.Subject, request.Status); err != nil {
 		writeError(w, http.StatusInternalServerError, "无法同步项目文件发布状态")
 		return
 	}
@@ -175,7 +183,7 @@ func (s *Server) updateOSSFileScanStatus(w http.ResponseWriter, r *http.Request)
 	if _, err = tx.Exec(r.Context(), `insert into audit_events(
 		aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
 		values('oss_file',$1,$2,'scan_status_update',$3,$4,$5::jsonb)`,
-		publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata); err != nil {
+		publicID, actor.Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata); err != nil {
 		writeError(w, http.StatusInternalServerError, "无法记录扫描状态变更")
 		return
 	}

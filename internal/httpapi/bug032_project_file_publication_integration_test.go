@@ -16,7 +16,6 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestBUG032ProjectFilePublicationFollowsScanLifecycleIntegration(t *testing.T) {
@@ -65,7 +64,7 @@ func TestBUG032ProjectFilePublicationFollowsScanLifecycleIntegration(t *testing.
 	}
 	server := &Server{db: pool, cfg: config.Config{JWTSecret: "bug032-test-only-session-secret"}}
 	for _, id := range userIDs {
-		grantTEST044Permissions(t, ctx, pool, id, project.uploadPermission())
+		grantTEST044Permissions(t, ctx, pool, id, project.uploadPermission(), "oss.write")
 	}
 
 	pendingOSSID, pendingOSSPublicID := insertBUG032OSSFile(t, ctx, pool, project, userIDs[0], "pending.jar")
@@ -183,9 +182,10 @@ func invokeBUG032ScanTransition(t *testing.T, ctx context.Context, server *Serve
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/oss/files/"+ossPublicID+"/scan", bytes.NewBufferString(`{"status":"`+status+`"}`))
 	request.SetPathValue("publicId", ossPublicID)
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: actorID}))
+	request = request.WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer "+mintTEST048Token(t, ctx, server.db, server.cfg, actorID))
 	response := httptest.NewRecorder()
-	server.updateOSSFileScanStatus(response, request)
+	server.requirePermission("oss.write", server.updateOSSFileScanStatus)(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("scan transition %q status=%d body=%s", status, response.Code, response.Body.String())
 	}

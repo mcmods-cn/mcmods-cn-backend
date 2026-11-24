@@ -16,7 +16,6 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestBUG038RejectedMirrorFailsRunAndCanBeRescannedIntegration(t *testing.T) {
@@ -118,6 +117,9 @@ func TestBUG038RejectedMirrorFailsRunAndCanBeRescannedIntegration(t *testing.T) 
 		t.Errorf("rejected mirror run result=%v error=%v, want scanFailures=1/needsReview=1/error", result, mirrorErr)
 	}
 
+	grantTEST044Permissions(t, ctx, pool, reviewerID, "oss.write")
+	server.cfg.JWTSecret = "bug038-synthetic-scan-session"
+	scanToken := mintTEST048Token(t, ctx, pool, server.cfg, reviewerID)
 	updateScan := func(status, note string) {
 		t.Helper()
 		payload, marshalErr := json.Marshal(map[string]string{"status": status, "note": note})
@@ -126,9 +128,10 @@ func TestBUG038RejectedMirrorFailsRunAndCanBeRescannedIntegration(t *testing.T) 
 		}
 		request := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/oss/files/"+ossPublicID+"/scan", bytes.NewReader(payload))
 		request.SetPathValue("publicId", ossPublicID)
-		request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: reviewerID}))
+		request = request.WithContext(ctx)
+		request.Header.Set("Authorization", "Bearer "+scanToken)
 		response := httptest.NewRecorder()
-		server.updateOSSFileScanStatus(response, request)
+		server.requirePermission("oss.write", server.updateOSSFileScanStatus)(response, request)
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s rescan status=%d body=%s", status, response.Code, response.Body.String())
 		}
