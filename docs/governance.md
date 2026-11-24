@@ -43,7 +43,16 @@ exporter 的 `e751c8b` 在 JDK 17 上完成 JUnit、两种加载器构建与 Pyt
 
 PostgreSQL 18.6 上，131 条待解析 Mod 关系原需 268 次 SQL，已有目标的关系会得到错误回执。现在按锁定的实际关系生成回执，同一输入共 8 次 SQL。清理队列按失败时间和 ID 读取死信；十万条工单、五千条死信的同一热缓存样本，取最近 50 条的通用计划从 1,968 个共享缓存页降至 23 个，返回的 ID 和顺序一致。[对象死信恢复](queue-recovery.md#oss-对象删除)
 
-`840f009` 的隔离服务门使用 PostgreSQL、Redis、NATS/JetStream 与 Typesense。31 个顶层用例及 6 个子场景均执行通过，包含权限版本和广播重连。完整数据库门的用例比该专项目录更广，按各自源码和运行编号核对。[真实服务专项](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45391231935)
+`2daeee3` 的隔离专项使用 PostgreSQL、Redis、单节点 NATS/JetStream 与 Typesense。广播可用性需要等待本连接的订阅重放得到 broker 确认。该版本的质量、race 与容器门和真实服务专项可分别复跑。完整数据库门由 `go run ./tools/testing/db_suite` 发现并执行全部批次。[真实服务专项](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45396570140) · [Go 依赖检查](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45396570180) · [完整数据库运行](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45396570211)
+
+| 回归路径 | 正常使用和故障恢复的验证 |
+| --- | --- |
+| 外部项目文件镜像 | 向对象存储发送字节前，先为本次传输的独立键登记延期清理。登记文件成功时在同一事务撤销清理。数据库提交确认丢失时，由持久回执决定保留或回收。原实现的两个并发连接可使已登记记录失去字节；修复后保留字节。运行 `TestUnacknowledgedProjectMirrorRetainsOnlyItsOwnDelayedCleanupIntegration`。 |
+| 创作者编辑冲突 | `TestCreatorProfileEditUsesTheRevisionReadByTheEditorIntegration` 验证缺少基准返回 428、基准过期返回 409。读取当前基准后，相同草稿可以立即提交。拒绝路径先回滚 PostgreSQL 事务再释放本请求的重复内容预留。成功写入仍保留重复提交保护。 |
+| 蓝图转换 | API 和 Worker 在同一张蓝图行上协调。转换请求等待行锁时，若 Worker 已发布目标格式，请求直接返回现有版本。应用连接池固定 UTC 与 READ COMMITTED，显式请求更强隔离的只读事务保留原设置。运行 `TestBlueprintConversionUsesTheVariantPublishedWhileAdmissionWaits`。 |
+| 图像、目录与操作区 | 前端共用 Mod 和整合包卡片，保留缺失值与 0 的区别，长翻译随容器宽度换行。提供同组三条合成目录记录的真实 Chromium 桌面和手机对照。[截图与复跑命令](https://github.com/mcmods-cn/mcmods-cn-frontend/blob/main/docs/ui/README.md#mod-与整合包目录卡片) |
+
+`2daeee3` 后端 OCI 镜像与 `0c31c4b` 前端 OCI 镜像在隔离 Linux 中以 UID 65532 和 1001 运行，有效 capabilities 为零。TLS 1.3 下匿名目录、登录退出和实际通知任务均完成。提交返回 202，Worker 发布一次，随后列表可读。两进程收到 TERM 后停止。容量抽样使用单独的 `9bda905` 后端，同一前端，以 1、4 并发对健康、匿名目录和认证各发 80 次，共 480 次返回 200；单并发认证 P99 为 362 ms。目标宿主的时延与跨主机故障仍须独立验证。[后端镜像构建](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45396552869) · [前端镜像构建](https://github.com/mcmods-cn/mcmods-cn-frontend/actions/runs/45395690764)
 
 逐文件记录包含三个固定 Git SHA、每份文件的 Git blob、SHA-256、分类、连续阅读区间或格式核验依据。条目保留实际阅读者的职责与调用链记录。将三仓完整 Git 克隆放在同一目录，打开下列命令所在的后端仓库。命令会重新读取记录中的 Git 对象并检查区间，输出中单列运行验证。[逐文件记录](audit/current-review.json.gz) · [核对工具](../tools/audit/review_snapshot.py)
 
