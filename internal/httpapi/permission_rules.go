@@ -44,7 +44,7 @@ func (s *Server) resolveUserRootPermissions(ctx context.Context, userID int64) (
 	if !s.cache.Config().RBACCacheEnabled {
 		return s.resolveUserRootPermissionsUncached(ctx, userID)
 	}
-	versions, err := s.permissionVersions(ctx, userID)
+	versions, err := readPermissionVersions(ctx, s.db, userID)
 	if err != nil {
 		return nil, nil, err
 	}

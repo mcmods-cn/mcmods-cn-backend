@@ -28,9 +28,9 @@ const permissionVersionColumns = `users.permission_version,
     (select version from runtime_versions where name='rbac'),
     (select version from runtime_versions where name='project_acl')`
 
-func (s *Server) permissionVersions(ctx context.Context, userID int64) (permissionVersions, error) {
+func readPermissionVersions(ctx context.Context, db databaseQuery, userID int64) (permissionVersions, error) {
 	var v permissionVersions
-	err := s.db.QueryRow(ctx, `select `+permissionVersionColumns+` from users where id=$1`, userID).Scan(&v.User, &v.RBAC, &v.ProjectACL)
+	err := db.QueryRow(ctx, `select `+permissionVersionColumns+` from users where id=$1`, userID).Scan(&v.User, &v.RBAC, &v.ProjectACL)
 	return v, err
 }
 

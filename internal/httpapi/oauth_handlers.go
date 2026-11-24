@@ -18,8 +18,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"mcmods-cn-backend/internal/domain"
 )
 
 type oauthConfigPayload struct {
@@ -139,13 +137,17 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "第三方账号登录失败")
 		return
 	}
-	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
-	s.recordLogin(r.Context(), &user.ID, profile.Provider+":"+profile.ProviderUserID, location, r.UserAgent(), true, "oauth_"+profile.Provider)
-	token, err := s.issueToken(r.Context(), user)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
+	if user.Status != "active" {
+		writeError(w, http.StatusForbidden, "账号已被禁用")
 		return
 	}
+	token, err := s.issueToken(r.Context(), s.db, user)
+	if err != nil {
+		writeSessionIssueError(w, err)
+		return
+	}
+	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
+	s.recordLogin(r.Context(), &user.ID, profile.Provider+":"+profile.ProviderUserID, location, r.UserAgent(), true, "oauth_"+profile.Provider)
 	s.setAuthSessionCookie(w, r, token)
 	redirectURL := s.cfg.FrontendOrigin + "/login?oauth=success"
 	if next != "" {
@@ -682,18 +684,18 @@ func decodeOAuthJSONResponse(resp *http.Response, target any) error {
 	return nil
 }
 
-func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProviderProfile, location clientLocation) (domain.User, error) {
-	var user domain.User
+func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProviderProfile, location clientLocation) (loginAccount, error) {
+	var user loginAccount
 	created := false
 	err := s.db.QueryRow(
 		ctx,
-		`select u.id, u.public_id, u.username, u.email, u.email_verified, u.status, u.created_at, u.last_login_at, u.avatar_url, u.signature
+		`select u.id, u.public_id, u.username, u.email, u.email_verified, u.status, u.created_at, u.last_login_at, u.avatar_url, u.signature,u.auth_version
 		 from oauth_accounts oa
 		 join users u on u.id = oa.user_id
 		 where oa.provider = $1 and oa.provider_user_id = $2`,
 		profile.Provider,
 		profile.ProviderUserID,
-	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature, &user.authVersion)
 	if err == nil {
 		return user, nil
 	}
@@ -711,13 +713,13 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 	}
 	err = tx.QueryRow(
 		ctx,
-		`select u.id,u.public_id,u.username,u.email,u.email_verified,u.status,u.created_at,u.last_login_at,u.avatar_url,u.signature
+		`select u.id,u.public_id,u.username,u.email,u.email_verified,u.status,u.created_at,u.last_login_at,u.avatar_url,u.signature,u.auth_version
 		 from oauth_accounts oa
 		 join users u on u.id=oa.user_id
 		 where oa.provider=$1 and oa.provider_user_id=$2`,
 		profile.Provider,
 		profile.ProviderUserID,
-	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature, &user.authVersion)
 	if err == nil {
 		if err = tx.Commit(ctx); err != nil {
 			return user, err
@@ -730,10 +732,10 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 	if profile.EmailVerified && strings.TrimSpace(profile.Email) != "" {
 		err = tx.QueryRow(
 			ctx,
-			`select id,public_id,username,email,email_verified,status,created_at,last_login_at,avatar_url,signature
+			`select id,public_id,username,email,email_verified,status,created_at,last_login_at,avatar_url,signature,auth_version
 			 from users where lower(email)=lower($1)`,
 			profile.Email,
-		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature, &user.authVersion)
 		if err != nil && err != pgx.ErrNoRows {
 			return user, err
 		}
@@ -752,14 +754,14 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 				registration_ip, registration_country_code, registration_city
 			 )
 			 values ($1, $2, 'oauth-login-disabled', $3, 'active', $4, $5, $6)
-			 returning id, public_id, username, email, email_verified, status, created_at, last_login_at`,
+			 returning id, public_id, username, email, email_verified, status, created_at, last_login_at, auth_version`,
 			username,
 			email,
 			profile.EmailVerified,
 			location.IP,
 			location.CountryCode,
 			location.City,
-		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+		).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.authVersion)
 		if err != nil {
 			return user, err
 		}

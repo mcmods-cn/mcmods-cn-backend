@@ -59,6 +59,11 @@ type emailLoginRequest struct {
 	Code  string `json:"code"`
 }
 
+type loginAccount struct {
+	domain.User
+	authVersion int64
+}
+
 type authenticatedUserResponse struct {
 	domain.User
 	PermissionRules   []security.PermissionRule `json:"permissionRules"`
@@ -121,6 +126,11 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusTooManyRequests, "auth_rate_limited", "too many registration requests; please try again later", 3600, nil)
 		return
 	}
+	codeID, err := verifiedEmailCodeID(r.Context(), s.db, req.Email, "register", req.Code)
+	if err != nil {
+		writeEmailCodeError(w, err)
+		return
+	}
 	passwordHash, err := security.HashPassword(req.Password)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "密码处理失败")
@@ -132,16 +142,12 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err := consumeEmailVerificationCodeTx(r.Context(), tx, req.Email, "register", req.Code); err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, errInvalidEmailVerificationCode) {
-			writeError(w, http.StatusServiceUnavailable, "注册服务暂时不可用")
-			return
-		}
-		writeError(w, http.StatusUnauthorized, "验证码不正确或已过期")
+	if err := claimVerifiedEmailCode(r.Context(), tx, codeID); err != nil {
+		writeEmailCodeError(w, err)
 		return
 	}
 
-	var user domain.User
+	var user loginAccount
 	err = tx.QueryRow(
 		r.Context(),
 		`insert into users (
@@ -150,7 +156,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		     registration_ip, registration_country_code, registration_city, email_verified
 		 )
 		 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)
-		 returning id, public_id, username, email, email_verified, status, created_at, last_login_at`,
+		 returning id, public_id, username, email, email_verified, status, created_at, last_login_at, auth_version`,
 		req.Username,
 		req.Email,
 		passwordHash,
@@ -162,7 +168,7 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		location.IP,
 		location.CountryCode,
 		location.City,
-	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.authVersion)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "用户名或邮箱已被占用")
@@ -176,19 +182,25 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	versions, err := readPermissionVersions(r.Context(), tx, user.ID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取新用户权限失败")
+		return
+	}
+	resolved, err := resolveUsersRootPermissionsQuery(r.Context(), tx, []int64{user.ID})
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取新用户权限失败")
+		return
+	}
+	grants := resolved[user.ID]
+	authenticatedUser := authenticatedResponse(user.User, versions, grants.Roles, grants.Permissions)
+	session, err := s.issueToken(r.Context(), tx, user)
+	if err != nil {
+		writeSessionIssueError(w, err)
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "注册失败")
-		return
-	}
-
-	authenticatedUser, err := s.authenticatedUser(r.Context(), user)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
-		return
-	}
-	session, err := s.issueToken(r.Context(), user)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
+		writeError(w, http.StatusServiceUnavailable, "注册失败")
 		return
 	}
 	s.writeLoginResult(w, r, http.StatusCreated, session, authenticatedUser)
@@ -220,7 +232,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, pgx.ErrNoRows) {
 		passwordHash = loginDummyPasswordHash
 	} else if err != nil {
-		log.Printf("login account lookup failed: %v", err)
+		log.Printf("login account lookup failed: %T", err)
 		writeError(w, http.StatusInternalServerError, "登录服务暂时不可用")
 		return
 	}
@@ -236,14 +248,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	authenticatedUser, err := s.authenticatedUser(r.Context(), user)
+	authenticatedUser, err := s.authenticatedUser(r.Context(), user.User)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
 		return
 	}
-	session, err := s.issueToken(r.Context(), user)
+	session, err := s.issueToken(r.Context(), s.db, user)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
+		writeSessionIssueError(w, err)
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
@@ -352,38 +364,55 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusTooManyRequests, "auth_rate_limited", "too many login attempts; please try again later", 900, nil)
 		return
 	}
-	if err := s.consumeEmailLoginCode(r.Context(), req.Email, req.Code); err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) && !errors.Is(err, errInvalidEmailVerificationCode) {
-			writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
-			return
+	codeID, err := verifiedEmailCodeID(r.Context(), s.db, req.Email, "login", req.Code)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errInvalidEmailVerificationCode) {
+			s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "invalid_email_code")
 		}
-		s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "invalid_email_code")
-		writeError(w, http.StatusUnauthorized, "验证码不正确或已过期")
+		writeEmailCodeError(w, err)
 		return
 	}
 	user, err := s.findUserByEmail(r.Context(), req.Email)
-	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
+		return
+	}
+	if errors.Is(err, pgx.ErrNoRows) || user.Status != "active" {
+		if claimErr := claimVerifiedEmailCode(r.Context(), s.db, codeID); claimErr != nil {
+			writeEmailCodeError(w, claimErr)
 			return
 		}
-		s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "email_not_registered")
-		writeError(w, http.StatusNotFound, "该邮箱尚未注册")
+		if errors.Is(err, pgx.ErrNoRows) {
+			s.recordLogin(r.Context(), nil, req.Email, location, r.UserAgent(), false, "email_not_registered")
+			writeError(w, http.StatusNotFound, "该邮箱尚未注册")
+		} else {
+			s.recordLogin(r.Context(), &user.ID, req.Email, location, r.UserAgent(), false, "disabled")
+			writeError(w, http.StatusForbidden, "账号已被禁用")
+		}
 		return
 	}
-	if user.Status != "active" {
-		s.recordLogin(r.Context(), &user.ID, req.Email, location, r.UserAgent(), false, "disabled")
-		writeError(w, http.StatusForbidden, "账号已被禁用")
-		return
-	}
-	authenticatedUser, err := s.authenticatedUser(r.Context(), user)
+	authenticatedUser, err := s.authenticatedUser(r.Context(), user.User)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to resolve user permissions")
+		writeError(w, http.StatusServiceUnavailable, "failed to resolve user permissions")
 		return
 	}
-	session, err := s.issueToken(r.Context(), user)
+	tx, err := s.db.Begin(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "生成登录凭证失败")
+		writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err = claimVerifiedEmailCode(r.Context(), tx, codeID); err != nil {
+		writeEmailCodeError(w, err)
+		return
+	}
+	session, err := s.issueToken(r.Context(), tx, user)
+	if err != nil {
+		writeSessionIssueError(w, err)
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "登录服务暂时不可用")
 		return
 	}
 	_, _ = s.db.Exec(r.Context(), `update users set last_login_at = now(), updated_at = now() where id = $1`, user.ID)
@@ -391,41 +420,36 @@ func (s *Server) emailLogin(w http.ResponseWriter, r *http.Request) {
 	s.writeLoginResult(w, r, http.StatusOK, session, authenticatedUser)
 }
 
-func (s *Server) consumeEmailLoginCode(ctx context.Context, email, code string) error {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
+func writeEmailCodeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errInvalidEmailVerificationCode) {
+		writeError(w, http.StatusUnauthorized, "验证码不正确或已过期")
+		return
 	}
-	defer tx.Rollback(ctx)
-	if err := consumeEmailVerificationCodeTx(ctx, tx, email, "login", code); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	writeError(w, http.StatusServiceUnavailable, "邮箱验证服务暂时不可用")
 }
 
-func consumeEmailVerificationCodeTx(ctx context.Context, tx pgx.Tx, email, purpose, code string) error {
+func verifiedEmailCodeID(ctx context.Context, db databaseQuery, email, purpose, code string) (int64, error) {
 	var codeID int64
 	var codeHash string
-	if err := tx.QueryRow(
-		ctx,
-		`select id,code_hash
-		 from email_verification_codes
-		 where email=$1 and purpose=$2 and consumed_at is null and expires_at>now()
-		 order by id desc
-		 limit 1
-		 for update`,
-		email,
-		purpose,
-	).Scan(&codeID, &codeHash); err != nil {
-		return err
+	err := db.QueryRow(ctx, `select id, code_hash from email_verification_codes
+		where email=$1 and purpose=$2 and consumed_at is null and expires_at>clock_timestamp()
+		order by id desc limit 1`, email, purpose).Scan(&codeID, &codeHash)
+	if err != nil {
+		return 0, err
 	}
 	if !security.VerifyCode(code, codeHash) {
-		return errInvalidEmailVerificationCode
+		return 0, errInvalidEmailVerificationCode
 	}
-	if _, err := tx.Exec(ctx, `update email_verification_codes set consumed_at=now() where id=$1 and consumed_at is null`, codeID); err != nil {
-		return err
-	}
-	return nil
+	return codeID, nil
+}
+
+func claimVerifiedEmailCode(ctx context.Context, db databaseQuery, id int64) error {
+	// Check wall time after acquiring the row, even if another claimant held it past expiry.
+	var claimed int64
+	return db.QueryRow(ctx, `with candidate as materialized (
+			select id,expires_at from email_verification_codes where id=$1 and consumed_at is null for update
+		) update email_verification_codes e set consumed_at=clock_timestamp() from candidate c
+		where e.id=c.id and c.expires_at>clock_timestamp() returning e.id`, id).Scan(&claimed)
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
@@ -532,12 +556,16 @@ func (s *Server) finishLogout(w http.ResponseWriter, r *http.Request, expireCook
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Server) issueToken(ctx context.Context, user domain.User) (issuedAuthSession, error) {
-	var authVersion int64
-	if err := s.db.QueryRow(ctx, `select auth_version from users where id=$1 and status='active'`, user.ID).Scan(&authVersion); err != nil {
-		return issuedAuthSession{}, err
+func writeSessionIssueError(w http.ResponseWriter, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusUnauthorized, "账号状态已变化，请重新登录")
+		return
 	}
-	claims, err := security.NewClaims(user.PublicID, user.Username, user.Email, authVersion, s.cfg.JWTTTL)
+	writeError(w, http.StatusServiceUnavailable, "生成登录凭证失败")
+}
+
+func (s *Server) issueToken(ctx context.Context, db databaseQuery, user loginAccount) (issuedAuthSession, error) {
+	claims, err := security.NewClaims(user.PublicID, user.Username, user.Email, user.authVersion, s.cfg.JWTTTL)
 	if err != nil {
 		return issuedAuthSession{}, err
 	}
@@ -545,17 +573,23 @@ func (s *Server) issueToken(ctx context.Context, user domain.User) (issuedAuthSe
 	if err != nil {
 		return issuedAuthSession{}, err
 	}
-	if _, err = s.db.Exec(ctx, `insert into auth_sessions(session_hash,user_id,auth_version,expires_at)
-		values($1,$2,$3,$4)`, security.SessionFingerprint(claims.SessionID), user.ID, authVersion, time.Unix(claims.ExpiresAt, 0)); err != nil {
+	// Bind the session to the account revision that supplied the credential proof.
+	var inserted bool
+	err = db.QueryRow(ctx, `with current_account as materialized (
+			select id,auth_version from users where id=$2 and auth_version=$3 and status='active' for share
+		) insert into auth_sessions(session_hash,user_id,auth_version,expires_at)
+		select $1,id,auth_version,$4 from current_account returning true`,
+		security.SessionFingerprint(claims.SessionID), user.ID, user.authVersion, time.Unix(claims.ExpiresAt, 0)).Scan(&inserted)
+	if err != nil {
 		return issuedAuthSession{}, err
 	}
 	return issuedAuthSession{token: token, marker: browserSessionMarker(claims.SessionID)}, nil
 }
 
-func (s *Server) findUserForLogin(ctx context.Context, account string) (domain.User, string, error) {
-	var user domain.User
+func (s *Server) findUserForLogin(ctx context.Context, account string) (loginAccount, string, error) {
+	var user loginAccount
 	var passwordHash string
-	query := `select id, public_id, username, email, password_hash, email_verified, status, created_at, last_login_at, avatar_url, signature
+	query := `select id, public_id, username, email, password_hash, email_verified, status, created_at, last_login_at, avatar_url, signature, auth_version
 		from users
 		where lower(email) = lower($1) or lower(username) = lower($1) or public_id = lower($1)`
 	args := []any{account}
@@ -571,18 +605,19 @@ func (s *Server) findUserForLogin(ctx context.Context, account string) (domain.U
 		&user.LastLoginAt,
 		&user.AvatarURL,
 		&user.Signature,
+		&user.authVersion,
 	)
 	return user, passwordHash, err
 }
 
-func (s *Server) findUserByEmail(ctx context.Context, email string) (domain.User, error) {
-	var user domain.User
+func (s *Server) findUserByEmail(ctx context.Context, email string) (loginAccount, error) {
+	var user loginAccount
 	err := s.db.QueryRow(
 		ctx,
-		`select id, public_id, username, email, email_verified, status, created_at, last_login_at, avatar_url, signature
+		`select id, public_id, username, email, email_verified, status, created_at, last_login_at, avatar_url, signature, auth_version
 		 from users where lower(email) = lower($1)`,
 		email,
-	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature)
+	).Scan(&user.ID, &user.PublicID, &user.Username, &user.Email, &user.EmailVerified, &user.Status, &user.CreatedAt, &user.LastLoginAt, &user.AvatarURL, &user.Signature, &user.authVersion)
 	return user, err
 }
 
@@ -598,7 +633,7 @@ func (s *Server) findUserByID(ctx context.Context, id int64) (domain.User, error
 }
 
 func (s *Server) authenticatedUser(ctx context.Context, user domain.User) (authenticatedUserResponse, error) {
-	versions, err := s.permissionVersions(ctx, user.ID)
+	versions, err := readPermissionVersions(ctx, s.db, user.ID)
 	if err != nil {
 		return authenticatedUserResponse{}, err
 	}
@@ -610,8 +645,12 @@ func (s *Server) authenticatedUser(ctx context.Context, user domain.User) (authe
 	if err != nil {
 		return authenticatedUserResponse{}, err
 	}
+	return authenticatedResponse(user, versions, roleCodes, permissionRules), nil
+}
+
+func authenticatedResponse(user domain.User, versions permissionVersions, roleCodes []string, permissionRules []security.PermissionRule) authenticatedUserResponse {
 	user.RoleCodes = roleCodes
-	return authenticatedUserResponse{User: user, PermissionRules: permissionRules, PermissionVersion: versions.User, RBACVersion: versions.RBAC}, nil
+	return authenticatedUserResponse{User: user, PermissionRules: permissionRules, PermissionVersion: versions.User, RBACVersion: versions.RBAC}
 }
 
 func (s *Server) recordLogin(ctx context.Context, userID *int64, account string, location clientLocation, userAgent string, success bool, reason string) {
