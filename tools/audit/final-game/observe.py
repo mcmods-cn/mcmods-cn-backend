@@ -170,18 +170,18 @@ def main():
         control = urllib.parse.urlsplit(env_cfg['DATABASE_URL'])
         assert control.scheme in ('postgres', 'postgresql') and control.hostname == binding['host'] and control.port == binding['port']
         assert control.username == binding['role'] == binding['owner'] and control.path == '/' + record['database']
-        database = binding['name']
-        assert database == record['database'] or re.fullmatch(r'test_mcmods_journey_[0-9a-f]{16}', database)
+        database_name = binding['name']
+        assert database_name == record['database'] or re.fullmatch(r'test_mcmods_journey_[0-9a-f]{16}', database_name)
         def sql(statement):
-            run = subprocess.run(docker + ['exec', '-i', container, 'psql', '-U', binding['role'], '-d', database, '-X', '-qAt', '-v', 'ON_ERROR_STOP=1'], input=statement, capture_output=True, text=True, env=environment)
+            run = subprocess.run(docker + ['exec', '-i', container, 'psql', '-U', binding['role'], '-d', database_name, '-X', '-qAt', '-v', 'ON_ERROR_STOP=1'], input=statement, capture_output=True, text=True, env=environment)
             if run.returncode:
                 raise AssertionError('Exact owned read-only PostgreSQL query failed: ' + run.stderr[-1000:])
             return run.stdout.strip()
 
         db_oid, db_owner, db_marker = sql("select oid,pg_get_userbyid(datdba),coalesce(shobj_description(oid,'pg_database'),'') from pg_database where datname=current_database()").split('|', 2)
         assert int(db_oid) == binding['oid'] and db_owner == binding['owner']
-        if database != record['database']:
-            assert re.fullmatch('owned-export-journey-' + database.removeprefix('test_mcmods_journey_') + '[0-9a-f]{16}', db_marker)
+        if database_name != record['database']:
+            assert re.fullmatch('owned-export-journey-' + database_name.removeprefix('test_mcmods_journey_') + '[0-9a-f]{16}', db_marker)
         owner, marker = sql(f"select pg_get_userbyid(nspowner),obj_description(oid,'pg_namespace') from pg_namespace where nspname='{schema}'").split('|', 1)
         assert owner == binding['role'] and re.fullmatch('mcmods-owned-test:' + schema.removeprefix('mcmods_audit_') + '[0-9a-f]{16}', marker)
 
