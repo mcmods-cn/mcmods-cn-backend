@@ -391,7 +391,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, mod)
 }
 
-const publicModCatalogFilter = `where (m.review_status='approved' or m.submitted_by=$1)
+var publicModCatalogFilter = `where (m.review_status='approved' or m.submitted_by=$1)
 	and (($3 and m.id=any($4::bigint[])) or (not $3 and ($2='' or m.slug ilike '%%'||$2||'%%'
 		or m.project_code ilike '%%'||$2||'%%' or m.primary_name ilike '%%'||$2||'%%'
 		or m.secondary_name ilike '%%'||$2||'%%' or m.abbreviation ilike '%%'||$2||'%%'
@@ -416,7 +416,7 @@ const publicModCatalogFilter = `where (m.review_status='approved' or m.submitted
 	and (cardinality($13::text[])=0 or m.license=any($13::text[]))
 	and (cardinality($14::text[])=0 or not exists(select 1 from unnest($14::text[]) requested(value) where not case requested.value
 		when 'gallery' then exists(select 1 from mod_gallery_images gallery where gallery.mod_id=m.id)
-		when 'downloads' then m.modrinth_project_id<>'' or m.curseforge_project_id<>''
+		when 'downloads' then ` + catalogDownloadSourceSQL("mod", "m") + `
 		when 'reviewed' then m.review_status='approved'
 		else false end))
 	and ($15::integer=0 or $15>0 and m.updated_at>=now()-make_interval(days=>$15)

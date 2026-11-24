@@ -156,7 +156,7 @@ type modpackListResponse struct {
 
 var allowedModpackCategories = stringSet(catalogpolicy.ModpackCategories()...)
 
-const publicModpackCatalogFilter = `where (pack.review_status='approved' or pack.submitted_by=$1)
+var publicModpackCatalogFilter = `where (pack.review_status='approved' or pack.submitted_by=$1)
 	and (($3 and pack.id=any($4::bigint[])) or (not $3 and ($2='' or pack.slug ilike '%%'||$2||'%%'
 		or pack.public_id ilike '%%'||$2||'%%' or pack.primary_name ilike '%%'||$2||'%%'
 		or pack.secondary_name ilike '%%'||$2||'%%' or pack.summary ilike '%%'||$2||'%%'
@@ -180,7 +180,7 @@ const publicModpackCatalogFilter = `where (pack.review_status='approved' or pack
 	and (cardinality($13::text[])=0 or pack.license=any($13::text[]))
 	and (cardinality($14::text[])=0 or not exists(select 1 from unnest($14::text[]) requested(value) where not case requested.value
 		when 'gallery' then exists(select 1 from modpack_gallery_images gallery where gallery.modpack_id=pack.id)
-		when 'downloads' then true
+		when 'downloads' then ` + catalogDownloadSourceSQL("modpack", "pack") + `
 		when 'reviewed' then pack.review_status='approved'
 		else false end))
 	and ($15::integer=0 or $15>0 and pack.updated_at>=now()-make_interval(days=>$15)

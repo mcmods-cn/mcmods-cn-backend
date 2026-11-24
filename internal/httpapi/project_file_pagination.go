@@ -132,13 +132,24 @@ func decodeProjectFilePageCursor(raw, scope, source string) (*projectFilePageCur
 	return &cursor, nil
 }
 
+const listedInternalProjectFilesSQL = `from project_files project_file
+	join oss_files oss on oss.id=project_file.oss_file_id and oss.status='active'
+		and oss.scan_status in ('clean','trusted_generated')
+	where project_file.status='active'`
+
+// Both arguments are SQL constants at the two catalog definitions. A bound
+// provider is a configured source; a catalog read never calls that provider.
+func catalogDownloadSourceSQL(projectType, alias string) string {
+	return fmt.Sprintf(`(%[1]s.modrinth_project_id<>'' or %[1]s.curseforge_project_id<>'' or exists(
+		select 1 %[2]s and project_file.project_type='%[3]s' and project_file.project_internal_id=%[1]s.id))`,
+		alias, listedInternalProjectFilesSQL, projectType)
+}
+
 func (s *Server) internalProjectFilePage(ctx context.Context, project projectFileContext, request projectFilePageRequest) (projectFilePage, error) {
 	query := `select project_file.id,project_file.public_id,project_file.display_name,project_file.file_name,
 		project_file.version_name,project_file.release_channel,project_file.game_versions,project_file.loaders,
 		project_file.created_at,project_file.size_bytes,project_file.download_count,project_file.sha256,oss.scan_status
-		from project_files project_file join oss_files oss on oss.id=project_file.oss_file_id and oss.status='active'
-			and oss.scan_status in ('clean','trusted_generated')
-		where project_file.project_type=$1 and project_file.project_internal_id=$2 and project_file.status='active'`
+		` + listedInternalProjectFilesSQL + ` and project_file.project_type=$1 and project_file.project_internal_id=$2`
 	arguments := []any{project.ProjectType, project.ProjectInternalID}
 	if request.Cursor != nil {
 		query += ` and (project_file.created_at,project_file.id)<($3,$4)`
