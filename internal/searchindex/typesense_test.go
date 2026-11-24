@@ -108,3 +108,43 @@ func TestSearchRejectsRedirectFromConfiguredEndpoint(t *testing.T) {
 		t.Fatalf("unexpected redirect result: error=%v ready=%v followed=%v", err, client.Ready(), followed.Load())
 	}
 }
+
+func TestCanceledSearchLeavesHealthyClientAvailable(t *testing.T) {
+	arrived := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("q") == "first" {
+			close(arrived)
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write([]byte(`{"found":1,"hits":[{"document":{"internal_id":9}}]}`))
+	}))
+	defer server.Close()
+	client := New(config.TypesenseConfig{Enabled: true, URL: server.URL, Timeout: 5 * time.Second})
+	client.SetReady(true)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	first := make(chan error, 1)
+	req := SearchRequest{Collection: "projects", Query: "first", QueryBy: []string{"names"}}
+	go func() {
+		_, err := client.Search(ctx, req)
+		first <- err
+	}()
+	select {
+	case <-arrived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request did not reach provider")
+	}
+	cancel()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Errorf("caller cancellation classification: %v", err)
+	}
+	if !client.Ready() {
+		t.Error("canceling a single search marked the shared provider unavailable")
+	}
+	req.Query = "second"
+	result, err := client.Search(t.Context(), req)
+	if err != nil || result.Found != 1 {
+		t.Errorf("subsequent independent search: found=%d err=%v", result.Found, err)
+	}
+}

@@ -317,6 +317,10 @@ func (client *Client) requestWithContentType(ctx context.Context, method, path s
 	}
 	response, err := client.http.Do(request)
 	if err != nil {
+		// Canceling one request does not change the health of the shared provider.
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		client.SetReady(false)
 		return fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
