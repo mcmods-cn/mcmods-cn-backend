@@ -12,22 +12,27 @@ import (
 	"mcmods-cn-backend/internal/config"
 )
 
-func TestRatingEligibilityChangesDuringVoteIntegration(t *testing.T) {
+func newPopularityConcurrencyPool(t *testing.T) (context.Context, *pgxpool.Pool) {
+	t.Helper()
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("requires PostgreSQL for two transactions and a lock observer")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	fixture, err := NewIsolatedTestSchema(ctx, config.Load().DB.ConnString(), 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
+	t.Cleanup(func() {
 		if err := fixture.Close(context.Background()); err != nil {
 			t.Error(err)
 		}
-	}()
-	pool := fixture.Pool
+	})
+	return ctx, fixture.Pool
+}
+
+func TestRatingEligibilityChangesDuringVoteIntegration(t *testing.T) {
+	ctx, pool := newPopularityConcurrencyPool(t)
 	if _, err := pool.Exec(ctx, `insert into users(id,username,email,password_hash,security_score)
 		values (71,'rating_concurrency','rating-concurrency@example.invalid','fixture',80);
 		insert into mods(id,project_code,slug,primary_name,review_status) values(72,'ratingcon','concurrent-rating','Concurrent rating','approved');
@@ -36,7 +41,7 @@ func TestRatingEligibilityChangesDuringVoteIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Run("eligibility update waits for an uncommitted edit", func(t *testing.T) {
-		runRatingLockOrder(t, ctx, pool,
+		runPopularityLockOrder(t, ctx, pool,
 			`select 1 from content_ratings where id=73 for update`,
 			`update users set security_score=30 where id=71`,
 			`update content_ratings set overall_score=5 where id=73`)
@@ -45,7 +50,7 @@ func TestRatingEligibilityChangesDuringVoteIntegration(t *testing.T) {
 		if _, err := pool.Exec(ctx, `delete from content_ratings where id=73`); err != nil {
 			t.Fatal(err)
 		}
-		runRatingLockOrder(t, ctx, pool,
+		runPopularityLockOrder(t, ctx, pool,
 			`update users set security_score=80 where id=71`,
 			`insert into content_ratings(id,object_route_id,author_id,overall_score)
 			 select 73,id,71,3 from public_routes where entity_type='mod' and internal_id=72`,
@@ -60,7 +65,7 @@ func TestRatingEligibilityChangesDuringVoteIntegration(t *testing.T) {
 	}
 }
 
-func runRatingLockOrder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, hold, wait, finish string) {
+func runPopularityLockOrder(t *testing.T, ctx context.Context, pool *pgxpool.Pool, hold, wait, finish string) {
 	t.Helper()
 	holder, err := pool.Begin(ctx)
 	if err != nil {

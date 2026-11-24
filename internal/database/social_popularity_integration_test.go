@@ -28,6 +28,8 @@ func TestSocialPopularityFollowsEligibilityAndReversesActualInteractions(t *test
 	assert(0, 0, 0)
 	exec(`update users set security_score=80 where id=912341`)
 	assert(2, 1, 1)
+	exec(`select pg_temp.rebuild_content_popularity_lifetime_facts(id) from public_routes where entity_type='mod' and internal_id=912341`)
+	assert(2, 1, 1)
 	exec(`update comments set status='hidden' where id=912344; delete from favorite_collections where id=912342`)
 	assert(1, 1, 1)
 	exec(`update users set status='banned' where id=912341`)
@@ -41,4 +43,40 @@ func TestSocialPopularityFollowsEligibilityAndReversesActualInteractions(t *test
 		from content_popularity_events_daily where object_route_id=(select id from public_routes where entity_type='mod' and internal_id=912341)`).Scan(&balanced); err != nil || !balanced {
 		t.Fatalf("comment/favorite trend did not reverse the original weights: balanced=%v err=%v", balanced, err)
 	}
+}
+
+func TestSocialEligibilityChangesDuringInteractionIntegration(t *testing.T) {
+	ctx, pool := newPopularityConcurrencyPool(t)
+	if _, err := pool.Exec(ctx, `insert into users(id,username,email,password_hash,security_score)
+		values(61,'social_concurrency','social-concurrency@example.invalid','fixture',30);
+		insert into mods(id,project_code,slug,primary_name,review_status) values(62,'socialcon','concurrent-social','Social','approved');
+		insert into favorite_collections(id,user_id,name) values(63,61,'Collection')`); err != nil {
+		t.Fatal(err)
+	}
+
+	assert := func(counted bool, comments, favorites int) {
+		t.Helper()
+		var applied bool
+		var commentCount, commenters, favoriteCount int
+		err := pool.QueryRow(ctx, `select receipt.counted, lifetime.comment_count,lifetime.effective_commenter_count,lifetime.favorite_count
+			from content_social_contributions receipt join content_popularity_lifetime_facts lifetime using(object_route_id)
+			where receipt.actor_id=61`).Scan(&applied, &commentCount, &commenters, &favoriteCount)
+		if err != nil || applied != counted || commentCount != comments || commenters != comments || favoriteCount != favorites {
+			t.Fatalf("applied=%v comments/commenters/favorites=%d/%d/%d, want %v %d/%d/%d: %v", applied, commentCount, commenters, favoriteCount, counted, comments, comments, favorites, err)
+		}
+	}
+	t.Run("first membership waits for current account", func(t *testing.T) {
+		runPopularityLockOrder(t, ctx, pool, `update users set security_score=80 where id=61`,
+			`insert into favorite_collection_items(collection_id,entity_type,entity_id) values(63,'mod',62)`, `select 1`)
+		assert(true, 0, 1)
+	})
+	t.Run("account change waits for published comment", func(t *testing.T) {
+		runPopularityLockOrder(t, ctx, pool, `insert into comments(target_type,target_id,author_id,body) values('mod',62,61,'One')`,
+			`update users set security_score=30 where id=61`, `select 1`)
+		assert(false, 0, 0)
+	})
+	if _, err := pool.Exec(ctx, `update users set security_score=80 where id=61`); err != nil {
+		t.Fatal(err)
+	}
+	assert(true, 1, 1)
 }
