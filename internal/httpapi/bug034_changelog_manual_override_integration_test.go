@@ -1,12 +1,10 @@
 package httpapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -17,7 +15,6 @@ import (
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/querycache"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *testing.T) {
@@ -52,11 +49,8 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 		on conflict(key) do update set value=excluded.value`, minecraftVersionsSettingKey, catalog); err != nil {
 		t.Fatal(err)
 	}
-	var editorID int64
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-		values('bug034-editor','bug034-editor@example.invalid','bug034',true) returning id`).Scan(&editorID); err != nil {
-		t.Fatal(err)
-	}
+	editorID, _, editorToken := createTEST044User(t, ctx, pool, cfg, "bug034-editor", "UTC")
+	grantTEST044Permissions(t, ctx, pool, editorID, "project.edit.b034m0001")
 	reviewerID, _, reviewerToken := createTEST044User(t, ctx, pool, cfg, "bug034-reviewer", "UTC")
 	grantTEST044Permissions(t, ctx, pool, reviewerID, "content.review")
 	var projectInternalID, routeID int64
@@ -92,7 +86,7 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 			t.Fatalf("invalid override error=%v, want named 23514 provenance check", invalidErr)
 		}
 	}
-	rejectedRevisionID := invokeBUG034ManualChangelogEdit(t, ctx, server, editorID, changelogPublicID, "Manual candidate to reject")
+	rejectedRevisionID := invokeBUG034ManualChangelogEdit(t, ctx, server, editorToken, changelogPublicID, "Manual candidate to reject")
 	assertBUG034ManualOverride(t, ctx, pool, changelogPublicID, false)
 	invokeBUG034ChangelogReview(t, ctx, server, reviewerToken, rejectedRevisionID, "rejected")
 	assertBUG034ManualOverride(t, ctx, pool, changelogPublicID, false)
@@ -105,7 +99,7 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 	}
 	assertBUG034ChangelogBody(t, ctx, pool, changelogPublicID, afterRejection.Body)
 
-	approvedRevisionPublicID := invokeBUG034ManualChangelogEdit(t, ctx, server, editorID, changelogPublicID, "Approved manual body")
+	approvedRevisionPublicID := invokeBUG034ManualChangelogEdit(t, ctx, server, editorToken, changelogPublicID, "Approved manual body")
 	assertBUG034ManualOverride(t, ctx, pool, changelogPublicID, false)
 	invokeBUG034ChangelogReview(t, ctx, server, reviewerToken, approvedRevisionPublicID, "approved")
 	var approvedRevisionID int64
@@ -133,7 +127,7 @@ func TestBUG034ManualChangelogOverrideStartsOnlyAfterApprovalIntegration(t *test
 	assertBUG034ChangelogBody(t, ctx, pool, changelogPublicID, "Approved manual body")
 }
 
-func invokeBUG034ManualChangelogEdit(t *testing.T, ctx context.Context, server *Server, actorID int64, changelogPublicID, body string) string {
+func invokeBUG034ManualChangelogEdit(t *testing.T, ctx context.Context, server *Server, editorToken, changelogPublicID, body string) string {
 	t.Helper()
 	var base string
 	if err := server.db.QueryRow(ctx, `select revision.public_id from project_changelogs entry join content_revisions revision on revision.id=entry.published_revision_id where entry.public_id=$1`, changelogPublicID).Scan(&base); err != nil {
@@ -144,12 +138,8 @@ func invokeBUG034ManualChangelogEdit(t *testing.T, ctx context.Context, server *
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPut, "/api/v1/changelogs/"+changelogPublicID, bytes.NewReader(payload))
-	request.SetPathValue("id", changelogPublicID)
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: actorID,
-		PermissionRules: []security.PermissionRule{{Code: "project.edit.b034m0001", Allow: true, Priority: 100}}}))
-	response := httptest.NewRecorder()
-	server.projectChangelogItem(response, request)
+	response := performTEST044Request(ctx, server.requireAuth(server.projectChangelogItem), editorToken,
+		http.MethodPut, "/api/v1/changelogs/"+changelogPublicID, string(payload), map[string]string{"id": changelogPublicID})
 	if response.Code != http.StatusOK {
 		t.Fatalf("manual changelog edit status=%d body=%s", response.Code, response.Body.String())
 	}
