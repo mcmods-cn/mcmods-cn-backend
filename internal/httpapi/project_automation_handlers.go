@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 var autoUpdateProjectTypes = stringSet("mod", "plugin", "map", "shader_pack", "resource_pack", "datapack")
@@ -35,9 +38,30 @@ func (s *Server) projectAutomationTarget(r *http.Request) (projectAutomationTarg
 	return target, err
 }
 
-func projectAutomationAllowed(r *http.Request, permission, projectID string) bool {
-	claims := currentClaims(r)
+func projectAutomationAllowed(claims security.Claims, permission, projectID string) bool {
 	return claimsAllow(claims, permission) || claimsAllow(claims, "project.edit."+projectID) || claimsAllow(claims, "admin.*")
+}
+
+type projectAutomationSetting struct {
+	Kind                  string `json:"kind"`
+	SourceType            string `json:"sourceType"`
+	Interval              string `json:"interval"`
+	Enabled               bool   `json:"enabled"`
+	LicenseOverride       bool   `json:"licenseOverride"`
+	LicenseOverrideReason string `json:"licenseOverrideReason"`
+	LicenseOverrideSource string `json:"licenseOverrideSource"`
+}
+
+func (next projectAutomationSetting) changesLicenseDecision(old projectAutomationSetting) bool {
+	return old.LicenseOverride != next.LicenseOverride || old.LicenseOverrideReason != next.LicenseOverrideReason ||
+		old.LicenseOverrideSource != next.LicenseOverrideSource || next.LicenseOverride && old.SourceType != next.SourceType
+}
+
+// Both control-plane writers serialize on the route, including before any
+// settings have been created. Workers retain their run/setting/source fences.
+func lockProjectAutomationConfiguration(ctx context.Context, tx pgx.Tx, routeID int64) error {
+	var id int64
+	return tx.QueryRow(ctx, `select id from public_routes where id=$1 for no key update`, routeID).Scan(&id)
 }
 
 func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
@@ -50,25 +74,17 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "读取项目失败")
 		return
 	}
-	if !projectAutomationAllowed(r, "project.auto_update.view", target.PublicID) {
+	if !projectAutomationAllowed(currentClaims(r), "project.auto_update.view", target.PublicID) {
 		writeError(w, 403, "无权查看项目自动更新")
 		return
 	}
 	if r.Method == http.MethodPut {
-		if !projectAutomationAllowed(r, "project.auto_update.configure", target.PublicID) {
+		if !projectAutomationAllowed(currentClaims(r), "project.auto_update.configure", target.PublicID) {
 			writeError(w, 403, "无权配置项目自动更新")
 			return
 		}
 		var request struct {
-			Items []struct {
-				Kind                  string `json:"kind"`
-				SourceType            string `json:"sourceType"`
-				Interval              string `json:"interval"`
-				Enabled               bool   `json:"enabled"`
-				LicenseOverride       bool   `json:"licenseOverride"`
-				LicenseOverrideReason string `json:"licenseOverrideReason"`
-				LicenseOverrideSource string `json:"licenseOverrideSource"`
-			} `json:"items"`
+			Items []projectAutomationSetting `json:"items"`
 		}
 		if decodeJSON(r, &request) != nil || len(request.Items) != 3 {
 			writeError(w, 400, "自动更新配置不完整")
@@ -80,21 +96,60 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback(r.Context())
+		if err = lockProjectAutomationConfiguration(r.Context(), tx, target.RouteID); err != nil {
+			writeError(w, http.StatusInternalServerError, "读取自动更新配置失败")
+			return
+		}
+		rows, err := tx.Query(r.Context(), `select update_kind,coalesce(source_type,''),interval_code,enabled,license_override,license_override_reason,license_override_source
+			from project_auto_update_settings where project_route_id=$1 order by update_kind for update`, target.RouteID)
+		if err != nil {
+			writeError(w, 500, "读取自动更新配置失败")
+			return
+		}
+		stored, err := pgx.CollectRows(rows, pgx.RowToStructByPos[projectAutomationSetting])
+		if err != nil {
+			writeError(w, 500, "读取自动更新配置失败")
+			return
+		}
+		previous := make(map[string]projectAutomationSetting, len(stored))
+		for _, item := range stored {
+			previous[item.Kind] = item
+		}
+		actor, ok := requireCurrentWriteActor(w, r, tx)
+		if !ok {
+			return
+		}
+		if !projectAutomationAllowed(actor, "project.auto_update.view", target.PublicID) || !projectAutomationAllowed(actor, "project.auto_update.configure", target.PublicID) {
+			writeError(w, http.StatusForbidden, "无权配置项目自动更新")
+			return
+		}
 		seen := map[string]bool{}
 		for _, item := range request.Items {
 			item.Kind = strings.ToLower(strings.TrimSpace(item.Kind))
 			item.SourceType = strings.ToLower(strings.TrimSpace(item.SourceType))
 			item.Interval = strings.ToLower(strings.TrimSpace(item.Interval))
+			item.LicenseOverrideReason = strings.TrimSpace(item.LicenseOverrideReason)
+			item.LicenseOverrideSource = strings.TrimSpace(item.LicenseOverrideSource)
 			if !autoUpdateKinds[item.Kind] || seen[item.Kind] || !autoUpdateIntervals[item.Interval] ||
 				!stringSet("", "modrinth", "curseforge", "github")[item.SourceType] || item.Kind == "minecraft_versions" && item.SourceType == "github" ||
-				item.LicenseOverride && (!claimsAllow(currentClaims(r), "project.auto_update.redistribution_override") || strings.TrimSpace(item.LicenseOverrideReason) == "" || strings.TrimSpace(item.LicenseOverrideSource) == "") {
+				item.LicenseOverride && (item.SourceType == "" || item.LicenseOverrideReason == "" || item.LicenseOverrideSource == "") {
 				writeError(w, 400, "自动更新配置包含无效来源、周期或许可覆盖")
 				return
 			}
 			if item.Interval == "never" {
 				item.Enabled = false
 			}
-			if item.Enabled {
+			old, exists := previous[item.Kind]
+			changedLicense := item.changesLicenseDecision(old)
+			if changedLicense && !claimsAllow(actor, "project.auto_update.redistribution_override") {
+				writeError(w, http.StatusForbidden, "无权更改再分发许可例外")
+				return
+			}
+			seen[item.Kind] = true
+			if exists && old == item {
+				continue
+			}
+			if item.Enabled || item.LicenseOverride {
 				var bound bool
 				if scanErr := tx.QueryRow(r.Context(), `select exists(select 1 from project_external_sources where project_route_id=$1 and source_type=$2)`, target.RouteID, item.SourceType).Scan(&bound); scanErr != nil {
 					writeError(w, http.StatusInternalServerError, "读取项目来源失败")
@@ -104,7 +159,7 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 					writeError(w, 400, "启用自动更新前必须绑定并验证对应来源")
 					return
 				}
-				if item.Kind == "site_downloads" && !item.LicenseOverride {
+				if item.Enabled && item.Kind == "site_downloads" && !item.LicenseOverride {
 					_, allowed, err := projectRedistributionPolicy(r.Context(), tx, target.ProjectType, target.InternalID)
 					if err != nil {
 						writeError(w, http.StatusInternalServerError, "读取项目许可证失败")
@@ -116,17 +171,25 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			seen[item.Kind] = true
 			nextRun := autoUpdateNextRun(item.Interval, time.Now().UTC())
 			_, err = tx.Exec(r.Context(), `insert into project_auto_update_settings(project_route_id,update_kind,source_type,interval_code,enabled,next_run_at,configured_by,license_override,license_override_reason,license_override_source)
 				values($1,$2,nullif($3,''),$4,$5,$6,$7,$8,$9,$10) on conflict(project_route_id,update_kind) do update set source_type=excluded.source_type,
 				interval_code=excluded.interval_code,enabled=excluded.enabled,next_run_at=excluded.next_run_at,configured_by=excluded.configured_by,
 				license_override=excluded.license_override,license_override_reason=excluded.license_override_reason,license_override_source=excluded.license_override_source,updated_at=now()`,
-				target.RouteID, item.Kind, item.SourceType, item.Interval, item.Enabled, nextRun, currentClaims(r).Subject, item.LicenseOverride,
-				strings.TrimSpace(item.LicenseOverrideReason), strings.TrimSpace(item.LicenseOverrideSource))
+				target.RouteID, item.Kind, item.SourceType, item.Interval, item.Enabled, nextRun, actor.Subject, item.LicenseOverride, item.LicenseOverrideReason, item.LicenseOverrideSource)
 			if err != nil {
 				writeError(w, 500, "保存自动更新配置失败")
 				return
+			}
+			if changedLicense {
+				if err := appendAuditEventTx(r.Context(), tx, auditEventParams{
+					EntityType: target.ProjectType, EntityID: target.InternalID, AggregateType: "project_automation_license", AggregateKey: target.PublicID,
+					ActorID: actor.Subject, ActorSnapshot: actor.Username, Action: "project.auto_update.redistribution_override",
+					Metadata: map[string]any{"kind": item.Kind, "sourceType": item.SourceType, "enabled": item.LicenseOverride},
+				}); err != nil {
+					writeError(w, 500, "记录再分发许可变更失败")
+					return
+				}
 			}
 		}
 		if err = tx.Commit(r.Context()); err != nil {
@@ -259,7 +322,7 @@ func (s *Server) bindProjectAutomationSource(w http.ResponseWriter, r *http.Requ
 		writeError(w, 404, "项目不存在")
 		return
 	}
-	if !projectAutomationAllowed(r, "project.external_source.bind", target.PublicID) {
+	if !projectAutomationAllowed(currentClaims(r), "project.external_source.bind", target.PublicID) {
 		writeError(w, 403, "无权绑定项目来源")
 		return
 	}
@@ -274,11 +337,50 @@ func (s *Server) bindProjectAutomationSource(w http.ResponseWriter, r *http.Requ
 		writeError(w, 400, verifyErr.Error())
 		return
 	}
-	_, err = s.db.Exec(r.Context(), `insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at,verified_by)
-		values($1,$2,$3,$4,now(),$5) on conflict(project_route_id,source_type) do update set external_project_id=excluded.external_project_id,
-		external_project_url=excluded.external_project_url,verified_at=now(),verified_by=excluded.verified_by`, target.RouteID, request.SourceType, reference, canonicalURL, currentClaims(r).Subject)
+	tx, err := s.db.Begin(r.Context())
 	if err != nil {
-		writeError(w, 409, "该外部项目已绑定到其他站内项目")
+		writeError(w, 500, "保存来源失败")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if err = lockProjectAutomationConfiguration(r.Context(), tx, target.RouteID); err != nil {
+		writeError(w, 500, "读取来源配置失败")
+		return
+	}
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if !projectAutomationAllowed(actor, "project.external_source.bind", target.PublicID) {
+		writeError(w, 403, "无权绑定项目来源")
+		return
+	}
+	var wouldReplaceApprovedSource bool
+	if err = tx.QueryRow(r.Context(), `select exists(select 1 from project_external_sources source
+		join project_auto_update_settings setting on setting.project_route_id=source.project_route_id and setting.source_type=source.source_type
+		where source.project_route_id=$1 and source.source_type=$2 and source.external_project_id<>$3 and setting.license_override)`,
+		target.RouteID, request.SourceType, reference).Scan(&wouldReplaceApprovedSource); err != nil {
+		writeError(w, 500, "读取来源许可失败")
+		return
+	}
+	if wouldReplaceApprovedSource {
+		writeError(w, 409, "请先撤销现有来源的再分发许可例外，再绑定新项目")
+		return
+	}
+	_, err = tx.Exec(r.Context(), `insert into project_external_sources(project_route_id,source_type,external_project_id,external_project_url,verified_at,verified_by)
+		values($1,$2,$3,$4,now(),$5) on conflict(project_route_id,source_type) do update set external_project_id=excluded.external_project_id,
+		external_project_url=excluded.external_project_url,verified_at=now(),verified_by=excluded.verified_by`, target.RouteID, request.SourceType, reference, canonicalURL, actor.Subject)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeError(w, 409, "该外部项目已绑定到其他站内项目")
+		} else {
+			writeError(w, 500, "保存来源失败")
+		}
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, 500, "保存来源失败")
 		return
 	}
 	s.writeAppLog(r.Context(), "admin_operation", "info", "project.external_source.bind", target.PublicID, currentClaims(r).Subject, r, 200, 0, map[string]string{"source": request.SourceType})
@@ -346,7 +448,7 @@ func (s *Server) runProjectAutomation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "项目不存在")
 		return
 	}
-	if !projectAutomationAllowed(r, "project.auto_update.run", target.PublicID) {
+	if !projectAutomationAllowed(currentClaims(r), "project.auto_update.run", target.PublicID) {
 		writeError(w, 403, "无权运行项目自动更新")
 		return
 	}
@@ -374,7 +476,7 @@ func (s *Server) projectAutomationRuns(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "项目不存在")
 		return
 	}
-	if !projectAutomationAllowed(r, "project.auto_update.view_logs", target.PublicID) {
+	if !projectAutomationAllowed(currentClaims(r), "project.auto_update.view_logs", target.PublicID) {
 		writeError(w, 403, "无权查看自动更新记录")
 		return
 	}

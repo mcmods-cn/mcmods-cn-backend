@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,15 +43,11 @@ func TestProjectAutomationGETIsReadOnlyAndEnableRequiresConfigureIntegration(t *
 		}
 	}()
 
-	userIDs := make([]int64, 2)
-	stamp := time.Now().UnixNano()
-	for index := range userIDs {
-		if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-			values($1,$2,'sec015',true) returning id`, fmt.Sprintf("sec015-%d-%d", stamp, index),
-			fmt.Sprintf("sec015-%d-%d@example.invalid", stamp, index)).Scan(&userIDs[index]); err != nil {
-			t.Fatal(err)
-		}
-	}
+	cfg := config.Load()
+	editorID, _, editorToken := createTEST044User(t, ctx, pool, cfg, "sec015-editor", "UTC")
+	viewerID, _, _ := createTEST044User(t, ctx, pool, cfg, "sec015-viewer", "UTC")
+	userIDs := []int64{editorID, viewerID}
+	grantTEST044Permissions(t, ctx, pool, editorID, "project.auto_update.view", "project.auto_update.configure")
 	var projectID, routeID int64
 	if err = pool.QueryRow(ctx, `insert into mods(project_code,slug,primary_name,review_status,submitted_by)
 		values('s015m0001','sec015-mod','SEC015 Mod','approved',$1) returning id`, userIDs[0]).Scan(&projectID); err != nil {
@@ -112,9 +107,12 @@ func TestProjectAutomationGETIsReadOnlyAndEnableRequiresConfigureIntegration(t *
 	if viewOnlyPUT.Code != http.StatusForbidden {
 		t.Fatalf("view-only PUT status=%d body=%s", viewOnlyPUT.Code, viewOnlyPUT.Body.String())
 	}
-	configureClaims := security.Claims{Subject: userIDs[0], PermissionRules: []security.PermissionRule{
-		{Code: "project.auto_update.view", Allow: true}, {Code: "project.auto_update.configure", Allow: true},
-	}}
+	configureClaims, err := security.ParseToken(cfg.JWTSecret, editorToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configureClaims.Subject = editorID
+	configureClaims.PermissionRules = []security.PermissionRule{{Code: "project.auto_update.view", Allow: true}, {Code: "project.auto_update.configure", Allow: true}}
 	configured := invokeSEC015ProjectAutomation(t, ctx, server, http.MethodPut, body, configureClaims)
 	if configured.Code != http.StatusOK {
 		t.Fatalf("configured PUT status=%d body=%s", configured.Code, configured.Body.String())
