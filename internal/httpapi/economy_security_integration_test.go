@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -193,5 +194,49 @@ func TestIndependentEconomyRewardsSharePolicyAndExcludeConfigurationWritesIntegr
 	}
 	if err = f.db.QueryRow(f.ctx, `select pg_try_advisory_xact_lock_shared(hashtext('mcmods-cn-economy-configuration'))`).Scan(&shared); err != nil || shared {
 		t.Fatalf("configuration writer admitted a concurrent reward: shared=%v err=%v", shared, err)
+	}
+}
+
+func TestActiveRewardTasksKeepTheirCurrenciesAvailableIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "economy.write", "task.write")
+	const currencies = "/api/v1/admin/economy/currencies"
+	const tasks = "/api/v1/admin/tasks"
+	create := func(path string, payload map[string]any) string {
+		t.Helper()
+		raw := f.require(t, f.editor, http.MethodPost, path, payload, http.StatusCreated)
+		var result struct {
+			Data struct {
+				PublicID string `json:"publicId"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &result); err != nil || !validCatalogPublicID(result.Data.PublicID) {
+			t.Fatalf("invalid receipt: %s %v", raw, err)
+		}
+		return path + "/" + result.Data.PublicID
+	}
+	currency := map[string]any{"code": "task_coin", "name": "Reward currency", "translations": map[string]any{}}
+	currencyPath := create(currencies, currency)
+	task := map[string]any{"code": "collect_coins", "name": "Collect coins", "refreshPeriod": "daily", "translations": map[string]any{},
+		"condition": map[string]any{"action": "create", "objectType": "user", "metric": "count", "target": 1},
+		"rewards":   map[string]any{"currencies": map[string]any{"task_coin": 1}}}
+	taskPath := create(tasks, task)
+	currency["status"] = "disabled"
+	f.require(t, f.editor, http.MethodPut, currencyPath, currency, http.StatusConflict)
+	currency["status"] = "active"
+	currency["code"] = "changed_coin"
+	f.require(t, f.editor, http.MethodPut, currencyPath, currency, http.StatusConflict)
+	task["status"] = "disabled"
+	f.require(t, f.editor, http.MethodPut, taskPath, task, http.StatusOK)
+	currency["code"] = "task_coin"
+	currency["status"] = "disabled"
+	f.require(t, f.editor, http.MethodPut, currencyPath, currency, http.StatusOK)
+	task["name"] = "Retired reward"
+	f.require(t, f.editor, http.MethodPut, taskPath, task, http.StatusOK)
+	task["status"] = "active"
+	f.require(t, f.editor, http.MethodPut, taskPath, task, http.StatusBadRequest)
+	var enabled bool
+	if err := f.db.QueryRow(f.ctx, `select status='active' from task_definitions where public_id=$1`, strings.TrimPrefix(taskPath, tasks+"/")).Scan(&enabled); err != nil || enabled {
+		t.Fatalf("rejected enable changed task: enabled=%v err=%v", enabled, err)
 	}
 }
