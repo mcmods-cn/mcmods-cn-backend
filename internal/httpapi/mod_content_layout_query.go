@@ -154,18 +154,32 @@ func (s *Server) writeModContentLayoutQuery(
 		select id,public_id,array[ordinal::bigint,id] sort_path from mod_content_sections where id=$1 and status='active'
 		union all select child.id,child.public_id,parent.sort_path||array[child.ordinal::bigint,child.id]
 		from mod_content_sections child join subtree parent on child.parent_id=parent.id where child.status='active'
+	), page as materialized (
+		select subtree.public_id section_public_id,subtree.sort_path,candidate.*
+		from subtree cross join lateral (
+			select entity.public_id,entry.resource_id,entry.ordinal,entry.similar_group_id
+			from mod_content_section_resources entry
+			join catalog_entities entity on entity.id=entry.resource_id and entity.status='active' and entity.archived_at is null
+			where entry.section_id=subtree.id and entry.version_id=$2
+			  and ($5='' or entry.search_document@@websearch_to_tsquery('simple',$5))
+			  and (entry.ordinal,entry.resource_id) > (
+				case when $6 and subtree.sort_path=$7::bigint[] then $8::integer else -1 end,
+				case when $6 and subtree.sort_path=$7::bigint[] then $9::bigint else 0 end)
+			order by entry.ordinal,entry.resource_id limit $10
+		) candidate
+		where not $6 or subtree.sort_path >= $7::bigint[]
+		order by subtree.sort_path,candidate.ordinal,candidate.resource_id limit $10
 	)
-	select entity.public_id,subtree.public_id,placement.ordinal,placement.similar_group_id,
+	select placement.public_id,placement.section_public_id,placement.ordinal,placement.similar_group_id,
 		coalesce(version_name.name,imported_name.name,left(resource.canonical_id,256)),
 		resource.kind_code,coalesce(parent_entity.public_id,''),
-		coalesce(nullif(effective.data->>'layoutGroupId',''),'advancement:'||entity.public_id),
+		coalesce(nullif(effective.data->>'layoutGroupId',''),'advancement:'||placement.public_id),
 		case when jsonb_typeof(effective.data#>'{display,x}')='number' then (effective.data#>>'{display,x}')::double precision
 		 else (placement.ordinal%5)::double precision end,
 		case when jsonb_typeof(effective.data#>'{display,y}')='number' then (effective.data#>>'{display,y}')::double precision
 		 else floor(placement.ordinal/5.0)::double precision end,
-		left(coalesce(effective.data#>>'{display,frame}',''),32),subtree.sort_path,placement.resource_id
-	from subtree join mod_content_section_resources placement on placement.section_id=subtree.id and placement.version_id=$2
-	join catalog_entities entity on entity.id=placement.resource_id and entity.status='active' and entity.archived_at is null
+		left(coalesce(effective.data#>>'{display,frame}',''),32),placement.sort_path,placement.resource_id
+	from page placement
 	join game_resources resource on resource.entity_id=placement.resource_id
 	left join mod_resource_version_details detail on detail.resource_id=placement.resource_id and detail.version_id=$2 and detail.status='active'
 	left join lateral (select snapshot.names,snapshot.data
@@ -191,10 +205,7 @@ func (s *Server) writeModContentLayoutQuery(
 	 where resource.kind_code='minecraft.advancement' and parent_resource.kind_code='minecraft.advancement'
 	  and lower(parent_resource.canonical_id)=lower(coalesce(effective.data->>'parentId',effective.data->>'parent',''))
 	  and parent_entity.status='active' and parent_entity.archived_at is null limit 1) parent_entity on true
-	where ($5='' or placement.search_document@@websearch_to_tsquery('simple',$5))
-	 and (not $6 or subtree.sort_path>$7::bigint[] or
-	 (subtree.sort_path=$7::bigint[] and (placement.ordinal,placement.resource_id)>($8::integer,$9::bigint)))
-	order by subtree.sort_path,placement.ordinal,placement.resource_id limit $10`,
+	order by placement.sort_path,placement.ordinal,placement.resource_id`,
 		sectionID, versionID, localeCandidates, identity.ID, query, cursorActive, cursorPath, cursorOrdinal, cursorResourceID, limit+1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read layout resources")
