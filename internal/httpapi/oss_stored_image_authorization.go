@@ -75,6 +75,11 @@ const storedRasterPublicBindingSQL = `		exists(select 1 from users where status<
 // Lists collect their URLs after closing the original rows. Authorization is
 // loaded once for the whole bounded page; presigning itself needs no network.
 func (s *Server) resolveStoredOSSImageURLsWithConfig(ctx context.Context, cfg ossConfigPayload, urls []string) ([]string, error) {
+	claims, _ := ctx.Value(claimsContextKey).(security.Claims)
+	return s.resolveStoredOSSImageURLsForViewer(ctx, cfg, urls, claims.Subject)
+}
+
+func (s *Server) resolveStoredOSSImageURLsForViewer(ctx context.Context, cfg ossConfigPayload, urls []string, viewerID int64) ([]string, error) {
 	resolved := make([]string, len(urls))
 	keys := make([]string, 0, len(urls))
 	byIndex := make(map[int]string)
@@ -95,7 +100,6 @@ func (s *Server) resolveStoredOSSImageURLsWithConfig(ctx context.Context, cfg os
 	if len(keys) == 0 {
 		return resolved, nil
 	}
-	claims, _ := ctx.Value(claimsContextKey).(security.Claims)
 	// Substitutions apply only to our static SQL, never to a URL or user input.
 	publicBinding := strings.NewReplacer(
 		"$1", "file.id", "$2", "coalesce(file.uploader_id,0)",
@@ -105,7 +109,7 @@ func (s *Server) resolveStoredOSSImageURLsWithConfig(ctx context.Context, cfg os
 		where file.bucket=$1 and file.object_key=any($2::text[]) and file.status='active'
 		  and file.scan_status in ('clean','trusted_generated') and lower(btrim(split_part(file.content_type,';',1)))=any($6::text[])
 		  and ((file.uploader_id=$5 and $5>0) or (`+publicBinding+`))`,
-		cfg.Bucket, keys, cfg.PublicEndpoint, cfg.Endpoint, claims.Subject, safeRasterContentTypes)
+		cfg.Bucket, keys, cfg.PublicEndpoint, cfg.Endpoint, viewerID, safeRasterContentTypes)
 	if err != nil {
 		return nil, err
 	}

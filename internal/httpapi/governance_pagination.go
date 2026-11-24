@@ -355,6 +355,34 @@ func collectAdminReportRows(rows checkedRows, capacity int) ([]adminReportListIt
 	return items, nil
 }
 
+// The moderation record keeps the original URL. Both list audiences display a
+// historical avatar only while it is still available to a public viewer.
+func (s *Server) resolveBlackroomAvatars(ctx context.Context, fields []*string) error {
+	var urls []string
+	var targets []*string
+	for _, field := range fields {
+		if *field != "" {
+			urls = append(urls, *field)
+			targets = append(targets, field)
+		}
+	}
+	if len(urls) == 0 {
+		return nil
+	}
+	cfg, err := s.ossConfigFromSettingsStrictWithQueryer(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	resolved, err := s.resolveStoredOSSImageURLsForViewer(ctx, cfg, urls, 0)
+	if err != nil {
+		return err
+	}
+	for i, target := range targets {
+		*target = resolved[i]
+	}
+	return nil
+}
+
 func (s *Server) queryPublicBlackroomPage(ctx context.Context, request governancePageRequest, now time.Time) (blackroomPage, error) {
 	createdAt, id := governancePagePosition(request)
 	rows, err := s.db.Query(ctx, blackroomPageSQL, createdAt, id, request.Limit+1)
@@ -373,6 +401,13 @@ func (s *Server) queryPublicBlackroomPage(ctx context.Context, request governanc
 	if hasMore && len(items) > 0 {
 		last := items[len(items)-1]
 		nextCursor = governanceNextCursor(request, last.CreatedAt, last.InternalID)
+	}
+	avatarFields := make([]*string, len(items))
+	for i := range items {
+		avatarFields[i] = &items[i].AvatarURL
+	}
+	if err := s.resolveBlackroomAvatars(ctx, avatarFields); err != nil {
+		return blackroomPage{}, err
 	}
 	return blackroomPage{Items: items, Limit: request.Limit, HasMore: hasMore, NextCursor: nextCursor}, nil
 }
@@ -415,6 +450,13 @@ func (s *Server) queryAdminBlackroomPage(ctx context.Context, request governance
 	if hasMore && len(items) > 0 {
 		last := items[len(items)-1]
 		nextCursor = governanceNextCursor(request, last.CreatedAt, last.InternalID)
+	}
+	avatarFields := make([]*string, len(items))
+	for i := range items {
+		avatarFields[i] = &items[i].AvatarURL
+	}
+	if err := s.resolveBlackroomAvatars(ctx, avatarFields); err != nil {
+		return adminBlackroomPage{}, err
 	}
 	return adminBlackroomPage{Items: items, Limit: request.Limit, HasMore: hasMore, NextCursor: nextCursor}, nil
 }

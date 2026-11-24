@@ -1266,6 +1266,7 @@ func (s *Server) adminBans(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取小黑屋失败")
 		return
 	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, page)
 }
 func (s *Server) publicBlackroom(w http.ResponseWriter, r *http.Request) {
@@ -1280,6 +1281,7 @@ func (s *Server) publicBlackroom(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取小黑屋失败")
 		return
 	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, http.StatusOK, page)
 }
 func (s *Server) blackroomDetail(w http.ResponseWriter, r *http.Request) {
@@ -1295,6 +1297,12 @@ func (s *Server) blackroomDetail(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "读取封禁记录失败")
 		return
 	}
+	if err := s.resolveBlackroomAvatars(r.Context(), []*string{&avatar}); err != nil {
+		logGovernanceReadFailure("blackroom", "detail", err)
+		writeError(w, http.StatusInternalServerError, "读取封禁记录失败")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	writeJSON(w, 200, map[string]any{"id": r.PathValue("id"), "userId": uid, "username": name, "avatarUrl": avatar, "reasonCode": reason, "customReason": custom, "status": publicBanStatus(status, ends, revoked, time.Now()), "publicRecordMarkdown": record, "startsAt": starts, "endsAt": ends, "revokedAt": revoked})
 }
 
