@@ -35,6 +35,8 @@ const (
 	projectAutomationMirrorGlobalConcurrency = 4
 )
 
+var errChangelogParentUnavailable = errors.New("changelog target is not approved")
+
 var errProjectMirrorScanRejected = errors.New("automated project mirror failed security scan")
 
 type ProjectAutomationWorker struct {
@@ -287,6 +289,9 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 			return nil, providerFailureCode(loadErr), loadErr
 		}
 		result, updateErr := worker.syncChangelogs(ctx, job, releases)
+		if errors.Is(updateErr, errChangelogParentUnavailable) {
+			return result, "update_conflict", updateErr
+		}
 		if errors.Is(updateErr, errAutomationPermissionDenied) {
 			return result, "automation_permission_denied", updateErr
 		}
@@ -622,12 +627,26 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			_ = tx.Rollback(ctx)
 			return nil, err
 		}
+		target := projectChangelogTarget{EntityType: job.ProjectType, InternalID: job.InternalID}
+		_, status, err := changelogProjectState(ctx, tx, target, true)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && status != "approved") {
+			_ = tx.Rollback(ctx)
+			return nil, errChangelogParentUnavailable
+		}
+		if err != nil {
+			_ = tx.Rollback(ctx)
+			return nil, err
+		}
+		binding, lookupErr := lockManagedChangelogReleaseTx(ctx, tx, job.RouteID, job.SourceType, release.ID, bodyHash)
+		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+			_ = tx.Rollback(ctx)
+			return nil, lookupErr
+		}
 		if _, err = authorizeAutomationProject(ctx, tx, job.ActorID, job.ProjectPublicID, false, true); err != nil {
 			_ = tx.Rollback(ctx)
 			return nil, err
 		}
-		binding, err := lockManagedChangelogReleaseTx(ctx, tx, job.RouteID, job.SourceType, release.ID, bodyHash)
-		if errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(lookupErr, pgx.ErrNoRows) {
 			var internalID int64
 			var publicID string
 			if err = tx.QueryRow(ctx, `insert into project_changelogs(object_route_id,event_at,minecraft_versions,project_version,default_locale,created_by)
@@ -653,9 +672,6 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			_, err = tx.Exec(ctx, `insert into external_release_bindings(project_route_id,source_type,external_release_id,changelog_public_id,external_body_hash,external_url,metadata)
 				values($1,$2,$3,$4,$5,$6,$7::jsonb)`, job.RouteID, job.SourceType, release.ID, publicID, bodyHash, release.URL, metadata)
 			created++
-		} else if err != nil {
-			_ = tx.Rollback(ctx)
-			return nil, err
 		} else if binding.bodyHash == bodyHash {
 			unchanged++
 		} else if binding.manual || binding.publicID == nil {
