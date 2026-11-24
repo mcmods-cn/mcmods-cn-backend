@@ -19,9 +19,11 @@ func TestSearchProjectionRetainsLatestCreatorNameAcrossWorkersIntegration(t *tes
 	if os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
 		t.Skip("enable the owned PostgreSQL fixture for search projection ordering")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
-	fixture, err := database.NewIsolatedTestSchema(ctx, config.Load().DB.ConnString(), 4)
+	// Install the complete schema before starting the projection's own deadline.
+	setupStarted := time.Now()
+	setup, stopSetup := context.WithTimeout(t.Context(), time.Minute)
+	fixture, err := database.NewIsolatedTestSchema(setup, config.Load().DB.ConnString(), 4)
+	stopSetup()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,6 +34,9 @@ func TestSearchProjectionRetainsLatestCreatorNameAcrossWorkersIntegration(t *tes
 			t.Error(err)
 		}
 	})
+	t.Logf("installed isolated schema in %s", time.Since(setupStarted))
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
 	pool := fixture.Pool
 	if _, err := pool.Exec(ctx, `truncate search_index_queue`); err != nil {
 		t.Fatal(err)
