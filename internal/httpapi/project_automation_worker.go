@@ -865,12 +865,13 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 		}
 		var mirrorID, currentSize int64
 		var currentStatus, currentFileStatus, currentScanStatus string
+		var heldForPublication bool
 		var currentMetadata []byte
-		err = worker.server.db.QueryRow(ctx, `select mirror.id,mirror.byte_size,mirror.status,mirror.metadata,
+		err = worker.server.db.QueryRow(ctx, `select mirror.id,mirror.byte_size,mirror.status,mirror.metadata,mirror.metadata ? 'publicationHold',
 			coalesce(file.status,''),coalesce(file.scan_status,'')
 			from mirrored_project_files mirror left join oss_files file on file.id=mirror.oss_file_id
 			where mirror.project_route_id=$1 and mirror.source_type=$2 and mirror.external_file_id=$3`, job.RouteID, job.SourceType, file.ID).
-			Scan(&mirrorID, &currentSize, &currentStatus, &currentMetadata, &currentFileStatus, &currentScanStatus)
+			Scan(&mirrorID, &currentSize, &currentStatus, &currentMetadata, &heldForPublication, &currentFileStatus, &currentScanStatus)
 		if err == nil {
 			existing++
 			var previous providerProjectFile
@@ -895,7 +896,26 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 			case "failed":
 				scanFailures++
 				review++
-			case "review", "source_changed":
+			case "review":
+				if !heldForPublication || previous.ProviderProjectID != job.ExternalID {
+					review++
+					continue
+				}
+				// Only a clean mirror held by a publication policy can be reconsidered.
+				// Other review reasons (metadata and Minecraft versions) remain manual.
+				tag, updateErr := worker.mutateProjectAutomationRun(ctx, job, `update mirrored_project_files
+					set status='scanning', metadata=metadata-'publicationHold'
+					where id=$1 and status='review' and metadata ? 'publicationHold'
+					and metadata->>'providerProjectId'=$2`, mirrorID, job.ExternalID)
+				if updateErr != nil {
+					return result(), fmt.Errorf("resume project mirror publication: %w", updateErr)
+				}
+				if tag.RowsAffected() == 1 {
+					awaitingScan++
+				} else {
+					review++
+				}
+			case "source_changed":
 				review++
 			case "scanning", "ready":
 				if currentScanStatus == "rejected" || currentFileStatus == "deleted" || currentFileStatus == "" {
@@ -1210,7 +1230,7 @@ func (slot *projectAutomationMirrorSlot) Release() {
 }
 
 func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) error {
-	rows, err := worker.server.db.Query(ctx, `select mirror.id,mirror.project_route_id,route.entity_type,route.internal_id,
+	rows, err := worker.server.db.Query(ctx, `select mirror.id,mirror.project_route_id,route.entity_type,route.internal_id,route.public_id,mirror.source_type,
 		coalesce(mirror.oss_file_id,0),mirror.file_sha256,mirror.byte_size,mirror.metadata,mirror.status,
 		coalesce(file.status,''),coalesce(file.scan_status,'')
 		from mirrored_project_files mirror join public_routes route on route.id=mirror.project_route_id
@@ -1222,16 +1242,10 @@ func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) 
 	if err != nil {
 		return fmt.Errorf("read project mirror scan transitions: %w", err)
 	}
-	type pending struct {
-		id, routeID, internalID, ossID, size int64
-		projectType, sha                     string
-		metadata                             []byte
-		mirrorStatus, fileStatus, scanStatus string
-	}
-	items := make([]pending, 0)
+	items := make([]projectMirrorCandidate, 0)
 	for rows.Next() {
-		var item pending
-		if err = rows.Scan(&item.id, &item.routeID, &item.projectType, &item.internalID, &item.ossID, &item.sha, &item.size,
+		var item projectMirrorCandidate
+		if err = rows.Scan(&item.id, &item.routeID, &item.projectType, &item.internalID, &item.projectID, &item.source, &item.ossID, &item.sha, &item.size,
 			&item.metadata, &item.mirrorStatus, &item.fileStatus, &item.scanStatus); err != nil {
 			rows.Close()
 			return fmt.Errorf("scan project mirror transition: %w", err)
@@ -1281,74 +1295,123 @@ func (worker *ProjectAutomationWorker) promoteCleanMirrors(ctx context.Context) 
 			}
 			continue
 		}
-		tx, beginErr := worker.server.db.Begin(ctx)
-		if beginErr != nil {
-			return fmt.Errorf("begin project mirror promotion: %w", beginErr)
-		}
-		// Scan updates lock the stored file before updating its mirrors. Hold
-		// the same file first and verify the candidate binding again under lock.
-		var liveStatus, liveScan string
-		fileErr := tx.QueryRow(ctx, `select status,scan_status from oss_files where id=$1 for share`, item.ossID).Scan(&liveStatus, &liveScan)
-		if fileErr != nil && !errors.Is(fileErr, pgx.ErrNoRows) {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("recheck bound project mirror scan: %w", fileErr)
-		}
-		var lockedStatus string
-		var lockedFileID *int64
-		if lockErr := tx.QueryRow(ctx, `select status,oss_file_id from mirrored_project_files where id=$1 for update`,
-			item.id).Scan(&lockedStatus, &lockedFileID); lockErr != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("lock project mirror promotion: %w", lockErr)
-		}
-		if (lockedStatus != "scanning" && lockedStatus != "failed") || lockedFileID == nil || *lockedFileID != item.ossID {
-			_ = tx.Rollback(ctx)
-			continue
-		}
-		if fileErr != nil || liveStatus != "active" || liveScan != "clean" && liveScan != "trusted_generated" {
-			status := "failed"
-			if liveStatus == "active" && liveScan == "pending" {
-				status = "scanning"
-			}
-			if _, fileErr = tx.Exec(ctx, `update mirrored_project_files set status=$2 where id=$1`, item.id, status); fileErr == nil {
-				fileErr = tx.Commit(ctx)
-			} else {
-				_ = tx.Rollback(ctx)
-			}
-			if fileErr != nil {
-				return fmt.Errorf("persist changed project mirror scan: %w", fileErr)
-			}
-			continue
-		}
-		projectApproved, insertErr := projectFileTargetIsApprovedTx(ctx, tx, item.projectType, item.internalID)
-		var filePublicID string
-		const publicationGeneration = 1
-		if insertErr == nil {
-			insertErr = tx.QueryRow(ctx, `insert into project_files(project_type,project_internal_id,oss_file_id,display_name,version_name,release_channel,
-				game_versions,loaders,file_name,content_type,size_bytes,sha256,status,publication_generation)
-				values($1,$2,$3,$4,$5,$6,$7,$8,$9,'application/octet-stream',$10,$11,'active',$12)
-				on conflict(project_type,project_internal_id,oss_file_id) do nothing returning public_id`, item.projectType, item.internalID, item.ossID,
-				firstNonEmpty(file.DisplayName, file.FileName), firstNonEmpty(file.VersionName, file.DisplayName), normalizeReleaseChannel(file.ReleaseChannel),
-				resolvedVersions, normalizeLoaders(file.Loaders), file.FileName, item.size, item.sha, publicationGeneration).Scan(&filePublicID)
-		}
-		inserted := insertErr == nil
-		if errors.Is(insertErr, pgx.ErrNoRows) {
-			insertErr = nil
-		}
-		if insertErr == nil && inserted && projectApproved {
-			insertErr = enqueueProjectFileUpdateEventByRouteTx(ctx, tx, item.routeID, 0,
-				"download_added", filePublicID, publicationGeneration)
-		}
-		if insertErr == nil {
-			_, insertErr = tx.Exec(ctx, `update mirrored_project_files set status='ready' where id=$1`, item.id)
-		}
-		if insertErr == nil {
-			if commitErr := tx.Commit(ctx); commitErr != nil {
-				return fmt.Errorf("commit project mirror promotion: %w", commitErr)
-			}
-		} else {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("promote project mirror %d: %w", item.id, insertErr)
+		if err = worker.promoteScannedMirror(ctx, item, file, resolvedVersions); err != nil {
+			return fmt.Errorf("promote project mirror %d: %w", item.id, err)
 		}
 	}
 	return nil
+}
+
+type projectMirrorCandidate struct {
+	id, routeID, internalID, ossID, size int64
+	projectType, projectID, source, sha  string
+	metadata                             []byte
+	mirrorStatus, fileStatus, scanStatus string
+}
+
+// The source/configuration locks precede the file and mirror locks, as on
+// normal runs. A completed publication stays bound to its own scanned bytes.
+func (worker *ProjectAutomationWorker) promoteScannedMirror(ctx context.Context, item projectMirrorCandidate, file providerProjectFile, versions []string) error {
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	job := projectAutomationJob{RouteID: item.routeID, ProjectType: item.projectType, InternalID: item.internalID,
+		ProjectPublicID: item.projectID, SourceType: item.source, ExternalID: file.ProviderProjectID}
+	err = tx.QueryRow(ctx, `select setting.license_override,setting.license_override_reason,setting.license_override_source
+		from project_auto_update_settings setting join project_external_sources source
+		on source.project_route_id=setting.project_route_id and source.source_type=setting.source_type
+		where setting.project_route_id=$1 and setting.update_kind='site_downloads' and setting.source_type=$2
+		and source.external_project_id=$3 for share of setting,source`, job.RouteID, job.SourceType, job.ExternalID).
+		Scan(&job.LicenseOverride, &job.OverrideReason, &job.OverrideSource)
+	sourceMatches := err == nil && job.ExternalID != ""
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+
+	var liveStatus, liveScan string
+	err = tx.QueryRow(ctx, `select status,scan_status from oss_files where id=$1 for share`, item.ossID).Scan(&liveStatus, &liveScan)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	var lockedStatus string
+	var lockedFileID *int64
+	if err = tx.QueryRow(ctx, `select status,oss_file_id from mirrored_project_files where id=$1 for update`, item.id).
+		Scan(&lockedStatus, &lockedFileID); err != nil {
+		return err
+	}
+	if (lockedStatus != "scanning" && lockedStatus != "failed") || lockedFileID == nil || *lockedFileID != item.ossID {
+		return nil
+	}
+	if liveStatus != "active" || liveScan != "clean" && liveScan != "trusted_generated" {
+		status := "failed"
+		if liveStatus == "active" && liveScan == "pending" {
+			status = "scanning"
+		}
+		if _, err = tx.Exec(ctx, `update mirrored_project_files set status=$2 where id=$1`, item.id, status); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+	var published bool
+	if err = tx.QueryRow(ctx, `select exists(select 1 from project_files where project_type=$1 and project_internal_id=$2 and oss_file_id=$3)`,
+		item.projectType, item.internalID, item.ossID).Scan(&published); err != nil {
+		return err
+	}
+	if !published {
+		reason, policyErr := firstMirrorPublicationHold(ctx, tx, job, sourceMatches)
+		if policyErr != nil {
+			return policyErr
+		}
+		if reason != "" {
+			if _, err = tx.Exec(ctx, `update mirrored_project_files set status='review',
+				metadata=jsonb_set(metadata,'{publicationHold}',to_jsonb($2::text)) where id=$1`, item.id, reason); err != nil {
+				return err
+			}
+			return tx.Commit(ctx)
+		}
+		var filePublicID string
+		const generation = 1
+		err = tx.QueryRow(ctx, `insert into project_files(project_type,project_internal_id,oss_file_id,display_name,version_name,release_channel,
+			game_versions,loaders,file_name,content_type,size_bytes,sha256,status,publication_generation)
+			values($1,$2,$3,$4,$5,$6,$7,$8,$9,'application/octet-stream',$10,$11,'active',$12)
+			on conflict(project_type,project_internal_id,oss_file_id) do nothing returning public_id`, item.projectType, item.internalID, item.ossID,
+			firstNonEmpty(file.DisplayName, file.FileName), firstNonEmpty(file.VersionName, file.DisplayName), normalizeReleaseChannel(file.ReleaseChannel),
+			versions, normalizeLoaders(file.Loaders), file.FileName, item.size, item.sha, generation).Scan(&filePublicID)
+		if err == nil {
+			if err = enqueueProjectFileUpdateEventByRouteTx(ctx, tx, item.routeID, 0, "download_added", filePublicID, generation); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
+	if _, err = tx.Exec(ctx, `update mirrored_project_files set status='ready' where id=$1`, item.id); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func firstMirrorPublicationHold(ctx context.Context, tx pgx.Tx, job projectAutomationJob, sourceMatches bool) (string, error) {
+	if !sourceMatches {
+		return "source_changed", nil
+	}
+	approved, err := projectFileTargetIsApprovedTx(ctx, tx, job.ProjectType, job.InternalID)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && !approved {
+		return "project_unavailable", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if _, err = authorizeAutomationProject(ctx, tx, 0, job.ProjectPublicID, false, true); err != nil {
+		if errors.Is(err, errAutomationPermissionDenied) || errors.Is(err, pgx.ErrNoRows) {
+			return "actor_unavailable", nil
+		}
+		return "", err
+	}
+	if _, err = requireProjectRedistribution(ctx, tx, job); errors.Is(err, errRedistributionNotAllowed) {
+		return "redistribution_unavailable", nil
+	}
+	return "", err
 }

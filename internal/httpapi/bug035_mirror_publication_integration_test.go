@@ -54,6 +54,8 @@ func TestBUG035CleanMirrorPromotionPublishesOneAtomicProjectUpdateIntegration(t 
 	if err = pool.QueryRow(ctx, `select id from public_routes where entity_type='mod' and internal_id=$1`, projectInternalID).Scan(&routeID); err != nil {
 		t.Fatal(err)
 	}
+	seedAuthorizedAutomationFixture(t, ctx, pool, "project.edit.b035m0001", "project.no-review.b035m0001")
+	enableMirrorPublicationFixture(t, ctx, pool, routeID)
 	insertBUG035CleanMirror(t, ctx, pool, routeID, "bug035-file")
 	worker := &ProjectAutomationWorker{server: &Server{db: pool}}
 
@@ -102,7 +104,7 @@ func TestBUG035CleanMirrorPromotionPublishesOneAtomicProjectUpdateIntegration(t 
 
 func insertBUG035CleanMirror(t *testing.T, ctx context.Context, pool *pgxpool.Pool, routeID int64, externalID string) {
 	t.Helper()
-	metadata, err := json.Marshal(providerProjectFile{ID: externalID, Source: "modrinth", DisplayName: "BUG035 release",
+	metadata, err := json.Marshal(providerProjectFile{ID: externalID, Source: "modrinth", ProviderProjectID: "fixture-provider-project", DisplayName: "BUG035 release",
 		FileName: "bug035.jar", VersionName: "1.0.0", ReleaseChannel: "release", GameVersions: []string{"1.21.1"}, Loaders: []string{"Fabric"}})
 	if err != nil {
 		t.Fatal(err)

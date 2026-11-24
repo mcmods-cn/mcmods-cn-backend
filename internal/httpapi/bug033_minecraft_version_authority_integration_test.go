@@ -150,6 +150,7 @@ func TestBUG033ProjectCompatibilityWritesUseAuthoritativeMinecraftVersionsIntegr
 		t.Fatalf("review-time publication error=%v, want unknown-version rejection", applyErr)
 	}
 
+	enableMirrorPublicationFixture(t, ctx, pool, routeID)
 	insertBUG033CleanMirror(t, ctx, pool, routeID, "unknown-file", "unknown.jar", []string{"future-provider"})
 	insertBUG033CleanMirror(t, ctx, pool, routeID, "mixed-file", "mixed.jar", []string{"1.21.1", "future-provider"})
 	worker.promoteCleanMirrors(ctx)
@@ -171,7 +172,7 @@ func TestBUG033ProjectCompatibilityWritesUseAuthoritativeMinecraftVersionsIntegr
 
 func insertBUG033CleanMirror(t *testing.T, ctx context.Context, pool *pgxpool.Pool, routeID int64, externalID, fileName string, versions []string) {
 	t.Helper()
-	metadata, err := json.Marshal(providerProjectFile{ID: externalID, Source: "modrinth", DisplayName: fileName, FileName: fileName,
+	metadata, err := json.Marshal(providerProjectFile{ID: externalID, Source: "modrinth", ProviderProjectID: "fixture-provider-project", DisplayName: fileName, FileName: fileName,
 		VersionName: "1.0.0", ReleaseChannel: "release", GameVersions: versions, Loaders: []string{"Fabric"}})
 	if err != nil {
 		t.Fatal(err)

@@ -65,8 +65,10 @@ func TestBUG038RejectedMirrorFailsRunAndCanBeRescannedIntegration(t *testing.T) 
 		t.Fatal(err)
 	}
 
+	seedAuthorizedAutomationFixture(t, ctx, pool, "project.edit.b038m0001", "project.no-review.b038m0001")
+	enableMirrorPublicationFixture(t, ctx, pool, routeID)
 	providerFile := providerProjectFile{
-		ID: "bug038-file", Source: "modrinth", DisplayName: "BUG038 release", FileName: "bug038.jar",
+		ID: "bug038-file", Source: "modrinth", ProviderProjectID: "fixture-provider-project", DisplayName: "BUG038 release", FileName: "bug038.jar",
 		VersionName: "1.0.0", ReleaseChannel: "release", GameVersions: []string{"1.21.1"}, Loaders: []string{"Fabric"},
 		SizeBytes: 128, SHA1: "1111111111111111111111111111111111111111", DirectURL: "https://cdn.example.test/bug038.jar",
 	}
