@@ -60,8 +60,24 @@ func TestAuditFixCMP003ProgressionAndProfileActivitySharesBusinessTransaction(t 
 		t.Fatal(err)
 	}
 	path := "/api/v1/admin/users/" + target + "/role-tracks/audit_atomic_track/"
-	// Preserve existing POST/Create inference, including successful no-op behavior.
-	recover(f.reviewer, http.MethodPost, path+"upgrade", nil, 200, activity.ActionCreate, activity.ObjectUser, "failed to persist role track activity")
+	// With no manual member in this track there is no action to roll back.
+	// An unavailable activity sink must neither turn this into a failure nor
+	// manufacture a progression event. Actual transitions are tested below.
+	auditFixInjectActivityFailure(t, f, f.userIDs[f.reviewer], true)
+	before := auditFixProgressionProfileFacts(t, f)
+	prior := auditFixActivityIntentCount(t, f, f.reviewer, activity.ActionCreate, activity.ObjectUser)
+	unchanged := decodeTEST022Data[struct {
+		Changed *bool    `json:"changed"`
+		Roles   []string `json:"roles"`
+	}](t, f.require(t, f.reviewer, http.MethodPost, path+"upgrade", nil, http.StatusOK))
+	if unchanged.Changed == nil || *unchanged.Changed || unchanged.Roles == nil || len(unchanged.Roles) != 0 {
+		t.Fatalf("unused role track returned %#v", unchanged)
+	}
+	if got := auditFixActivityIntentCount(t, f, f.reviewer, activity.ActionCreate, activity.ObjectUser); got != prior {
+		t.Fatalf("unused role track wrote activity count=%d prior=%d", got, prior)
+	}
+	auditFixRequireProjectFactsUnchanged(t, before, auditFixProgressionProfileFacts(t, f))
+	auditFixInjectActivityFailure(t, f, f.userIDs[f.reviewer], false)
 	if _, err := f.db.Exec(f.ctx, `insert into user_role_bindings(user_id,role_id,source,source_key) select $1,id,'manual','' from roles where code='audit_track_low'`, f.userIDs[f.editor]); err != nil {
 		t.Fatal(err)
 	}
