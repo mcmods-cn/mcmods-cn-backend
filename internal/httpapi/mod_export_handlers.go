@@ -518,10 +518,11 @@ func (s *Server) activeModExportJobID(ctx context.Context, modID int64, targetVe
 	err := s.db.QueryRow(ctx, `select job.id
 		from catalog_import_jobs job
 		join catalog_import_packages package on package.id=job.package_id
+		join oss_files source on source.id=package.archive_file_id
 		join mod_content_versions version on version.id=job.target_version_id
 		where job.mod_id=$1 and version.public_id=$2 and version.status='active'
 		  and job.created_by=$3
-		  and package.profile='all'
+		  and source.source='mcmods_exporter'
 		  and job.status in ('queued','validating','confirmation_required','importing')
 		order by job.created_at desc,job.id desc limit 1`,
 		modID, targetVersionPublicID, creatorID).Scan(&jobID)

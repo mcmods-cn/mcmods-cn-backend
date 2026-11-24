@@ -141,3 +141,34 @@ func TestModExportRecoveryIsIsolatedAcrossTwoAccountsIntegration(t *testing.T) {
 		t.Fatalf("second account did not recover its own job: %q, %v; want %q", activeID, activeErr, secondJobID)
 	}
 }
+
+func TestModExportRecoveryUsesUploadSourceAcrossManifestProfiles(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	path := "/api/v1/mods/audit-gr-" + f.modCode + "/export-imports/active?targetVersionId=" + f.versionPublic
+	activeJob := func() *modExportJobResponse {
+		t.Helper()
+		raw := f.require(t, f.editor, "GET", path, nil, 200)
+		return decodeTEST022Data[struct{ Job *modExportJobResponse }](t, raw).Job
+	}
+	auditImportEmbeddedJob(t, f)
+	if got := activeJob(); got != nil {
+		t.Fatal("icon renderer job appeared as a ZIP import")
+	}
+	job := f.job(t, f.upload(t, auditFixGRZip(t, nil)))
+	token, err := f.server.claimModExportJob(f.ctx, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Staging replaces the upload-time profile with the one read from manifest.json.
+	err = f.server.startCatalogImportStaging(f.ctx, job.ID, token, catalogImportMetadata{
+		SchemaVersion: modExportSchemaVersion, MinecraftVersion: "1.20.1", ExporterVersion: "test", Loader: "forge",
+		Manifest: []byte(`{"configuration":{"profile":"data"}}`), Namespaces: []string{"example"}, Profile: "data",
+	}, func(pgx.Tx) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := activeJob(); got == nil || got.ID != job.ID {
+		t.Fatal("reopening the catalog page lost the active data-profile ZIP import")
+	}
+}
