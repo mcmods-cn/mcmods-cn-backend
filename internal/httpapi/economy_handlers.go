@@ -752,7 +752,7 @@ func (s *Server) updateEconomyConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to lock economy configuration")
 		return
 	}
-	if err = validateActiveEconomyCurrencyReferencesTx(r.Context(), tx, payload); err != nil {
+	if err = validateActiveEconomyCurrencyCodesTx(r.Context(), tx, referencedEconomyCurrencyCodes(payload)); err != nil {
 		if errors.Is(err, errInactiveEconomyCurrency) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -1209,19 +1209,21 @@ func referencedEconomyCurrencyCodes(payload economyConfigPayload) []string {
 	return result
 }
 
-func validateActiveEconomyCurrencyReferencesTx(ctx context.Context, tx pgx.Tx, payload economyConfigPayload) error {
-	for _, code := range referencedEconomyCurrencyCodes(payload) {
-		var active bool
-		if err := tx.QueryRow(ctx, `select exists(
-			select 1 from currencies where code=$1 and status='active'
-		)`, code).Scan(&active); err != nil {
-			return err
-		}
-		if !active {
-			return fmt.Errorf("%w: %s", errInactiveEconomyCurrency, code)
-		}
+func validateActiveEconomyCurrencyCodesTx(ctx context.Context, tx pgx.Tx, codes []string) error {
+	if len(codes) == 0 {
+		return nil
 	}
-	return nil
+	var missing string
+	err := tx.QueryRow(ctx, `select code from unnest($1::text[]) requested(code)
+		where not exists (select 1 from currencies c where c.code=requested.code and c.status='active')
+		order by code limit 1`, codes).Scan(&missing)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("%w: %s", errInactiveEconomyCurrency, missing)
 }
 
 func economyCurrencyReferenceBlockersTx(ctx context.Context, tx pgx.Tx, code string) ([]string, error) {
@@ -1229,7 +1231,7 @@ func economyCurrencyReferenceBlockersTx(ctx context.Context, tx pgx.Tx, code str
 	if err != nil {
 		return nil, err
 	}
-	blockers := make([]string, 0, 3)
+	blockers := make([]string, 0, 4)
 	if payload.Checkin.Enabled && payload.Checkin.Currency == code {
 		blockers = append(blockers, "enabled check-in")
 	}
@@ -1239,16 +1241,20 @@ func economyCurrencyReferenceBlockersTx(ctx context.Context, tx pgx.Tx, code str
 			break
 		}
 	}
-	var activeShopItems bool
+	var activeShopItems, activeRewardTasks bool
 	if err = tx.QueryRow(ctx, `select exists(
 		select 1 from shop_items item
 		join currencies currency on currency.id=item.price_currency_id
 		where currency.code=$1 and item.status='active'
-	)`, code).Scan(&activeShopItems); err != nil {
+	),
+		exists(select 1 from task_definitions where status='active' and (rewards->'currencies') ? $1)`, code).Scan(&activeShopItems, &activeRewardTasks); err != nil {
 		return nil, err
 	}
 	if activeShopItems {
 		blockers = append(blockers, "active shop items")
+	}
+	if activeRewardTasks {
+		blockers = append(blockers, "active task rewards")
 	}
 	return blockers, nil
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"slices"
 	"strconv"
@@ -49,7 +50,6 @@ type taskPayload struct {
 }
 
 var errTaskCurrencyRewardDuplicate = errors.New("task currency reward codes must be unique")
-var errTaskRewardStoreUnavailable = errors.New("task reward store is unavailable")
 
 func (payload *taskPayload) UnmarshalJSON(data []byte) error {
 	if err := validateTaskCurrencyRewardJSONKeys(data); err != nil {
@@ -413,11 +413,8 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, currentPublicI
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.validateTaskRewards(r, payload.Rewards); err != nil {
-		if errors.Is(err, errTaskRewardStoreUnavailable) {
-			writeError(w, http.StatusInternalServerError, "failed to validate task rewards")
-			return
-		}
+	currencyCodes, err := normalizeTaskRewards(payload.Rewards)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -443,6 +440,20 @@ func (s *Server) saveTask(w http.ResponseWriter, r *http.Request, currentPublicI
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err = lockEconomyConfigurationTx(r.Context(), tx); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock task reward currencies")
+		return
+	}
+	if payload.Status == "active" {
+		if err = validateActiveEconomyCurrencyCodesTx(r.Context(), tx, currencyCodes); err != nil {
+			if errors.Is(err, errInactiveEconomyCurrency) {
+				writeError(w, http.StatusBadRequest, "task reward references an unknown currency")
+			} else {
+				writeError(w, http.StatusInternalServerError, "failed to validate task rewards")
+			}
+			return
+		}
+	}
 	var publicID string
 	if currentPublicID == "" {
 		err = tx.QueryRow(r.Context(), `insert into task_definitions(
@@ -633,38 +644,28 @@ func validateTaskCondition(condition map[string]any) error {
 	return nil
 }
 
-func (s *Server) validateTaskRewards(r *http.Request, rewards map[string]any) error {
+func normalizeTaskRewards(rewards map[string]any) ([]string, error) {
 	if rewards == nil {
-		return errors.New("task rewards must be an object")
+		return nil, errors.New("task rewards must be an object")
 	}
 	experience := int64Value(rewards["experience"])
 	if experience < 0 {
-		return errors.New("task experience reward cannot be negative")
+		return nil, errors.New("task experience reward cannot be negative")
 	}
 	rewards["experience"] = experience
 	rawCurrencies, object := rewards["currencies"].(map[string]any)
 	if rewards["currencies"] != nil && !object {
-		return errors.New("task currencies must be an object")
+		return nil, errors.New("task currencies must be an object")
 	}
 	currencies, err := normalizeTaskCurrencyRewards(rawCurrencies)
 	if err != nil {
-		return err
-	}
-	for code := range currencies {
-		var exists bool
-		if queryErr := s.db.QueryRow(r.Context(), `select exists(select 1 from currencies where code=$1 and status='active')`, code).
-			Scan(&exists); queryErr != nil {
-			return fmt.Errorf("%w: %v", errTaskRewardStoreUnavailable, queryErr)
-		}
-		if !exists {
-			return errors.New("task reward references an unknown currency")
-		}
+		return nil, err
 	}
 	rewards["currencies"] = currencies
 	if experience == 0 && len(currencies) == 0 {
-		return errors.New("task must provide at least one reward")
+		return nil, errors.New("task must provide at least one reward")
 	}
-	return nil
+	return slices.Sorted(maps.Keys(currencies)), nil
 }
 
 func decodeTaskConfigurationMaps(conditionRaw, rewardsRaw []byte) (map[string]any, map[string]any, error) {

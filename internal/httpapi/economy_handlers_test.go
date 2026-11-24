@@ -118,7 +118,7 @@ func TestEconomyHandlersUseTransactionalConfigurationInvariants(t *testing.T) {
 	source := string(raw)
 	for _, required := range []string{
 		"nextHeatPromotionSequenceTx(r.Context(), tx, routeID)",
-		"validateActiveEconomyCurrencyReferencesTx(r.Context(), tx, payload)",
+		"validateActiveEconomyCurrencyCodesTx(r.Context(), tx, referencedEconomyCurrencyCodes(payload))",
 		"economyCurrencyReferenceBlockersTx(r.Context(), tx, currentCode)",
 		"!isSupportedShopItemType(payload.ItemType)",
 	} {

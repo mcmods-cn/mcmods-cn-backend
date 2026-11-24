@@ -104,13 +104,13 @@ func TestEconomyCurrencyReferencesRequireActiveCurrencies(t *testing.T) {
 			ObjectType: "mod", Currency: "diamond", DownloadsPerReward: 10, Amount: 1,
 		}},
 	}
-	if err = validateActiveEconomyCurrencyReferencesTx(ctx, tx, payload); !errors.Is(err, errInactiveEconomyCurrency) {
+	if err = validateActiveEconomyCurrencyCodesTx(ctx, tx, referencedEconomyCurrencyCodes(payload)); !errors.Is(err, errInactiveEconomyCurrency) {
 		t.Fatalf("disabled reward currency returned %v", err)
 	}
 	if _, err = tx.Exec(ctx, `update currencies set status='active' where code='diamond'`); err != nil {
 		t.Fatal(err)
 	}
-	if err = validateActiveEconomyCurrencyReferencesTx(ctx, tx, payload); err != nil {
+	if err = validateActiveEconomyCurrencyCodesTx(ctx, tx, referencedEconomyCurrencyCodes(payload)); err != nil {
 		t.Fatalf("active reward currencies were rejected: %v", err)
 	}
 
