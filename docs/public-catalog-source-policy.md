@@ -22,3 +22,9 @@ Both revision registry routes check the same revision visibility before returnin
 Use `GET /api/v1/export-revisions/{revisionId}/registry-entries?registries=items&summary=1&limit=80&offset=0` for a list. The default page contains at most 80 rows, the maximum is 100, and the response includes `total`, `limit` and `offset`. Set `locale` for translated display names. With both `items` and `blocks`, the list suppresses item rows already represented by block bindings in that revision. Request each registry separately when counting its snapshots.
 
 `GET /api/v1/export-revisions/{revisionId}/registries/{registry}` returns the complete single registry ordered by canonical ID, including stored snapshot data and names, within 100 entries and a 2 MiB budget. Larger results return HTTP 422 with `registry_response_too_large`, a `Link` header and `details.pageURL`. Switch to that paginated endpoint and advance the offset by each returned page size. The summary projection omits entry data. The paged detail projection processes names separately. Use the individual entry detail when the paged summary lacks the fields needed by a client.
+
+### Resource names and registries
+
+For a resource such as `example:plate`, the identifier namespace is `example`. Catalog resource cards and picker results expose that value as `namespace`. Their `registry` field gives the known resource family, for example `items` for `minecraft.item`. Extension kinds use the registry from the visible source snapshot when present. Without an observed registry they leave this field empty. Tags retain their exact registry, such as `minecraft:item`, as part of their identity.
+
+Both resource directories accept `?namespace=example` and `?kindCode=minecraft.item`. The revision-specific registry routes continue to use the stored exporter registry name. Anonymous single-resource and batch cards use approved names, with the same language fallback.
