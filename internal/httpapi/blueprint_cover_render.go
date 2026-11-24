@@ -73,27 +73,33 @@ func renderBlueprintCover(document blueprintDocument) ([]byte, error) {
 	tileHeight := max(2, tileWidth/2)
 	halfHeight := max(1, tileHeight/2)
 	projectedWidth := (extentX + extentZ) * halfWidth
-	originX := (blueprintCoverWidth-projectedWidth)/2 + extentZ*halfWidth
-	originY := max(36, (blueprintCoverHeight-((extentX+extentZ)*halfHeight+extentY*tileHeight))/2+extentY*tileHeight)
+	projectedHeight := (extentX+extentZ)*halfHeight + extentY*tileHeight
+	// Fit projected positions even when individual blocks are smaller than a pixel.
+	scale := min(1.0, float64(blueprintCoverWidth-120)/float64(projectedWidth), float64(blueprintCoverHeight-100)/float64(projectedHeight))
+	originX := (float64(blueprintCoverWidth)-scale*float64(projectedWidth))/2 + scale*float64(extentZ*halfWidth)
+	originY := (float64(blueprintCoverHeight)-scale*float64(projectedHeight))/2 + scale*float64(extentY*tileHeight)
+	faceHalfWidth := max(1, int(math.Round(float64(halfWidth)*scale)))
+	faceHalfHeight := max(1, int(math.Round(float64(halfHeight)*scale)))
+	faceHeight := max(1, int(math.Round(float64(tileHeight)*scale)))
 
 	for _, block := range visible {
 		x := block.position[0] - minX
 		y := block.position[1] - minY
 		z := block.position[2] - minZ
-		centerX := originX + (x-z)*halfWidth
-		centerY := originY + (x+z)*halfHeight - y*tileHeight
+		centerX := int(math.Round(originX + scale*float64((x-z)*halfWidth)))
+		centerY := int(math.Round(originY + scale*float64((x+z)*halfHeight-y*tileHeight)))
 		base := coverColor(block.blockID)
 		_, topCovered := occupied[[3]int{block.position[0], block.position[1] + 1, block.position[2]}]
 		_, eastCovered := occupied[[3]int{block.position[0] + 1, block.position[1], block.position[2]}]
 		_, southCovered := occupied[[3]int{block.position[0], block.position[1], block.position[2] + 1}]
 		if !southCovered {
-			fillCoverPolygon(canvas, []image.Point{{centerX - halfWidth, centerY}, {centerX, centerY + halfHeight}, {centerX, centerY + halfHeight + tileHeight}, {centerX - halfWidth, centerY + tileHeight}}, shadeCoverColor(base, 0.76))
+			fillCoverPolygon(canvas, []image.Point{{centerX - faceHalfWidth, centerY}, {centerX, centerY + faceHalfHeight}, {centerX, centerY + faceHalfHeight + faceHeight}, {centerX - faceHalfWidth, centerY + faceHeight}}, shadeCoverColor(base, 0.76))
 		}
 		if !eastCovered {
-			fillCoverPolygon(canvas, []image.Point{{centerX + halfWidth, centerY}, {centerX, centerY + halfHeight}, {centerX, centerY + halfHeight + tileHeight}, {centerX + halfWidth, centerY + tileHeight}}, shadeCoverColor(base, 0.58))
+			fillCoverPolygon(canvas, []image.Point{{centerX + faceHalfWidth, centerY}, {centerX, centerY + faceHalfHeight}, {centerX, centerY + faceHalfHeight + faceHeight}, {centerX + faceHalfWidth, centerY + faceHeight}}, shadeCoverColor(base, 0.58))
 		}
 		if !topCovered {
-			fillCoverPolygon(canvas, []image.Point{{centerX, centerY - halfHeight}, {centerX + halfWidth, centerY}, {centerX, centerY + halfHeight}, {centerX - halfWidth, centerY}}, shadeCoverColor(base, 1.18))
+			fillCoverPolygon(canvas, []image.Point{{centerX, centerY - faceHalfHeight}, {centerX + faceHalfWidth, centerY}, {centerX, centerY + faceHalfHeight}, {centerX - faceHalfWidth, centerY}}, shadeCoverColor(base, 1.18))
 		}
 	}
 	return encodeBlueprintCover(canvas)
