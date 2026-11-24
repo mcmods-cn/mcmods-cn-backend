@@ -6,8 +6,13 @@ import assert from 'node:assert/strict';
 const state=process.argv[2], work=path.dirname(state), r=JSON.parse(await readFile(path.join(state,'runtime.json')));
 assert.equal(r.frontendOrigin,'https://127.0.0.1:3431');
 for(const a of [r.apiOrigin,r.internalOSSOrigin])assert.equal(new URL(a).hostname,'127.0.0.1');
+const observedObjectPaths=new Set();
 const server=createServer({cert:await readFile(path.join(work,'leaf.pem')),key:await readFile(path.join(work,'leaf.key'))},(req,res)=>{
- const origin=req.url.startsWith(r.ossBucketPathPrefix)?r.internalOSSOrigin:req.url.startsWith('/api/')?r.apiOrigin:'http://127.0.0.1:3465';
+ const pathname=new URL(req.url,r.frontendOrigin).pathname;
+ const bucketPath=pathname.startsWith(r.ossBucketPathPrefix);
+ if(bucketPath)observedObjectPaths.add('/'+pathname.slice(r.ossBucketPathPrefix.length));
+ // The public endpoint also addresses stable keys without the path-style bucket prefix.
+ const origin=(bucketPath||observedObjectPaths.has(pathname))?r.internalOSSOrigin:req.url.startsWith('/api/')?r.apiOrigin:'http://127.0.0.1:3465';
  // Preserve the exact query, HTTP method, Host, signed headers and HEAD length.
  const headers={...req.headers};delete headers.connection;
  const upstream=request(new URL(origin),{path:req.url,headers,method:req.method},remote=>{
