@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func TestNATSUpdatePreservesOrExplicitlyClearsSecrets(t *testing.T) {
 	empty := ""
 	request.Password = &empty
 	request.ClearToken = true
-	current := config.NATSConfig{Password: "saved-password", Token: "saved-token"}
+	current := config.NATSConfig{URL: *request.URL, Password: "saved-password", Token: "saved-token"}
 	next, err := request.config(current)
 	if err != nil {
 		t.Fatal(err)
@@ -92,5 +93,31 @@ func TestNATSNewStreamBudgetIsPreservedForOlderClients(t *testing.T) {
 	request.JetStream.NewStreamMaxBytes = natsPtr(int64(0))
 	if _, err = request.config(current); err == nil {
 		t.Fatal("accepted an unlimited new stream budget")
+	}
+}
+
+func TestNATSSavedCredentialsStayWithTheirConfiguredDestinations(t *testing.T) {
+	r := completeNATSUpdateRequest()
+	r.Username = natsPtr("ops")
+	current := config.NATSConfig{URL: "nats://BROKER.example:4222,nats://peer.example:4222", Username: "ops", Password: "existing-password", Token: "existing-token"}
+	r.URL = natsPtr("broker.example")
+	if got, err := r.config(current); err != nil || got.Password != current.Password || got.Token != current.Token {
+		t.Fatalf("retaining a known subset: err=%v", err)
+	}
+	r.URL = natsPtr("nats://broker.example,nats://new.example")
+	if _, err := r.config(current); !errors.Is(err, errNATSCredentialDecision) {
+		t.Fatalf("missing both credential decisions: %v", err)
+	}
+	r.Password = natsPtr("new-password")
+	if _, err := r.config(current); !errors.Is(err, errNATSCredentialDecision) {
+		t.Fatalf("missing independent token decision: %v", err)
+	}
+	r.ClearToken = true
+	if got, err := r.config(current); err != nil || got.Password != "new-password" || got.Token != "" {
+		t.Fatalf("explicit independent decisions did not apply: %v", err)
+	}
+	r.Username, r.URL, r.Password, r.ClearToken = natsPtr("another-user"), natsPtr(current.URL), nil, false
+	if _, err := r.config(current); !errors.Is(err, errNATSCredentialDecision) {
+		t.Fatalf("retained password across account change: %v", err)
 	}
 }

@@ -14,23 +14,35 @@ import (
 )
 
 func LoadNATSConfig(ctx context.Context, db *pgxpool.Pool, fallback config.NATSConfig, settingsEncryptionKey string) (config.NATSConfig, error) {
-	var raw []byte
-	err := db.QueryRow(ctx, `select value from system_settings where key = 'nats.config'`).Scan(&raw)
-	if err == nil {
-		raw, err = security.DecryptSetting(settingsEncryptionKey, raw)
-		if err != nil {
-			return config.NATSConfig{}, err
-		}
-		// A persisted record is the complete authority. In particular, false
-		// feature flags and empty credentials are intentional values rather than
-		// signals to recover a differently-aged configuration from the process
-		// environment.
-		return decodeNATSConfig(raw)
-	}
+	setting, err := ReadNATSConfig(ctx, db, fallback, settingsEncryptionKey)
+	return setting.Config, err
+}
+
+type NATSConfigSetting struct {
+	Config    config.NATSConfig
+	Encrypted []byte
+}
+
+func ReadNATSConfig(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, fallback config.NATSConfig, settingsEncryptionKey string) (NATSConfigSetting, error) {
+	var stored []byte
+	err := db.QueryRow(ctx, `select value from system_settings where key = 'nats.config'`).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return queue.NormalizeConfig(fallback), nil
+		return NATSConfigSetting{Config: queue.NormalizeConfig(fallback)}, nil
 	}
-	return config.NATSConfig{}, err
+	if err != nil {
+		return NATSConfigSetting{}, err
+	}
+	plaintext, err := security.DecryptSetting(settingsEncryptionKey, stored)
+	if err != nil {
+		return NATSConfigSetting{}, err
+	}
+	cfg, err := decodeNATSConfig(plaintext)
+	if err != nil {
+		return NATSConfigSetting{}, err
+	}
+	return NATSConfigSetting{Config: cfg, Encrypted: stored}, nil
 }
 
 func decodeNATSConfig(raw []byte) (config.NATSConfig, error) {

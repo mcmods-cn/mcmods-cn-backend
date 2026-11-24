@@ -152,3 +152,13 @@ func TestOCT02NATSURLCredentialReplacementAuthenticates(t *testing.T) {
 		})
 	}
 }
+
+func TestNATSMaskedMultipleServersKeepTheirOwnCredentialsWhenReordered(t *testing.T) {
+	current := config.NATSConfig{URL: "nats://first:secret1@one.example:4222,nats://second:secret2@two.example:4222"}
+	request := completeNATSUpdateRequest()
+	request.URL = natsPtr("nats://two.example:4222,nats://one.example:4222")
+	updated, err := request.config(current)
+	if err != nil || updated.URL != "nats://second:secret2@two.example:4222,nats://first:secret1@one.example:4222" {
+		t.Fatalf("moving a retained endpoint changed its stored login: err=%v", err)
+	}
+}

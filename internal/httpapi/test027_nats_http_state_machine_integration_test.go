@@ -83,10 +83,24 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 	get(t, token, http.StatusForbidden)
 	put(t, request, http.StatusForbidden)
 	grantTEST044Permissions(t, ctx, pool, adminID, "admin.config.read")
-	get(t, token, http.StatusOK)
+	read := func(t *testing.T) natsConfigResponse {
+		t.Helper()
+		return decodeTEST022Data[natsConfigResponse](t, get(t, token, http.StatusOK))
+	}
+	initial := read(t)
 	put(t, request, http.StatusForbidden)
 	grantTEST044Permissions(t, ctx, pool, adminID, "admin.config.write")
-	put(t, request, http.StatusOK)
+	if raw := put(t, request, http.StatusPreconditionRequired); !bytes.Contains(raw, []byte("NATS_CONFIG_REVISION_REQUIRED")) {
+		t.Fatal("missing revision must request a fresh read")
+	}
+	request.Revision = initial.Revision
+	if first := decodeTEST022Data[natsConfigResponse](t, put(t, request, http.StatusOK)); first.Revision == "" || first.Revision == initial.Revision || first.Revision != read(t).Revision {
+		t.Fatal("save did not return the new revision read by the next client")
+	}
+	if raw := put(t, request, http.StatusConflict); !bytes.Contains(raw, []byte("NATS_CONFIG_CONFLICT")) {
+		t.Fatal("older client snapshot was accepted")
+	}
+	request.Revision = read(t).Revision
 	var originalStored []byte
 	if err := pool.QueryRow(ctx, `select value from system_settings where key='nats.config'`).Scan(&originalStored); err != nil {
 		t.Fatal(err)
@@ -148,6 +162,11 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 				} else {
 					candidate.URL = natsPtr(candidateBroker.ClientURL())
 				}
+				candidate.Revision = read(t).Revision
+				if raw := put(t, candidate, http.StatusBadRequest); !bytes.Contains(raw, []byte("NATS_CREDENTIAL_DECISION_REQUIRED")) {
+					t.Fatal("changing the broker requires an explicit credential decision")
+				}
+				candidate.Password = natsPtr(cfg.NATS.Password)
 				put(t, candidate, http.StatusBadGateway)
 				assertUnchanged(t)
 			})
@@ -173,6 +192,7 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 	t.Run("database rejection discards prepared candidate", func(t *testing.T) {
 		candidate := test027NATSUpdate(cfg.NATS)
 		candidate.URL = natsPtr(candidateBroker.ClientURL())
+		candidate.Revision, candidate.Password = read(t).Revision, natsPtr(cfg.NATS.Password)
 		candidate.JetStream.Stream = natsPtr("TEST027_DISCARDED")
 		if _, err := pool.Exec(ctx, `alter table system_settings add constraint test027_reject_nats_save check(key<>'nats.config') not valid`); err != nil {
 			t.Fatal(err)
@@ -204,11 +224,11 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 	})
 	t.Run("concurrent PUT and cleared secrets retain complete authority", func(t *testing.T) {
 		var wg sync.WaitGroup
-		failures := make(chan string, 2)
-		// BASE plus A and B reserve their own file-stream budgets. Size the
-		// test streams explicitly, independent of free space on the host.
+		codes := make(chan int, 2)
+		initial := read(t)
 		for _, suffix := range []string{"A", "B"} {
 			candidate := test027NATSUpdate(cfg.NATS)
+			candidate.Revision, candidate.Password = initial.Revision, natsPtr(cfg.NATS.Password)
 			candidate.SubjectPrefix = natsPtr("test027" + suffix)
 			candidate.JetStream.Stream = natsPtr("TEST027_" + suffix)
 			wg.Add(1)
@@ -216,19 +236,24 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 				defer wg.Done()
 				raw, err := json.Marshal(candidate)
 				if err != nil {
-					failures <- err.Error()
+					t.Error(err)
 					return
 				}
 				status, body, err := test027HTTPRequest(ctx, client, httpServer.URL, token, http.MethodPut, raw)
-				if err != nil || status != http.StatusOK {
-					failures <- string(body)
+				if err != nil || (status == http.StatusConflict && !bytes.Contains(body, []byte("NATS_CONFIG_CONFLICT"))) {
+					t.Errorf("concurrent PUT status=%d err=%v", status, err)
 				}
+				codes <- status
 			}()
 		}
 		wg.Wait()
-		close(failures)
-		for failure := range failures {
-			t.Errorf("concurrent PUT failed: %s", failure)
+		close(codes)
+		counts := make(map[int]int)
+		for code := range codes {
+			counts[code]++
+		}
+		if counts[http.StatusOK] != 1 || counts[http.StatusConflict] != 1 {
+			t.Fatalf("competing saves returned %v", counts)
 		}
 		loaded, err := database.LoadNATSConfig(ctx, pool, cfg.NATS, cfg.SettingsEncryptionKey)
 		if err != nil || loaded.SubjectPrefix != queueClient.Status().SubjectPrefix {
@@ -236,6 +261,7 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 		}
 		assertDelivery(t, "after-concurrent-swaps")
 		disabled := test027NATSUpdate(loaded)
+		disabled.Revision = read(t).Revision
 		disabled.Enabled, disabled.OutboxEnabled, disabled.Realtime, disabled.JetStream.Enabled = natsPtr(false), natsPtr(false), natsPtr(false), natsPtr(false)
 		disabled.Password, disabled.Token = natsPtr(""), natsPtr("test027-token")
 		put(t, disabled, http.StatusOK)
@@ -243,6 +269,7 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 		if err != nil || loaded.Password != cfg.NATS.Password || loaded.Token != "test027-token" {
 			t.Fatalf("blank password or replacement token was not preserved: err=%v", err)
 		}
+		disabled.Revision = read(t).Revision
 		disabled.ClearPassword, disabled.ClearToken, disabled.Token = true, true, nil
 		put(t, disabled, http.StatusOK)
 		loaded, err = database.LoadNATSConfig(ctx, pool, cfg.NATS, cfg.SettingsEncryptionKey)
@@ -257,6 +284,11 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 			t.Fatal(err)
 		}
 		want := redactNATSConfig(loaded, queueClient.Status())
+		latest, err := database.ReadNATSConfig(ctx, pool, cfg.NATS, cfg.SettingsEncryptionKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want.Revision = encryptedSettingRevision(latest.Encrypted)
 		if !reflect.DeepEqual(response.Data, want) || strings.Contains(string(body), cfg.NATS.Password) || strings.Contains(string(body), "test027-token") {
 			t.Fatal("GET lost complete reliability DTO or leaked credentials")
 		}
@@ -287,6 +319,106 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 		after := getConfig()
 		if after.Enabled || after.Status.Enabled || after.Status.SubjectPrefix != loaded.SubjectPrefix {
 			t.Fatalf("restarted peer did not load the saved configuration: enabled=%t runtime=%t", after.Enabled, after.Status.Enabled)
+		}
+	})
+	t.Run("two API instances commit only the configuration they read", func(t *testing.T) {
+		current, err := database.LoadNATSConfig(ctx, pool, cfg.NATS, cfg.SettingsEncryptionKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peerRuntime := queue.New(ctx, current)
+		defer peerRuntime.Close()
+		peer := NewServer(ctx, cfg, pool, peerRuntime, nil, nil, nil)
+		defer func() {
+			shutdown, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			if err := peer.Shutdown(shutdown); err != nil {
+				t.Error(err)
+			}
+		}()
+		peerHTTP := httptest.NewServer(peer)
+		defer peerHTTP.Close()
+		submit := test027NATSUpdate(current)
+		rawStatus, rawView, err := test027HTTPRequest(ctx, peerHTTP.Client(), peerHTTP.URL, token, http.MethodGet, nil)
+		if err != nil || rawStatus != http.StatusOK {
+			t.Fatalf("peer GET status=%d err=%v", rawStatus, err)
+		}
+		submit.Revision = decodeTEST022Data[natsConfigResponse](t, rawView).Revision
+		if submit.Revision != read(t).Revision {
+			t.Fatal("replicas read different stored revisions")
+		}
+
+		// Both replicas must have completed preparation and be waiting to persist
+		// before either can commit, independent of the goroutine scheduler.
+		barrier, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer barrier.Rollback(ctx)
+		var blocker int
+		if err = barrier.QueryRow(ctx, `select pg_backend_pid() from pg_advisory_xact_lock(hashtextextended('settings:nats.config',0))`).Scan(&blocker); err != nil {
+			t.Fatal(err)
+		}
+		results := make(chan int, 2)
+		for i, origin := range []*httptest.Server{httpServer, peerHTTP} {
+			next := submit
+			next.SubjectPrefix = natsPtr([]string{"peer.one", "peer.two"}[i])
+			next.Password = natsPtr("synthetic-rotation-" + *next.SubjectPrefix)
+			body, err := json.Marshal(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			go func(origin *httptest.Server, body []byte) {
+				status, result, err := test027HTTPRequest(ctx, origin.Client(), origin.URL, token, http.MethodPut, body)
+				if err != nil || (status == http.StatusConflict && !bytes.Contains(result, []byte("NATS_CONFIG_CONFLICT"))) {
+					t.Errorf("peer PUT status=%d err=%v", status, err)
+				}
+				results <- status
+			}(origin, body)
+		}
+		waitCtx, stop := context.WithTimeout(ctx, 10*time.Second)
+		defer stop()
+		tick := time.NewTicker(15 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			var waiting int
+			if err := barrier.QueryRow(waitCtx, `select count(*) from pg_locks holder join pg_locks waiter using(locktype,database,classid,objid,objsubid)
+				where holder.pid=$1 and holder.locktype='advisory' and holder.granted and not waiter.granted`, blocker).Scan(&waiting); err != nil {
+				t.Fatal(err)
+			}
+			if waiting == 2 {
+				break
+			}
+			select {
+			case <-waitCtx.Done():
+				t.Fatal("not all peer candidates reached persistence")
+			case <-tick.C:
+			}
+		}
+		if err = barrier.Rollback(ctx); err != nil {
+			t.Fatal(err)
+		}
+		counts := map[int]int{}
+		for i := 0; i < 2; i++ {
+			counts[<-results]++
+		}
+		if counts[http.StatusOK] != 1 || counts[http.StatusConflict] != 1 {
+			t.Fatalf("peer outcomes: %v", counts)
+		}
+		winner, err := database.LoadNATSConfig(ctx, pool, cfg.NATS, cfg.SettingsEncryptionKey)
+		if err != nil || winner.Password != "synthetic-rotation-"+winner.SubjectPrefix {
+			t.Fatal("stored credentials and public config came from different candidates")
+		}
+		if submit.Revision == read(t).Revision {
+			t.Fatal("winning write retained the old revision")
+		}
+		retry := test027NATSUpdate(winner)
+		retry.Revision = read(t).Revision
+		retry.SubjectPrefix = natsPtr("peer.retry")
+		put(t, retry, http.StatusOK)
+		after, err := database.LoadNATSConfig(ctx, pool, cfg.NATS, cfg.SettingsEncryptionKey)
+		if err != nil || after.Password != winner.Password || after.SubjectPrefix != "peer.retry" {
+			t.Fatal("fresh retry failed to retain the winning credential")
 		}
 	})
 }

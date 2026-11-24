@@ -1,15 +1,23 @@
 package httpapi
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/queue"
+	"mcmods-cn-backend/internal/security"
 )
 
 type natsJetStreamConfigDTO struct {
@@ -22,6 +30,7 @@ type natsJetStreamConfigDTO struct {
 }
 
 type natsConfigResponse struct {
+	Revision      string                  `json:"revision"`
 	Enabled       bool                    `json:"enabled"`
 	URL           string                  `json:"url"`
 	Username      string                  `json:"username"`
@@ -45,6 +54,7 @@ type natsJetStreamUpdateRequest struct {
 }
 
 type natsConfigUpdateRequest struct {
+	Revision      string                      `json:"revision"`
 	Enabled       *bool                       `json:"enabled"`
 	URL           *string                     `json:"url"`
 	Username      *string                     `json:"username"`
@@ -57,6 +67,26 @@ type natsConfigUpdateRequest struct {
 	OutboxEnabled *bool                       `json:"outboxEnabled"`
 	Realtime      *bool                       `json:"realtime"`
 	JetStream     *natsJetStreamUpdateRequest `json:"jetStream"`
+}
+
+var errNATSCredentialDecision = errors.New("replace or clear saved credentials before changing their NATS destination")
+
+func natsConfigRevision(setting database.NATSConfigSetting, key string) (string, error) {
+	if len(setting.Encrypted) > 0 {
+		return encryptedSettingRevision(setting.Encrypted), nil
+	}
+	// Two uninitialized replicas may have different environment settings.
+	// A keyed revision distinguishes them without publishing a secret hash.
+	key = strings.TrimSpace(key)
+	if len(key) < 32 {
+		return encryptedSettingRevision(nil), nil
+	}
+	mac := hmac.New(sha256.New, []byte(key))
+	_, _ = mac.Write([]byte("mcmods:nats:fallback:v1\x00"))
+	if err := json.NewEncoder(mac).Encode(setting.Config); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config.NATSConfig, error) {
@@ -104,6 +134,9 @@ func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config
 	if err != nil {
 		return config.NATSConfig{}, err
 	}
+	if err := validateNATSCredentialTarget(current, internalURL, payload); err != nil {
+		return config.NATSConfig{}, err
+	}
 	return config.NATSConfig{
 		Enabled:       *payload.Enabled,
 		URL:           internalURL,
@@ -125,6 +158,61 @@ func (payload natsConfigUpdateRequest) config(current config.NATSConfig) (config
 	}, nil
 }
 
+func validateNATSCredentialTarget(current config.NATSConfig, nextURL string, payload natsConfigUpdateRequest) error {
+	hasURLPassword, hasURLToken := natsURLCredentialFlags(current.URL)
+	keepPassword := (current.Password != "" || hasURLPassword) &&
+		!payload.ClearPassword && (payload.Password == nil || *payload.Password == "")
+	keepToken := (current.Token != "" || hasURLToken) &&
+		!payload.ClearToken && (payload.Token == nil || *payload.Token == "")
+	if !keepPassword && !keepToken {
+		return nil
+	}
+	if keepPassword && strings.TrimSpace(*payload.Username) != strings.TrimSpace(current.Username) {
+		return errNATSCredentialDecision
+	}
+	// Compare every requested server. Removing a peer is safe with global
+	// credentials. A new host, port, protocol or WebSocket path needs a decision.
+	previous := make(map[string]bool)
+	for _, raw := range strings.Split(current.URL, ",") {
+		previous[natsCredentialDestination(raw)] = true
+	}
+	for _, raw := range strings.Split(nextURL, ",") {
+		if !previous[natsCredentialDestination(raw)] {
+			return errNATSCredentialDecision
+		}
+	}
+	return nil
+}
+
+func natsCredentialDestination(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if !strings.Contains(raw, "://") {
+		raw = "nats://" + raw
+	}
+	address, err := url.Parse(raw)
+	if err != nil || address.Hostname() == "" {
+		return ""
+	}
+	address.User = nil
+	host := address.Hostname()
+	if !strings.ContainsAny(host, ":%") && strings.IndexFunc(host, func(r rune) bool { return r > 127 }) < 0 {
+		host = strings.ToLower(host)
+	}
+	port := address.Port()
+	if port == "" {
+		switch address.Scheme {
+		case "ws":
+			port = "80"
+		case "wss":
+			port = "443"
+		default:
+			port = "4222"
+		}
+	}
+	address.Host = net.JoinHostPort(host, port)
+	return address.String()
+}
+
 // URL userinfo takes priority over nats.go auth options. Keep legacy per-server
 // credentials on a no-change form round trip, and update the matching auth kind
 // when the administrator explicitly replaces or clears a secret.
@@ -132,6 +220,27 @@ func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfig
 	raw := strings.TrimSpace(*payload.URL)
 	if raw == queue.RedactURL(current.URL) {
 		raw = current.URL
+	}
+	// A cluster edit may reorder or remove peers. Restore a masked URL's own
+	// userinfo only for the same retained endpoint, never on an added peer.
+	byEndpoint := make(map[string]*url.Userinfo)
+	for _, old := range strings.Split(current.URL, ",") {
+		old = strings.TrimSpace(old)
+		if !strings.Contains(old, "://") {
+			old = "nats://" + old
+		}
+		address, err := url.Parse(old)
+		if err != nil || address.Hostname() == "" {
+			continue
+		}
+		key := natsCredentialDestination(old)
+		if previous, exists := byEndpoint[key]; exists && previous.String() != address.User.String() {
+			// The same endpoint appears under different identities. Its original
+			// list can round-trip exactly; an edited list must specify its login.
+			byEndpoint[key] = nil
+		} else {
+			byEndpoint[key] = address.User
+		}
 	}
 	servers := strings.Split(raw, ",")
 	for i, server := range servers {
@@ -143,6 +252,9 @@ func mergeNATSURLCredentialUpdates(current config.NATSConfig, payload natsConfig
 		address, err := url.Parse(server)
 		if err != nil || address.Hostname() == "" {
 			return "", errors.New("invalid NATS endpoint")
+		}
+		if address.User == nil {
+			address.User = byEndpoint[natsCredentialDestination(server)]
 		}
 		if address.User != nil {
 			username := address.User.Username()
@@ -194,29 +306,58 @@ func natsURLCredentialFlags(raw string) (hasPassword, hasToken bool) {
 }
 
 func (s *Server) getNATSConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := database.LoadNATSConfig(r.Context(), s.db, s.cfg.NATS, s.cfg.SettingsEncryptionKey)
+	setting, err := database.ReadNATSConfig(r.Context(), s.db, s.cfg.NATS, s.cfg.SettingsEncryptionKey)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取 NATS 配置失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, redactNATSConfig(cfg, s.natsStatus()))
+	view := redactNATSConfig(setting.Config, s.natsStatus())
+	view.Revision, err = natsConfigRevision(setting, s.cfg.SettingsEncryptionKey)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "NATS_SETTINGS_UNAVAILABLE", "NATS settings are temporarily unavailable", 0, nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, view)
 }
 
 func (s *Server) updateNATSConfig(w http.ResponseWriter, r *http.Request) {
-	s.natsConfigMu.Lock()
-	defer s.natsConfigMu.Unlock()
-
 	var request natsConfigUpdateRequest
 	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current, err := database.LoadNATSConfig(r.Context(), s.db, s.cfg.NATS, s.cfg.SettingsEncryptionKey)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取 NATS 配置失败")
+	if request.Revision == "" {
+		writeAPIError(w, http.StatusPreconditionRequired, "NATS_CONFIG_REVISION_REQUIRED", "read the latest NATS configuration before saving", 0, nil)
 		return
 	}
-	payload, err := request.config(current)
+	s.natsConfigMu.Lock()
+	defer s.natsConfigMu.Unlock()
+	current, err := s.readNATSCandidateBase(r.Context(), currentClaims(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, errNATSConfigWriteForbidden):
+			writeError(w, http.StatusForbidden, "permission denied")
+		case errors.Is(err, pgx.ErrNoRows), errors.Is(err, errWriteAccountBanned):
+			writeCurrentWriteActorFailure(w, err)
+		default:
+			writeAPIError(w, http.StatusServiceUnavailable, "NATS_SETTINGS_UNAVAILABLE", "NATS settings are temporarily unavailable", 0, nil)
+		}
+		return
+	}
+	currentRevision, err := natsConfigRevision(current, s.cfg.SettingsEncryptionKey)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "NATS_SETTINGS_UNAVAILABLE", "NATS settings are temporarily unavailable", 0, nil)
+		return
+	}
+	if request.Revision != currentRevision {
+		writeNATSConfigConflict(w)
+		return
+	}
+	payload, err := request.config(current.Config)
+	if errors.Is(err, errNATSCredentialDecision) {
+		writeAPIError(w, http.StatusBadRequest, "NATS_CREDENTIAL_DECISION_REQUIRED", err.Error(), 0, nil)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "NATS 配置格式不正确")
 		return
@@ -224,30 +365,30 @@ func (s *Server) updateNATSConfig(w http.ResponseWriter, r *http.Request) {
 	payload = queue.NormalizeConfig(payload)
 	raw, err := s.sealSystemSetting(payload)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "NATS 配置格式不正确")
+		writeAPIError(w, http.StatusServiceUnavailable, "NATS_SETTINGS_UNAVAILABLE", "NATS settings are temporarily unavailable", 0, nil)
 		return
 	}
 	if s.queue == nil {
 		writeError(w, http.StatusServiceUnavailable, "NATS 运行时不可用，原配置未更改")
 		return
 	}
+	var stored []byte
 	var persistenceErr error
 	err = s.queue.ReconfigureWithPersistence(payload, func(config.NATSConfig) error {
-		_, persistenceErr = s.db.Exec(
-			r.Context(),
-			`insert into system_settings (key, value, updated_by, updated_at)
-			 values ('nats.config', $1::jsonb, $2, now())
-			 on conflict (key) do update
-			 set value = excluded.value, updated_by = excluded.updated_by, updated_at = now()`,
-			raw,
-			currentClaims(r).Subject,
-		)
+		stored, persistenceErr = s.persistNATSCandidate(r.Context(), current.Encrypted, raw, currentClaims(r))
 		return persistenceErr
 	})
 	if err != nil {
-		if persistenceErr != nil {
+		switch {
+		case errors.Is(persistenceErr, errNATSConfigConflict):
+			writeNATSConfigConflict(w)
+		case errors.Is(persistenceErr, errNATSConfigWriteForbidden):
+			writeError(w, http.StatusForbidden, "permission denied")
+		case errors.Is(persistenceErr, pgx.ErrNoRows), errors.Is(persistenceErr, errWriteAccountBanned):
+			writeCurrentWriteActorFailure(w, persistenceErr)
+		case persistenceErr != nil:
 			writeError(w, http.StatusInternalServerError, "保存 NATS 配置失败，原配置仍在使用")
-		} else {
+		default:
 			writeError(w, http.StatusBadGateway, "应用 NATS 配置失败，原配置仍在使用")
 		}
 		return
@@ -256,7 +397,73 @@ func (s *Server) updateNATSConfig(w http.ResponseWriter, r *http.Request) {
 		"enabled": payload.Enabled, "outboxEnabled": payload.OutboxEnabled, "realtime": payload.Realtime,
 		"jetStreamEnabled": payload.JetStream.Enabled, "tasks": len(payload.Tasks),
 	})
-	writeJSON(w, http.StatusOK, redactNATSConfig(payload, s.natsStatus()))
+	view := redactNATSConfig(payload, s.natsStatus())
+	view.Revision = encryptedSettingRevision(stored)
+	writeJSON(w, http.StatusOK, view)
+}
+
+var (
+	errNATSConfigConflict       = errors.New("NATS configuration changed since it was read")
+	errNATSConfigWriteForbidden = errors.New("changing NATS settings requires admin.config.write")
+)
+
+func resolveNATSWriter(ctx context.Context, tx pgx.Tx, claims security.Claims) (security.Claims, error) {
+	actor, err := resolveCurrentWriteActorTx(ctx, tx, claims)
+	if err != nil {
+		return security.Claims{}, err
+	}
+	if !claimsAllow(actor, "admin.config.write") {
+		return security.Claims{}, errNATSConfigWriteForbidden
+	}
+	return actor, nil
+}
+
+func (s *Server) readNATSCandidateBase(ctx context.Context, claims security.Claims) (database.NATSConfigSetting, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return database.NATSConfigSetting{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = resolveNATSWriter(ctx, tx, claims); err != nil {
+		return database.NATSConfigSetting{}, err
+	}
+	return database.ReadNATSConfig(ctx, tx, s.cfg.NATS, s.cfg.SettingsEncryptionKey)
+}
+
+func (s *Server) persistNATSCandidate(ctx context.Context, previous []byte, sealed string, claims security.Claims) ([]byte, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	// Acquire the DB connection and lock after preparing the candidate. Queue
+	// recovery loads settings under its own lock, including on one-connection pools.
+	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('settings:nats.config',0))`); err != nil {
+		return nil, err
+	}
+	actor, err := resolveNATSWriter(ctx, tx, claims)
+	if err != nil {
+		return nil, err
+	}
+	var saved []byte
+	if len(previous) == 0 {
+		err = tx.QueryRow(ctx, `insert into system_settings(key,value,updated_by,updated_at)
+			values('nats.config',$1::jsonb,$2,now()) on conflict(key) do nothing returning value`, sealed, actor.Subject).Scan(&saved)
+	} else {
+		err = tx.QueryRow(ctx, `update system_settings set value=$1::jsonb,updated_by=$2,updated_at=now()
+			where key='nats.config' and value=$3::jsonb returning value`, sealed, actor.Subject, previous).Scan(&saved)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNATSConfigConflict
+	}
+	if err != nil {
+		return nil, err
+	}
+	return saved, tx.Commit(ctx)
+}
+
+func writeNATSConfigConflict(w http.ResponseWriter) {
+	writeAPIError(w, http.StatusConflict, "NATS_CONFIG_CONFLICT", errNATSConfigConflict.Error(), 0, nil)
 }
 
 func (s *Server) natsStatus() queue.Status {
