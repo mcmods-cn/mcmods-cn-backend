@@ -63,7 +63,7 @@ latest_recipe_observations as (
 		coalesce(recipe.canonical_source_id,observation.source_recipe_id),observation.source_id_kind,
 		(recipe.canonical_source_id is not null),recipe.semantic_fingerprint,
 		observation.snapshot_id,observation.revision_id,observation.mod_site_id,
-		coalesce(override.note,''),override.layout_override,false
+		entity.default_locale,false
 	from latest_recipe_observations observation
 	join recipes recipe on recipe.entity_id=observation.entity_id
 	join catalog_entities entity on entity.id=recipe.entity_id and entity.status='active'
