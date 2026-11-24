@@ -26,7 +26,10 @@ let stage='native login';
 const stages=[];
 function step(value){stage=value;stages.push(value)}
 const draftResponses=[];
+let latestUploadWrite=0;
 q.on('response',r=>{
+ const pathname=new URL(r.url()).pathname;
+ if(r.request().method()==='POST'&&/^\/api\/v1\/users\/me\/(?:oss\/uploads\/|files\/presign)/.test(pathname))latestUploadWrite=Date.now();
  if(r.request().method()==='POST'&&new URL(r.url()).pathname==='/api/v1/users/me/drafts')draftResponses.push(r)
 });
 try{
@@ -50,6 +53,9 @@ try{
  await sleep(Math.max(0,waitUntil-Date.now()));
  for(const [i,prof] of cfg.profiles.entries()){const status=await q.evaluate(async url=>(await fetch(url,{cache:'no-store',credentials:'same-origin'})).status,initial[i].src);assert.equal(status,403);await q.goto(origin+prof.editPath,{waitUntil:'domcontentloaded'});const renewed=await decoded();assert.notEqual(renewed.src,initial[i].src);journey.push({action:'initial-and-expired',kind:prof.kind,wallClockExpiredStatus:status,freshSignedBytes:[renewed.width,renewed.height]})}
  for(const [action,prof] of [...cfg.profiles.map(p=>['edit',p]),...cfg.profiles.map(p=>['create',p])]){
+  // The standard upload policy permits five writes per rolling minute.
+  // Each independent edit exercises presign, completion and draft preview signing.
+  if(latestUploadWrite)await sleep(Math.max(0,latestUploadWrite+61000-Date.now()));
   n++;const base=prof.kind==='team'?'teams':'authors';
   await q.goto(origin+(action==='edit'?prof.editPath:'/'+base+'/new'),{waitUntil:'domcontentloaded'});
   const f=q.locator('main form'),name=f.locator('input[required]').first();await name.waitFor();
@@ -73,11 +79,12 @@ try{
    const draftResponse=draftResponses.find(matches)||await q.waitForResponse(matches,{timeout:45000});
    assert.ok(draftResponse.ok());const snapshot=draftResponse.request().postDataJSON().payload;assert.equal(new URL(snapshot.avatarUrl).search,'');
    const draftId=(await draftResponse.json()).data.id;assert.ok(draftId);step(phase+' resume draft');
-   const [rest]=await Promise.all([response('GET','/api/v1/users/me/drafts/'+draftId),q.goto(origin+prof.editPath+'?draft='+encodeURIComponent(draftId),{waitUntil:'domcontentloaded'})]);
+   const [rest,preview]=await Promise.all([response('GET','/api/v1/users/me/drafts/'+draftId),q.waitForResponse(r=>r.request().method()==='POST'&&new URL(r.url()).pathname==='/api/v1/users/me/files/presign'&&r.request().postDataJSON()?.fileId===fileId,{timeout:45000}),q.goto(origin+prof.editPath+'?draft='+encodeURIComponent(draftId),{waitUntil:'domcontentloaded'})]);
    assert.equal(rest.status(),200);const restored=(await rest.json()).data?.payload;assert.equal(restored.avatarFileId,fileId);assert.equal(restored.avatarUrl,snapshot.avatarUrl);
    step(phase+' new draft image preview');
-   const retry=f.getByRole('button',{name:'Retry',exact:true});
-   await retry.waitFor({state:'visible'});await retry.click();await decoded();
+   assert.equal(preview.status(),200);const renewed=(await preview.json()).data.url;assert.ok(new URL(renewed).search);
+   await q.waitForFunction(src=>Array.from(document.images).some(i=>i.currentSrc===src&&i.complete&&i.naturalWidth===256&&i.naturalHeight===256),renewed,{timeout:45000});
+   journey.push({action:'restored-draft',kind:prof.kind,fileId,presignStatus:preview.status(),unsignedPersistedReference:true,decoded:[256,256]});
   }
   step(phase+' submit pending creator change');
   const [saved]=await Promise.all([response(action==='edit'?'PUT':'POST','/api/v1/creators'+(action==='edit'?'/'+prof.publicId:'')),f.locator('header button[type=submit]').click()]);assert.equal(saved.status(),action==='edit'?200:201);
@@ -90,7 +97,7 @@ try{
   const receipt=path.join(run,'review-result-'+label+'.json');for(let i=0;i<300;i++){try{await fs.access(receipt);break}catch{await sleep(175)}}
   const outcome=JSON.parse(await fs.readFile(receipt));assert.equal(outcome.status,'approved');assert.equal(outcome.publishedRevisionId,revisionId);assert.equal(outcome.temporarySignaturePersisted,false);
   step(phase+' view approved avatar');
-  await q.goto(origin+'/'+base+'/'+creatorId,{waitUntil:'domcontentloaded'});const visible=await decoded();
+  await q.goto(origin+'/'+base+'/'+creatorId,{waitUntil:'domcontentloaded'});const visible=await decoded();assert.deepEqual([visible.width,visible.height],[256,256]);
   journey.push({action,kind:prof.kind,reviewStatus:'approved',publicId:creatorId,fileId,publishedRevisionId:revisionId,transport:[saved.status(),c.status()],dimensions:[visible.width,visible.height],stableReference:!new URL(payload.avatarUrl).search});
  }
  await q.screenshot({path:path.join(run,'reviewed-team.png')});await fs.writeFile(path.join(run,'browser-result.json'),JSON.stringify({browser:b.version(),journey,requests:captures},null,2),{mode:0o600,flag:'wx'});
