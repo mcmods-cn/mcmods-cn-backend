@@ -127,7 +127,7 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 	}
 	claims := currentClaims(r)
 	if r.Method == http.MethodGet {
-		items, listErr := s.queryProjectEditorApplications(r.Context(), 0, target.RouteID, claims.Subject, "")
+		items, listErr := queryProjectEditorApplications(r.Context(), s.db, 0, target.RouteID, claims.Subject, "")
 		if listErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load editor applications")
 			return
@@ -189,8 +189,12 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 	}
 	for _, fileID := range request.AttachmentIDs {
 		file, lookupErr := lookupReviewAttachment(r.Context(), tx, reviewAttachmentLookup{Kind: reviewAttachmentByUploader, UploaderID: claims.Subject}, fileID)
-		if lookupErr != nil {
+		if errors.Is(lookupErr, pgx.ErrNoRows) {
 			writeError(w, http.StatusBadRequest, "application attachment does not exist or is not owned by this user")
+			return
+		}
+		if lookupErr != nil {
+			writeError(w, http.StatusServiceUnavailable, "failed to read application attachment")
 			return
 		}
 		if _, err = tx.Exec(r.Context(), `insert into project_editor_application_attachments(application_id,oss_file_id)
@@ -199,13 +203,13 @@ func (s *Server) projectEditorApplications(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to submit editor application")
-		return
-	}
-	items, err := s.queryProjectEditorApplications(r.Context(), applicationID, 0, 0, "")
+	items, err := queryProjectEditorApplications(r.Context(), tx, applicationID, 0, 0, "")
 	if err != nil || len(items) != 1 {
 		writeError(w, http.StatusInternalServerError, "failed to read submitted editor application")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to submit editor application")
 		return
 	}
 	writeJSON(w, http.StatusCreated, items[0])
@@ -217,7 +221,7 @@ func (s *Server) adminProjectEditorApplications(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	items, hasMore, err := s.queryProjectEditorApplicationPage(r.Context(), request)
+	items, hasMore, err := queryProjectEditorApplicationPage(r.Context(), s.db, request)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load editor applications")
 		return
@@ -431,17 +435,21 @@ func (s *Server) presignProjectEditorApplicationAttachment(w http.ResponseWriter
 	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: file.ObjectKey})
 }
 
-func (s *Server) queryProjectEditorApplications(ctx context.Context, applicationID, targetRouteID, userID int64, status string) ([]projectEditorApplicationResponse, error) {
-	items, _, err := s.queryProjectEditorApplicationsBounded(ctx, applicationID, targetRouteID, userID, status, nil, 0, 0)
+type projectEditorApplicationRows interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func queryProjectEditorApplications(ctx context.Context, db projectEditorApplicationRows, applicationID, targetRouteID, userID int64, status string) ([]projectEditorApplicationResponse, error) {
+	items, _, err := queryProjectEditorApplicationsBounded(ctx, db, applicationID, targetRouteID, userID, status, nil, 0, 0)
 	return items, err
 }
 
-func (s *Server) queryProjectEditorApplicationPage(ctx context.Context, request projectEditorApplicationPageRequest) ([]projectEditorApplicationResponse, bool, error) {
-	return s.queryProjectEditorApplicationsBounded(ctx, 0, 0, 0, request.Status, request.Cursor, request.Limit+1, request.Limit)
+func queryProjectEditorApplicationPage(ctx context.Context, db projectEditorApplicationRows, request projectEditorApplicationPageRequest) ([]projectEditorApplicationResponse, bool, error) {
+	return queryProjectEditorApplicationsBounded(ctx, db, 0, 0, 0, request.Status, request.Cursor, request.Limit+1, request.Limit)
 }
 
-func (s *Server) queryProjectEditorApplicationsBounded(
-	ctx context.Context,
+func queryProjectEditorApplicationsBounded(
+	ctx context.Context, db projectEditorApplicationRows,
 	applicationID, targetRouteID, userID int64,
 	status string,
 	cursor *projectEditorApplicationPageCursor,
@@ -453,7 +461,7 @@ func (s *Server) queryProjectEditorApplicationsBounded(
 		cursorTime = &cursor.CreatedAt
 		cursorID = cursor.ID
 	}
-	rows, err := s.db.Query(ctx, `select application.public_id,application.id,route.entity_type,route.public_id,
+	rows, err := db.Query(ctx, `select application.public_id,application.id,route.entity_type,route.public_id,
 		coalesce(target_mod.primary_name,target_modpack.primary_name,target_simple.primary_name,target_server.name,
 			target_blueprint.title,target_skin.display_name,target_post.title,''),
 		route.canonical_path,account.public_id,account.username,application.proof_markdown,application.status,
@@ -502,7 +510,7 @@ func (s *Server) queryProjectEditorApplicationsBounded(
 		items = items[:resultLimit]
 		applicationIDs = applicationIDs[:resultLimit]
 	}
-	attachments, err := s.projectEditorApplicationAttachments(ctx, applicationIDs)
+	attachments, err := projectEditorApplicationAttachments(ctx, db, applicationIDs)
 	if err != nil {
 		return nil, false, err
 	}
@@ -515,12 +523,12 @@ func (s *Server) queryProjectEditorApplicationsBounded(
 	return items, hasMore, nil
 }
 
-func (s *Server) projectEditorApplicationAttachments(ctx context.Context, applicationIDs []int64) (map[int64][]projectEditorApplicationAttachment, error) {
+func projectEditorApplicationAttachments(ctx context.Context, db projectEditorApplicationRows, applicationIDs []int64) (map[int64][]projectEditorApplicationAttachment, error) {
 	result := make(map[int64][]projectEditorApplicationAttachment, len(applicationIDs))
 	if len(applicationIDs) == 0 {
 		return result, nil
 	}
-	rows, err := s.db.Query(ctx, `select attachment.application_id,file.public_id,file.original_name,file.object_key,file.size_bytes
+	rows, err := db.Query(ctx, `select attachment.application_id,file.public_id,file.original_name,file.object_key,file.size_bytes
 		from project_editor_application_attachments attachment join oss_files file on file.id=attachment.oss_file_id
 		where attachment.application_id=any($1::bigint[]) and `+safeReviewAttachmentPredicate+`
 		order by attachment.application_id,file.id`, applicationIDs)

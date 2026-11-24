@@ -72,7 +72,7 @@ func TestProjectEditorApplicationListUsesConstantQueriesIntegration(t *testing.T
 	counter.queries.Store(0)
 	queryContext, cancelQuery := context.WithTimeout(ctx, 2*time.Second)
 	defer cancelQuery()
-	items, err := (&Server{db: pool}).queryProjectEditorApplications(queryContext, 0, 0, 0, "approved")
+	items, err := queryProjectEditorApplications(queryContext, pool, 0, 0, 0, "approved")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestProjectEditorApplicationListUsesConstantQueriesIntegration(t *testing.T
 	pageSizes := make([]int, 0, 3)
 	for {
 		counter.queries.Store(0)
-		page, hasMore, pageErr := (&Server{db: pool}).queryProjectEditorApplicationPage(queryContext, request)
+		page, hasMore, pageErr := queryProjectEditorApplicationPage(queryContext, pool, request)
 		if pageErr != nil {
 			t.Fatal(pageErr)
 		}

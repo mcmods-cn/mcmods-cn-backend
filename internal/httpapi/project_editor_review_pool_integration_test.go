@@ -63,14 +63,17 @@ func TestProjectEditorReviewDoesNotReenterPoolDuringTransactionIntegration(t *te
     select id,99480001,'synthetic proof' from public_routes where entity_type='mod' and internal_id=99480003 returning public_id`).Scan(&applicationID); err != nil {
 				t.Fatal(err)
 			}
-			queryCtx, queryCancel := context.WithTimeout(ctx, 2*time.Second)
-			defer queryCancel()
 			review := func() *httptest.ResponseRecorder {
+				queryCtx, queryCancel := context.WithTimeout(ctx, 2*time.Second)
+				defer queryCancel()
 				req := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/project-editor-applications/"+applicationID, strings.NewReader(`{"status":"`+decision+`","note":"synthetic review"}`))
 				req.SetPathValue("id", applicationID)
 				req = req.WithContext(context.WithValue(queryCtx, claimsContextKey, claims))
 				response := httptest.NewRecorder()
 				server.reviewProjectEditorApplication(response, req)
+				if queryCtx.Err() != nil {
+					t.Fatal("review held its transaction while waiting on the same pool")
+				}
 				return response
 			}
 			if decision == "approved" {
@@ -86,13 +89,31 @@ func TestProjectEditorReviewDoesNotReenterPoolDuringTransactionIntegration(t *te
 			if response := review(); response.Code != http.StatusOK {
 				t.Fatalf("single-connection review returned %d: %s", response.Code, response.Body.String())
 			}
-			if queryCtx.Err() != nil {
-				t.Fatal("review held its transaction while waiting on the same pool")
-			}
 			var status string
 			if err := pool.QueryRow(ctx, `select status from project_editor_applications where public_id=$1`, applicationID).Scan(&status); err != nil || status != decision {
 				t.Fatal("review did not persist exact decision")
 			}
 		})
+	}
+}
+
+func TestEditorApplicationReadFailureRollsBackSubmissionIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "project.editor.apply")
+	path := "/api/v1/projects/mod/" + f.modCode + "/editor-applications"
+	submission := map[string]string{"proofMarkdown": "Synthetic project editor application"}
+	if _, err := f.db.Exec(f.ctx, `alter table project_editor_application_attachments rename to unavailable_editor_attachments`); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, f.otherEditor, http.MethodPost, path, submission, http.StatusInternalServerError)
+	if got := f.number(t, `select count(*) from project_editor_applications`); got != 0 {
+		t.Fatalf("failed submission left %d application(s)", got)
+	}
+	if _, err := f.db.Exec(f.ctx, `alter table unavailable_editor_attachments rename to project_editor_application_attachments`); err != nil {
+		t.Fatal(err)
+	}
+	created := decodeTEST022Data[projectEditorApplicationResponse](t, f.require(t, f.otherEditor, http.MethodPost, path, submission, http.StatusCreated))
+	if created.ID == "" || created.Status != "pending" || created.ProofMarkdown != submission["proofMarkdown"] {
+		t.Fatalf("incomplete application after retry: %+v", created)
 	}
 }
