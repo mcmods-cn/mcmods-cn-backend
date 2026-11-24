@@ -51,6 +51,22 @@ func TestPublicUserCardUsesCurrentPresencePreferenceIntegration(t *testing.T) {
 			t.Fatalf("show=%t card=%s profile=%s want=%s", state.show, card.OnlineStatus, profile.OnlineStatus, state.want)
 		}
 	}
+	// Instance 1 already has a warm card. Each successful settings change at
+	// instance 0 must control exactly which slots anonymous readers see.
+	for _, selected := range []string{"active_days", "", "follower_count"} {
+		slots := []string{selected, "", "", "", "", ""}
+		f.requireAt(t, 0, f.editor, http.MethodPut, settingsPath, map[string]any{"publicCardStatSlots": slots}, http.StatusOK)
+		card := decodeTEST022Data[publicUserCard](t, readCard(cardPath, http.StatusOK))
+		if len(card.Statistics) != len(slots) {
+			t.Fatalf("card has %d slots", len(card.Statistics))
+		}
+		for i, key := range slots {
+			stat := card.Statistics[i]
+			if key == "" && stat != nil || key != "" && (stat == nil || stat.Key != key) {
+				t.Fatalf("after selecting %q at instance 0, anonymous slot %d at instance 1 = %+v", selected, i, stat)
+			}
+		}
+	}
 	readCard("/api/v1/users/not-a-user/card", http.StatusBadRequest)
 	if _, err := f.db.Exec(f.ctx, "update users set status='deleted' where id=$1", f.userIDs[f.editor]); err != nil {
 		t.Fatal(err)

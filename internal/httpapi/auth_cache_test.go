@@ -46,7 +46,7 @@ func TestAuthenticationRateDimensionsNormalizeAndHash(t *testing.T) {
 }
 
 func TestPublicUserCardKeyIsPermissionNeutral(t *testing.T) {
-	if got := publicUserCardCacheKey(42); got != "user-card:public:42" {
+	if got := publicUserCardCacheKey(42); got != "user-card:metrics:v1:42" {
 		t.Fatalf("unexpected user card key %q", got)
 	}
 }

@@ -45,12 +45,13 @@ type publicUserCard struct {
 	Statistics   []*publicCardStatistic `json:"statistics"`
 }
 
-type cachedPublicUserCard struct {
-	Card publicUserCard `json:"card"`
+type publicCardMetrics struct {
+	Level  userLevelSummary `json:"level"`
+	Values map[string]int64 `json:"values"`
 }
 
 func publicUserCardCacheKey(userID int64) string {
-	return fmt.Sprintf("user-card:public:%d", userID)
+	return fmt.Sprintf("user-card:metrics:v1:%d", userID)
 }
 
 func normalizePublicCardSlots(values []string) ([]string, error) {
@@ -79,11 +80,13 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
 	var userID int64
+	response := publicUserCard{ID: publicID}
 	var status string
+	var slots []string
 	var showOnline bool
-	err := s.db.QueryRow(r.Context(), `select account.id,account.status,account.show_online_status
+	err := s.db.QueryRow(r.Context(), `select account.id,account.status,account.show_online_status,account.username,account.avatar_url,account.public_card_stat_slots
 		from public_routes route join users account on account.id=route.internal_id
-		where route.public_id=$1 and route.entity_type='user'`, publicID).Scan(&userID, &status, &showOnline)
+		where route.public_id=$1 and route.entity_type='user'`, publicID).Scan(&userID, &status, &showOnline, &response.Username, &response.AvatarURL, &slots)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
 		return
@@ -97,7 +100,7 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	loader := func(ctx context.Context) ([]byte, error) {
-		cached, loadErr := s.loadPublicUserCard(ctx, userID, publicID)
+		cached, loadErr := s.loadPublicCardMetrics(ctx, userID)
 		if loadErr != nil {
 			return nil, loadErr
 		}
@@ -109,7 +112,7 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 	} else {
 		raw, err = loader(r.Context())
 	}
-	if err == pgx.ErrNoRows {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "user not found")
 		return
 	}
@@ -117,13 +120,19 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load user card")
 		return
 	}
-	var cached cachedPublicUserCard
+	var cached publicCardMetrics
 	if err = json.Unmarshal(raw, &cached); err != nil {
 		s.cache.Delete(r.Context(), publicUserCardCacheKey(userID))
 		writeError(w, http.StatusServiceUnavailable, "failed to decode user card cache")
 		return
 	}
-	response := cached.Card
+	response.Level = cached.Level
+	response.Statistics = make([]*publicCardStatistic, 6)
+	for i, key := range slots[:min(len(slots), len(response.Statistics))] {
+		if value, ok := cached.Values[key]; ok {
+			response.Statistics[i] = &publicCardStatistic{Key: key, Value: value}
+		}
+	}
 	onlineActive := false
 	if showOnline {
 		onlineActive = s.cache.UsersOnline(r.Context(), []int64{userID}, time.Now(), s.cache.Config().PresenceTTL)[userID]
@@ -138,31 +147,15 @@ func (s *Server) userCard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func (s *Server) loadPublicUserCard(ctx context.Context, userID int64, publicID string) (cachedPublicUserCard, error) {
-	var cached cachedPublicUserCard
-	var slots []string
-	cached.Card.ID = publicID
-	err := s.db.QueryRow(ctx, `select username,avatar_url,public_card_stat_slots
-		from users where id=$1 and status<>'deleted'`, userID).
-		Scan(&cached.Card.Username, &cached.Card.AvatarURL, &slots)
+func (s *Server) loadPublicCardMetrics(ctx context.Context, userID int64) (publicCardMetrics, error) {
+	var metrics publicCardMetrics
+	var err error
+	metrics.Level, err = s.loadUserLevelSummary(ctx, userID)
 	if err != nil {
-		return cached, err
+		return metrics, err
 	}
-	cached.Card.Level, err = s.loadUserLevelSummary(ctx, userID)
-	if err != nil {
-		return cached, err
-	}
-	values, err := s.loadPublicCardStatisticValues(ctx, userID)
-	if err != nil {
-		return cached, err
-	}
-	cached.Card.Statistics = make([]*publicCardStatistic, 6)
-	for index := 0; index < len(cached.Card.Statistics) && index < len(slots); index++ {
-		if slots[index] != "" {
-			cached.Card.Statistics[index] = &publicCardStatistic{Key: slots[index], Value: values[slots[index]]}
-		}
-	}
-	return cached, nil
+	metrics.Values, err = s.loadPublicCardStatisticValues(ctx, userID)
+	return metrics, err
 }
 
 func (s *Server) loadUserLevelSummary(ctx context.Context, userID int64) (userLevelSummary, error) {
