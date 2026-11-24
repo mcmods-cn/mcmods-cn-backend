@@ -65,7 +65,8 @@ func TestAuditCMP003MetadataImportAndConfigurationActivityAtomic(t *testing.T) {
 				method = http.MethodPut
 				want = 200
 				action = activity.ActionEdit
-				cfg := defaultModImportConfig()
+				grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "admin.config.read")
+				cfg := decodeTEST022Data[modImportSettingsDocument](t, f.require(t, f.editor, http.MethodGet, path, nil, http.StatusOK))
 				cfg.RequestTimeoutSeconds = 27
 				body = cfg
 			}

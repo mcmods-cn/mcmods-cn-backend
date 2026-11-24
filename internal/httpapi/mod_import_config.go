@@ -38,6 +38,11 @@ type modImportConfig struct {
 	GitHub                modImportProviderConfig `json:"github"`
 }
 
+type modImportSettingsDocument struct {
+	modImportConfig
+	Revision string `json:"revision"`
+}
+
 func defaultModImportConfig() modImportConfig {
 	return modImportConfig{
 		UserAgent:             "mcmods-cn/1.0 (https://mcmods.cn)",
@@ -61,12 +66,12 @@ func defaultModImportConfig() modImportConfig {
 }
 
 func (s *Server) getModImportConfig(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.modImportConfigFromSettings(r.Context())
+	cfg, revision, err := s.readModImportSettings(r.Context(), s.db)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组数据源配置失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, redactModImportConfig(cfg))
+	writeJSON(w, http.StatusOK, modImportSettingsDocument{redactModImportConfig(cfg), revision})
 }
 
 func (s *Server) publicModImportProviders(w http.ResponseWriter, r *http.Request) {
@@ -83,36 +88,51 @@ func (s *Server) publicModImportProviders(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) updateModImportConfig(w http.ResponseWriter, r *http.Request) {
-	var payload modImportConfig
-	if err := decodeJSON(r, &payload); err != nil {
+	var request modImportSettingsDocument
+	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	current, err := s.modImportConfigFromSettings(r.Context())
+	if request.Revision == "" {
+		writeAPIError(w, http.StatusPreconditionRequired, "MOD_IMPORT_CONFIG_REVISION_REQUIRED", "请先读取当前数据源配置", 0, nil)
+		return
+	}
+	ctx := r.Context()
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "保存模组数据源配置失败")
+		return
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, modImportConfigSettingKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "保存模组数据源配置失败")
+		return
+	}
+	current, revision, err := s.readModImportSettings(ctx, tx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取模组数据源配置失败")
 		return
 	}
+	if request.Revision != revision {
+		writeAPIError(w, http.StatusConflict, "MOD_IMPORT_CONFIG_CONFLICT", "数据源配置已更改，请核对最新配置", 0, nil)
+		return
+	}
+	payload := request.modImportConfig
 	if err = prepareModImportConfigUpdate(&payload, current); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	raw, err := s.sealSystemSetting(payload)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "模组数据源配置格式不正确")
-		return
-	}
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存模组数据源配置失败")
 		return
 	}
-	defer tx.Rollback(r.Context())
-	if _, err = tx.Exec(r.Context(),
+	var stored []byte
+	if err = tx.QueryRow(ctx,
 		`insert into system_settings(key,value,updated_by,updated_at) values($1,$2::jsonb,$3,now())
-		 on conflict(key) do update set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`,
+		 on conflict(key) do update set value=excluded.value,updated_by=excluded.updated_by,updated_at=now() returning value`,
 		modImportConfigSettingKey, raw, currentClaims(r).Subject,
-	); err != nil {
+	).Scan(&stored); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存模组数据源配置失败")
 		return
 	}
@@ -127,27 +147,34 @@ func (s *Server) updateModImportConfig(w http.ResponseWriter, r *http.Request) {
 	s.writeAppLog(r.Context(), "admin_operation", "info", "update_mod_import_config", modImportConfigSettingKey, currentClaims(r).Subject, r, http.StatusOK, 0, map[string]any{
 		"modrinth": payload.Modrinth.Enabled, "curseforge": payload.CurseForge.Enabled, "github": payload.GitHub.Enabled,
 	})
-	writeJSON(w, http.StatusOK, redactModImportConfig(payload))
+	writeJSON(w, http.StatusOK, modImportSettingsDocument{redactModImportConfig(payload), encryptedSettingRevision(stored)})
 }
 
 func (s *Server) modImportConfigFromSettings(ctx context.Context) (modImportConfig, error) {
-	cfg := defaultModImportConfig()
+	cfg, _, err := s.readModImportSettings(ctx, s.db)
+	return cfg, err
+}
+
+func (s *Server) readModImportSettings(ctx context.Context, reader databaseQuery) (modImportConfig, string, error) {
+	var cfg modImportConfig
 	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key=$1`, modImportConfigSettingKey).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		_ = normalizeModImportConfig(&cfg)
-		return cfg, nil
-	}
-	if err != nil {
-		return modImportConfig{}, err
-	}
-	if err = s.openSystemSetting(raw, &cfg); err != nil {
-		return modImportConfig{}, err
+	err := reader.QueryRow(ctx, `select value from system_settings where key=$1`, modImportConfigSettingKey).Scan(&raw)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		cfg = defaultModImportConfig()
+	case err != nil:
+		return modImportConfig{}, "", err
+	default:
+		// In a saved configuration an absent secret was deliberately cleared.
+		// Environment credentials only supply the initial unsaved defaults.
+		if err = s.openSystemSetting(raw, &cfg); err != nil {
+			return modImportConfig{}, "", err
+		}
 	}
 	if err = normalizeModImportConfig(&cfg); err != nil {
-		return modImportConfig{}, err
+		return modImportConfig{}, "", err
 	}
-	return cfg, nil
+	return cfg, encryptedSettingRevision(raw), nil
 }
 
 func normalizeModImportConfig(cfg *modImportConfig) error {
