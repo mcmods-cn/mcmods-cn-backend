@@ -298,6 +298,7 @@ func TestTEST017CategoryMustBelongToTheTargetBeforeProposalHTTPIntegration(t *te
 	if err := f.db.QueryRow(f.ctx, `insert into project_changelog_categories(object_route_id,default_locale,created_by) select id,'en-US',$2 from public_routes where entity_type='mod' and internal_id=$1 returning public_id`, f.otherModID, f.userIDs[f.otherEditor]).Scan(&category); err != nil {
 		t.Fatal(err)
 	}
+	published := f.detail(t, f.editor, id, http.StatusOK).PublishedRevisionID
 	for _, categoryID := range []string{category, randomCatalogPublicID()} {
 		for _, mutation := range []struct {
 			method, path string
@@ -308,6 +309,9 @@ func TestTEST017CategoryMustBelongToTheTargetBeforeProposalHTTPIntegration(t *te
 		} {
 			snapshot := test017Snapshot("cannot submit cross-target category")
 			snapshot.CategoryID = categoryID
+			if mutation.method == http.MethodPut {
+				snapshot.BaseRevisionID = published
+			}
 			before := f.facts(t)
 			f.require(t, f.editor, mutation.method, mutation.path, snapshot, mutation.want)
 			f.unchanged(t, before)
