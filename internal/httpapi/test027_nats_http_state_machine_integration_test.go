@@ -39,6 +39,8 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 	})
 	queueClient := queue.New(ctx, cfg.NATS)
 	defer queueClient.Close()
+	peerQueue := queue.New(ctx, cfg.NATS)
+	defer peerQueue.Close()
 	server := NewServer(ctx, cfg, pool, queueClient, nil, nil, nil)
 	defer func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -253,6 +255,34 @@ func TestTEST027NATSHTTPConfigurationPersistenceAndFailureIsolationIntegration(t
 		want := redactNATSConfig(loaded, queueClient.Status())
 		if !reflect.DeepEqual(response.Data, want) || strings.Contains(string(body), cfg.NATS.Password) || strings.Contains(string(body), "test027-token") {
 			t.Fatal("GET lost complete reliability DTO or leaked credentials")
+		}
+	})
+	t.Run("a peer can distinguish the saved configuration from its own runtime", func(t *testing.T) {
+		peer := &Server{db: pool, cfg: cfg, queue: peerQueue}
+		getConfig := func() natsConfigResponse {
+			t.Helper()
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/admin/config/nats", nil).WithContext(ctx)
+			response := httptest.NewRecorder()
+			peer.getNATSConfig(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("peer read status=%d", response.Code)
+			}
+			return decodeTEST022Data[natsConfigResponse](t, response.Body.Bytes())
+		}
+		before := getConfig()
+		if before.Enabled || !before.Status.Enabled || before.Status.SubjectPrefix != cfg.NATS.SubjectPrefix {
+			t.Fatalf("stale peer did not expose both saved and running state: enabled=%t runtime=%t", before.Enabled, before.Status.Enabled)
+		}
+		loaded, err := database.LoadNATSConfig(ctx, pool, cfg.NATS, cfg.SettingsEncryptionKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restarted := queue.New(ctx, loaded)
+		defer restarted.Close()
+		peer.queue = restarted
+		after := getConfig()
+		if after.Enabled || after.Status.Enabled || after.Status.SubjectPrefix != loaded.SubjectPrefix {
+			t.Fatalf("restarted peer did not load the saved configuration: enabled=%t runtime=%t", after.Enabled, after.Status.Enabled)
 		}
 	})
 }
