@@ -214,36 +214,14 @@ func modContentSchemaStatements() []string {
 				when 'fluid' then '流體' when 'skill' then '技能' when 'chemical' then '化學品' else i18n_key end),
 				'groups',case when code='skill' then '[{"code":"skill","names":{"en-US":"Skill properties","zh-CN":"技能属性","zh-TW":"技能屬性"},"fields":[{"code":"cd","type":"number","names":{"en-US":"Cooldown","zh-CN":"冷却时间（CD）","zh-TW":"冷卻時間（CD）"},"paths":[["cd"],["skill","cd"]]}]}]'::jsonb
 					when code='entity' then '[{"code":"entity","names":{"en-US":"Entity properties","zh-CN":"生物属性","zh-TW":"生物屬性"},"fields":[{"code":"maxHealth","type":"number","format":"health","names":{"en-US":"Maximum health","zh-CN":"最大生命值","zh-TW":"最大生命值"},"paths":[["max_health"],["attributes","max_health"]]},{"code":"armorValue","type":"number","format":"armor","names":{"en-US":"Armor value","zh-CN":"护甲值","zh-TW":"護甲值"},"paths":[["armor_value"],["attributes","armor"]]},{"code":"width","type":"number","names":{"en-US":"Width","zh-CN":"宽度","zh-TW":"寬度"},"paths":[["width"],["dimensions","width"]]},{"code":"height","type":"number","names":{"en-US":"Height","zh-CN":"高度","zh-TW":"高度"},"paths":[["height"],["dimensions","height"]]},{"code":"eyeHeight","type":"number","names":{"en-US":"Eye height","zh-CN":"眼睛高度","zh-TW":"眼睛高度"},"paths":[["eye_height"],["dimensions","eye_height"]]},{"code":"fireImmune","type":"boolean","names":{"en-US":"Fire immune","zh-CN":"免疫火焰","zh-TW":"免疫火焰"},"paths":[["fire_immune"],["properties","fire_immune"]]}]}]'::jsonb
-					when code='mob_effect' then '[{"code":"effect","names":{"en-US":"Potion-effect properties","zh-CN":"药水效果属性","zh-TW":"藥水效果屬性"},"fields":[{"code":"category","type":"text","names":{"en-US":"Category","zh-CN":"效果类别","zh-TW":"效果類別"},"paths":[["category"],["effect","category"]]},{"code":"color","type":"text","names":{"en-US":"Color","zh-CN":"效果颜色","zh-TW":"效果顏色"},"paths":[["color"],["effect","color"]]},{"code":"beneficial","type":"boolean","names":{"en-US":"Beneficial","zh-CN":"正面效果","zh-TW":"正面效果"},"paths":[["beneficial"],["effect","beneficial"]]},{"code":"instant","type":"boolean","names":{"en-US":"Instant effect","zh-CN":"即时生效","zh-TW":"即時生效"},"paths":[["instant"],["effect","instant"]]}]}]'::jsonb
-					when code='enchantment' then '[{"code":"enchantment","names":{"en-US":"Enchantment properties","zh-CN":"附魔属性","zh-TW":"附魔屬性"},"fields":[{"code":"minimumLevel","type":"number","names":{"en-US":"Minimum level","zh-CN":"最低等级","zh-TW":"最低等級"},"paths":[["min_level"],["minimum_level"],["enchantment","minimumLevel"]]},{"code":"maximumLevel","type":"number","names":{"en-US":"Maximum level","zh-CN":"最高等级","zh-TW":"最高等級"},"paths":[["max_level"],["maximum_level"],["enchantment","maximumLevel"]]},{"code":"rarity","type":"text","names":{"en-US":"Rarity","zh-CN":"稀有度","zh-TW":"稀有度"},"paths":[["rarity"],["enchantment","rarity"]]},{"code":"treasureOnly","type":"boolean","names":{"en-US":"Treasure only","zh-CN":"宝藏附魔","zh-TW":"寶藏附魔"},"paths":[["treasure_only"],["treasure"],["enchantment","treasureOnly"]]},{"code":"curse","type":"boolean","names":{"en-US":"Curse","zh-CN":"诅咒附魔","zh-TW":"詛咒附魔"},"paths":[["curse"],["enchantment","curse"]]},{"code":"tradeable","type":"boolean","names":{"en-US":"Tradeable","zh-CN":"可交易获得","zh-TW":"可交易取得"},"paths":[["tradeable"],["enchantment","tradeable"]]},{"code":"discoverable","type":"boolean","names":{"en-US":"Discoverable","zh-CN":"可探索获得","zh-TW":"可探索取得"},"paths":[["discoverable"],["enchantment","discoverable"]]}]}]'::jsonb
-					when code='fluid' or code='chemical' then '[{"code":"material","names":{"en-US":"Material properties","zh-CN":"材料属性","zh-TW":"材料屬性"},"fields":[{"code":"density","type":"number","names":{"en-US":"Density","zh-CN":"密度","zh-TW":"密度"},"paths":[["density"],["fluid","density"],["chemical","density"]]},{"code":"temperature","type":"number","names":{"en-US":"Temperature","zh-CN":"温度","zh-TW":"溫度"},"paths":[["temperature"],["fluid","temperature"],["chemical","temperature"]]},{"code":"viscosity","type":"number","names":{"en-US":"Viscosity","zh-CN":"黏度","zh-TW":"黏度"},"paths":[["viscosity"],["fluid","viscosity"],["chemical","viscosity"]]},{"code":"luminosity","type":"number","names":{"en-US":"Luminosity","zh-CN":"发光等级","zh-TW":"發光等級"},"paths":[["luminosity"],["fluid","luminosity"],["chemical","luminosity"]]},{"code":"gaseous","type":"boolean","names":{"en-US":"Gaseous","zh-CN":"气态","zh-TW":"氣態"},"paths":[["gaseous"],["chemical","gaseous"]]}]}]'::jsonb
+					when code='chemical' then '[{"code":"material","names":{"en-US":"Material properties","zh-CN":"材料属性","zh-TW":"材料屬性"},"fields":[{"code":"density","type":"number","names":{"en-US":"Density","zh-CN":"密度","zh-TW":"密度"},"paths":[["density"],["fluid","density"],["chemical","density"]]},{"code":"temperature","type":"number","names":{"en-US":"Temperature","zh-CN":"温度","zh-TW":"溫度"},"paths":[["temperature"],["fluid","temperature"],["chemical","temperature"]]},{"code":"viscosity","type":"number","names":{"en-US":"Viscosity","zh-CN":"黏度","zh-TW":"黏度"},"paths":[["viscosity"],["fluid","viscosity"],["chemical","viscosity"]]},{"code":"luminosity","type":"number","names":{"en-US":"Luminosity","zh-CN":"发光等级","zh-TW":"發光等級"},"paths":[["luminosity"],["fluid","luminosity"],["chemical","luminosity"]]},{"code":"gaseous","type":"boolean","names":{"en-US":"Gaseous","zh-CN":"气态","zh-TW":"氣態"},"paths":[["gaseous"],["chemical","gaseous"]]}]}]'::jsonb
 					else '[]'::jsonb end)
 		)) where builtin and code<>'item_block'`,
-		`update mod_content_templates set definition=jsonb_set(
-			definition,
-			'{entryTypes,1,groups,0,fields}',
-			coalesce(definition#>'{entryTypes,1,groups,0,fields}','[]'::jsonb)||'` + builtinBlockCompatibilityFields + `'::jsonb
-		) where code='item_block' and builtin`,
-		`update mod_content_templates set definition=jsonb_set(
-			definition,
-			'{entryTypes,2,groups,0,fields}',
-			coalesce(definition#>'{entryTypes,2,groups,0,fields}','[]'::jsonb)||'` + builtinItemCompatibilityFields + `'::jsonb
-		) where code='item_block' and builtin`,
-		`update mod_content_templates set definition=jsonb_set(
-			definition,
-			'{entryTypes,3,groups,0,fields}',
-			coalesce(definition#>'{entryTypes,3,groups,0,fields}','[]'::jsonb)||'` + builtinToolCompatibilityFields + `'::jsonb
-		) where code='item_block' and builtin`,
-		`update mod_content_templates set definition=jsonb_set(
-			definition,
-			'{entryTypes,4,groups,0,fields}',
-			coalesce(definition#>'{entryTypes,4,groups,0,fields}','[]'::jsonb)||'` + builtinEquipmentCompatibilityFields + `'::jsonb
-		) where code='item_block' and builtin`,
-		`update mod_content_templates set definition=jsonb_set(
-			definition,
-			'{entryTypes,1,groups,0,fields}',
-			coalesce(definition#>'{entryTypes,1,groups,0,fields}','[]'::jsonb)||'` + builtinEntityCompatibilityFields + `'::jsonb
-		) where code='entity' and builtin`,
+		appendEntryTypeFieldsSQL("item_block", 1, builtinBlockCompatibilityFields),
+		appendEntryTypeFieldsSQL("item_block", 2, builtinItemCompatibilityFields),
+		appendEntryTypeFieldsSQL("item_block", 3, builtinToolCompatibilityFields),
+		appendEntryTypeFieldsSQL("item_block", 4, builtinEquipmentCompatibilityFields),
+		appendEntryTypeFieldsSQL("entity", 1, builtinEntityCompatibilityFields),
 		`create table mod_content_sections (
 			id bigserial primary key,
 			public_id text not null unique default new_public_id() check(public_id ~ '^[a-z0-9]{9}$'),
@@ -422,12 +400,11 @@ func modContentSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create or replace function refresh_mod_content_search_from_versioned_resource() returns trigger as $$
 		begin
-			if TG_OP<>'INSERT' then
+			if tg_op<>'INSERT' and (tg_op='DELETE' or
+				(old.resource_id,old.version_id) is distinct from (new.resource_id,new.version_id)) then
 				perform refresh_mod_content_resource_search_document(old.resource_id,old.version_id);
 			end if;
-			if TG_OP<>'DELETE' and (TG_OP='INSERT' or new.resource_id is distinct from old.resource_id or new.version_id is distinct from old.version_id) then
-				perform refresh_mod_content_resource_search_document(new.resource_id,new.version_id);
-			elsif TG_OP='UPDATE' then
+			if tg_op<>'DELETE' then
 				perform refresh_mod_content_resource_search_document(new.resource_id,new.version_id);
 			end if;
 			if TG_OP='DELETE' then return old; end if;
@@ -443,7 +420,8 @@ func modContentSchemaStatements() []string {
 		`create or replace function refresh_mod_content_search_from_import_snapshot() returns trigger as $$
 		declare source record;
 		begin
-			if TG_OP<>'INSERT' then
+			if tg_op<>'INSERT' and (tg_op='DELETE' or
+				(old.resource_id,old.revision_id) is distinct from (new.resource_id,new.revision_id)) then
 				select old.resource_id resource_id,revision.target_version_id version_id into source
 				from catalog_import_revisions revision where revision.id=old.revision_id;
 				if source.version_id is not null then perform refresh_mod_content_resource_search_document(source.resource_id,source.version_id); end if;
@@ -463,7 +441,7 @@ func modContentSchemaStatements() []string {
 		`create or replace function refresh_mod_content_search_from_import_revision() returns trigger as $$
 		declare target record;
 		begin
-			if TG_OP<>'INSERT' then
+			if tg_op<>'INSERT' and (tg_op='DELETE' or old.target_version_id is distinct from new.target_version_id) then
 				for target in select snapshot.resource_id from resource_import_snapshots snapshot where snapshot.revision_id=old.id loop
 					perform refresh_mod_content_resource_search_document(target.resource_id,old.target_version_id);
 				end loop;
