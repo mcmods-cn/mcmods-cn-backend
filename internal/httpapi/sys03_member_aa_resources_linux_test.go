@@ -260,7 +260,7 @@ func sys03MemberAALoadConfig(t *testing.T, ctx context.Context) (config.Config, 
 	return cfg, input
 }
 
-func sys03MemberAARedisScope(t *testing.T, ctx context.Context, cfg config.RedisConfig, input sys03MemberAAPrivateInput, writersClosed *bool) {
+func sys03MemberAARedisScope(t *testing.T, ctx context.Context, cfg config.RedisConfig, input sys03MemberAAPrivateInput, writersClosed *bool) *redis.Client {
 	t.Helper()
 	client := redis.NewClient(&redis.Options{Addr: cfg.Addr, Username: cfg.Username, Password: cfg.Password, DB: cfg.DB, PoolSize: 1, MinIdleConns: 0})
 	clientClosed := false
@@ -398,4 +398,5 @@ func sys03MemberAARedisScope(t *testing.T, ctx context.Context, cfg config.Redis
 		"ownerKey": owner, "sentinelKey": sentinel, "privateOwnerMarker": marker,
 		"namespaceEmptyBeforeClaim": true, "otherClientsBeforeClaim": 0,
 	})
+	return client
 }

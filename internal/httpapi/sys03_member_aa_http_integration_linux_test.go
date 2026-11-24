@@ -35,7 +35,7 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 	cfg, private := sys03MemberAALoadConfig(t, ctx)
 	writersClosed := true
 	db := sys03MemberAAOwnedDatabase(t, ctx, cfg, private, &writersClosed)
-	sys03MemberAARedisScope(t, ctx, cfg.Redis, private, &writersClosed)
+	redisObserver := sys03MemberAARedisScope(t, ctx, cfg.Redis, private, &writersClosed)
 
 	type actor struct {
 		id    int64
@@ -291,7 +291,20 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 	// Same exact member, role, title and original JWT. The next request must
 	// hit the unchanged Redis rate limiter, rather than duplicate-content.
 	beforeRate := facts()
+	// Read the actor's actual Redis counter across the rejected request. Query
+	// cache GET hits do not measure admission through the limiter's Lua script.
+	burstKey := cfg.Redis.Prefix + ":" + cfg.Redis.Namespace + ":limit:abuse:review.submit:burst:user:" + strconv.FormatInt(manager.id, 10)
+	beforeBurst, err := redisObserver.Get(ctx, burstKey).Int64()
+	if err != nil {
+		t.Fatal("could not observe the manager's shared burst counter before the fourth request")
+	}
 	request(manager, http.MethodPut, path, membership, 429, "rate_limited")
+	afterBurst, err := redisObserver.Get(ctx, burstKey).Int64()
+	if err != nil {
+		t.Fatal("could not observe the manager's shared burst counter after the fourth request")
+	}
+	burstLimit := int64(settings.Policies["review.submit"].BurstLimit)
+	sharedBurstObserved := beforeBurst == burstLimit && afterBurst == beforeBurst+1
 	if facts() != beforeRate {
 		t.Fatal("frequency refusal changed restored membership/ACL/audit state")
 	}
@@ -336,13 +349,14 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 	}
 	metrics := server.cache.Metrics()
 	async := server.antiAbuse.AsyncMetrics()
-	// Preserve the exact snapshots used by the unchanged composite assertion.
-	// Only counters/booleans are recorded; do not infer an uncaptured earlier
-	// attempt's values or discard a failed condition to obtain a passing test.
+	// Preserve the numeric evidence for each diagnostic and acceptance check.
 	sys03MemberAAPrivateReceipt(t, private, "nondegraded-metrics", map[string]any{
-		"schemaVersion": 1,
+		"schemaVersion": 2,
 		"counterValues": map[string]any{
 			"cache.RedisHits":         metrics.RedisHits,
+			"redis.sharedBurstBefore": beforeBurst,
+			"redis.sharedBurstAfter":  afterBurst,
+			"redis.sharedBurstLimit":  burstLimit,
 			"cache.Errors":            metrics.Errors,
 			"cache.LocalFallbacks":    metrics.LocalFallbacks,
 			"cache.RateLimitFalls":    metrics.RateLimitFalls,
@@ -359,7 +373,7 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 			"async.RiskQueueDepth":    async.RiskQueueDepth,
 		},
 		"failedConditions": map[string]bool{
-			"cache.RedisHits == 0":                          metrics.RedisHits == 0,
+			"redis.sharedBurstNotObserved":                  !sharedBurstObserved,
 			"cache.Errors != 0":                             metrics.Errors != 0,
 			"cache.LocalFallbacks != 0":                     metrics.LocalFallbacks != 0,
 			"cache.RateLimitFalls != 0":                     metrics.RateLimitFalls != 0,
@@ -375,7 +389,7 @@ func TestSYS03MemberRoleRestoreRetainsAntiAbuseGatesHTTPPostgresRedisIntegration
 			"async.RiskQueueDepth != 0":                     async.RiskQueueDepth != 0,
 		},
 	})
-	if metrics.RedisHits == 0 || metrics.Errors != 0 || metrics.LocalFallbacks != 0 || metrics.RateLimitFalls != 0 ||
+	if !sharedBurstObserved || metrics.Errors != 0 || metrics.LocalFallbacks != 0 || metrics.RateLimitFalls != 0 ||
 		async.SuccessFailed != 0 || async.SuccessDropped != 0 || async.SuccessProcessed != async.SuccessQueued || async.SuccessQueueDepth != 0 ||
 		async.RiskDropped != 0 || async.RiskEventFailed != 0 || async.RiskDailyFailed != 0 || async.RestrictionFailed != 0 || async.BotRuleLoadFailed != 0 || async.RiskQueueDepth != 0 {
 		t.Fatal("actual shared Redis and completed nondegraded AA persistence are required")
