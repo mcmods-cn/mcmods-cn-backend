@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -21,20 +22,25 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	req.SecondaryName = strings.TrimSpace(req.SecondaryName)
 	req.Abbreviation = strings.TrimSpace(req.Abbreviation)
 	req.Summary = strings.TrimSpace(req.Summary)
-	defaultLocale, localizations, localizationErr := normalizeCatalogLocalizations(req.DefaultLocale, req.Localizations)
-	if localizationErr != nil {
-		return errors.New("localized mod content is invalid")
-	}
+	localizations := req.Localizations
 	if len(localizations) == 0 {
+		locale := req.DefaultLocale
+		if strings.TrimSpace(locale) == "" {
+			locale = "en-US"
+		}
 		localizedName := req.SecondaryName
-		if strings.TrimSpace(localizedName) == "" {
+		if localizedName == "" {
 			localizedName = req.PrimaryName
 		}
-		localizations = []catalogLocalizationEdit{{Locale: defaultLocale, Name: localizedName, Summary: req.Summary, ContentMarkdown: req.BodyMarkdown}}
-		defaultLocale, localizations, localizationErr = normalizeCatalogLocalizations(defaultLocale, localizations)
-		if localizationErr != nil {
-			return errors.New("localized mod content is invalid")
-		}
+		localizations = []catalogLocalizationEdit{{Locale: locale, Name: localizedName, Summary: req.Summary, ContentMarkdown: req.BodyMarkdown}}
+	}
+	// Other translations can already contain names within the catalog byte
+	// budget. The editor also accepts up to 160 Unicode characters.
+	defaultLocale, localizations, localizationErr := normalizeLocalizations(req.DefaultLocale, localizations, func(name string) bool {
+		return catalogLocalizationNameFits(name) || utf8.RuneCountInString(name) <= 160
+	})
+	if localizationErr != nil {
+		return errors.New("localized mod content is invalid")
 	}
 	if err := requireCatalogCreateDefaultLocalization(defaultLocale, localizations); err != nil {
 		return errors.New("the default language must have a localized mod name")
@@ -69,13 +75,13 @@ func normalizeAndValidateModRequest(req *createModRequest) error {
 	if req.SiteID != "" && !validModSiteID(req.SiteID) {
 		return errors.New("模组站内 ID 只能包含小写字母、数字、下划线或连字符，且必须以字母或数字开头和结尾")
 	}
-	if len(req.PrimaryName) > 160 || len(req.SecondaryName) > 160 {
+	if utf8.RuneCountInString(req.PrimaryName) > 160 || utf8.RuneCountInString(req.SecondaryName) > 160 {
 		return errors.New("模组名称不能超过 160 个字符")
 	}
 	if !validModAbbreviation(req.Abbreviation) {
 		return errors.New("简写名称只能包含 ASCII 字母、数字或符号，且不能超过 32 个字符")
 	}
-	if len(req.Summary) > 500 {
+	if utf8.RuneCountInString(req.Summary) > 500 {
 		return errors.New("简介不能超过 500 个字符")
 	}
 	if len(req.CurseForgeProjectID) > 128 || len(req.ModrinthProjectID) > 128 || len(req.GitHubProjectPath) > 201 {

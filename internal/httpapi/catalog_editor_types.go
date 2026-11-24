@@ -179,7 +179,15 @@ func normalizeCatalogLocale(value string) (string, error) {
 	return normalizeContentLocale(value), nil
 }
 
+func catalogLocalizationNameFits(name string) bool {
+	return len(name) <= 512
+}
+
 func normalizeCatalogLocalizations(defaultLocale string, localizations []catalogLocalizationEdit) (string, []catalogLocalizationEdit, error) {
+	return normalizeLocalizations(defaultLocale, localizations, catalogLocalizationNameFits)
+}
+
+func normalizeLocalizations(defaultLocale string, localizations []catalogLocalizationEdit, nameFits func(string) bool) (string, []catalogLocalizationEdit, error) {
 	seen := make(map[string]struct{}, len(localizations))
 	for index := range localizations {
 		locale, err := normalizeCatalogLocale(localizations[index].Locale)
@@ -196,7 +204,7 @@ func normalizeCatalogLocalizations(defaultLocale string, localizations []catalog
 		}
 		localizations[index].Name = strings.TrimSpace(localizations[index].Name)
 		localizations[index].Summary = strings.TrimSpace(localizations[index].Summary)
-		if len(localizations[index].Name) > 512 || len(localizations[index].Summary) > 4096 || len(localizations[index].ContentMarkdown) > maxModExportEntryMarkdownBytes {
+		if !nameFits(localizations[index].Name) || len(localizations[index].Summary) > 4096 || len(localizations[index].ContentMarkdown) > maxModExportEntryMarkdownBytes {
 			return "", nil, fmt.Errorf("%w: localized content is too large", errCatalogEditorInvalid)
 		}
 		// User-authored mutations cannot claim AI provenance or lock a locale.
