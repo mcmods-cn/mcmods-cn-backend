@@ -317,6 +317,13 @@ func (s *Server) compareModRevisions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	before, after = items[0], items[1]
+	// Compare stable facts, then expose the same icon values as the snapshots.
+	for i := range changes {
+		if changes[i].Path == "/iconUrl" {
+			changes[i].Before = before.Snapshot.IconURL
+			changes[i].After = after.Snapshot.IconURL
+		}
+	}
 	writeJSON(w, http.StatusOK, modRevisionComparisonResponse{
 		Before: before, After: after, ChangedFields: topLevelChangedFields(changes), Changes: changes,
 	})
