@@ -52,6 +52,7 @@ python3 -B tools/testing/isolated_environment.py run -- go run ./tools/testing/d
 `db_suite` 会发现并逐批执行数据库测试；查看每项 PASS/FAIL/SKIP 和末尾 batch 汇总，
 不能把成功退出等同于所有条件测试均执行。独立的外部 exporter 样本、Minecraft loader 在线数据
 和 Modrinth 元数据测试仍需要各自显式条件。它们与真实 AI 供应商测试不同，不会由本工具偷偷启用。
+每批 `DB_SUITE selection` 列出从 Go 实际发现、传给该次测试进程的顶层用例。对照该批的 PASS、FAIL、SKIP 按包和名称核对；子用例按完整名称单列，选中但没有终态的用例保留为未完成。托管 PostgreSQL 步骤在进程返回后输出 `DB_SUITE runner_exit` 并将同一退出码交给 CI。作业被外部中断时可能没有该行。
 
 复现 CI 空库门时，使用全新且已核实归属的专用 PostgreSQL 18.6 数据库，以 `go run ./cmd/db-initialize` 安装 generation 172。账号浏览联调使用单独的合成身份。记录实际源码提交、数据库代际、每批终态和仍跳过的用例，恢复与重跑范围以同一源码为准。[批次工具](../tools/testing/db_suite/README.md) · [当前执行结果](governance.md#当前版本与验收)
 

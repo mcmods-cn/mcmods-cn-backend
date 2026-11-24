@@ -59,6 +59,7 @@ func main() {
 			}
 			arguments = append(arguments, "-run", "^("+strings.Join(group, "|")+")$", pkg)
 			fmt.Printf("DB_SUITE batch=%d package=%s tests=%d first=%s last=%s\n", batches, pkg, len(group), group[0], group[len(group)-1])
+			fmt.Printf("DB_SUITE selection batch=%d names=%s\n", batches, strings.Join(group, ","))
 			command := exec.Command(goBinary, arguments...)
 			command.Stdout, command.Stderr = os.Stdout, os.Stderr
 			err = command.Run()

@@ -125,7 +125,11 @@ jobs:
           DATABASE_URL=$(python3 -c 'import os, urllib.parse as u; print(u.urlsplit(os.environ["DATABASE_URL"])._replace(path="/"+os.environ["RESTORED_DB"]).geturl())')
           "$RUNNER_TEMP/db-initialize"
       - name: Run every discovered test in isolated serial PostgreSQL batches
-        run: go run ./tools/testing/db_suite
+        run: |
+          result=0
+          go run ./tools/testing/db_suite || result=$?
+          printf 'DB_SUITE runner_exit=%d\n' "$result"
+          exit "$result"
 
   race:
     runs-on: ubuntu-latest
