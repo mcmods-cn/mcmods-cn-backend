@@ -44,6 +44,35 @@ func TestExternalAvatarKeepsIndependentUploadersAndRecoversInterruptedRegistrati
        and status='pending' and scan_status='pending'`, first).Scan(&pending); err != nil || pending != 1 || len(f.objects()) != 1 {
 		t.Fatalf("pending receipts=%d objects=%d err=%v", pending, len(f.objects()), err)
 	}
+	third := f.userIDs[f.reviewer]
+	if _, err := fetch(third); err == nil {
+		t.Fatal("fixture should interrupt third import")
+	}
+	var expiredID int64
+	var expiredKey string
+	var dueTomorrow bool
+	if err := f.db.QueryRow(f.ctx, `select f.id,f.object_key,o.next_attempt_at>now()+interval '23 hours' from oss_files f
+        join oss_object_deletion_outbox o on o.oss_file_id=f.id where f.uploader_id=$1 and o.reason=$2`, third, externalImageExpiryReason).Scan(&expiredID, &expiredKey, &dueTomorrow); err != nil || !dueTomorrow {
+		t.Fatalf("private import expiry was not scheduled: %v", err)
+	}
+	if _, err := f.db.Exec(f.ctx, `update oss_object_deletion_outbox set next_attempt_at=now() where oss_file_id=$1`, expiredID); err != nil {
+		t.Fatal(err)
+	}
+	worker := NewOSSDeletionWorker(f.server.cfg, f.db)
+	job, err := worker.claim(f.ctx)
+	if err != nil || job.FileID == nil || *job.FileID != expiredID {
+		t.Fatalf("scheduled cleanup selected another file: %v", err)
+	}
+	if err = worker.deleteObject(f.ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if err = worker.complete(f.ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := f.objects()[expiredKey]; exists {
+		t.Fatal("expired upload still exists in object storage")
+	}
+
 	if _, err := f.db.Exec(f.ctx, `drop trigger pause_import_activation on oss_files`); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +88,18 @@ func TestExternalAvatarKeepsIndependentUploadersAndRecoversInterruptedRegistrati
 	if err != nil || a.FileInternalID == b.FileInternalID || a.URL == b.URL || len(f.objects()) != 2 {
 		t.Fatalf("second submission did not receive an independent image: %v", err)
 	}
+	replacement, err := fetch(third)
+	if err != nil || replacement.FileInternalID == expiredID || replacement.URL == "" || len(f.objects()) != 3 {
+		t.Fatalf("new private import after expiry did not obtain its own live key: %v", err)
+	}
+	if _, exists := f.objects()[expiredKey]; exists {
+		t.Fatal("reimport used a key targeted by an earlier deletion")
+	}
+	var outstanding int
+	if err = f.db.QueryRow(f.ctx, `select count(*) from oss_object_deletion_outbox where reason=$1 and status<>'completed'`, externalImageExpiryReason).Scan(&outstanding); err != nil || outstanding != 0 {
+		t.Fatalf("completed uploads retained a scheduled deletion: %d/%v", outstanding, err)
+	}
+
 	for _, entry := range []struct {
 		image mirroredExternalImage
 		owner int64

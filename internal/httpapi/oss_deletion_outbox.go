@@ -42,6 +42,7 @@ type ossDeletionTarget struct {
 }
 
 type ossDeletionJob struct {
+	Reason             string
 	ID                 int64
 	FileID             *int64
 	RawUploadBindingID *string
@@ -103,7 +104,7 @@ func (worker *OSSDeletionWorker) drain(ctx context.Context) {
 			if errors.Is(err, errOSSRawDeletionDeferred) {
 				continue
 			}
-			if job.RawUploadBindingID != nil && errors.Is(err, errOSSDeletionLeaseLost) {
+			if (job.RawUploadBindingID != nil || job.Reason == externalImageExpiryReason) && errors.Is(err, errOSSDeletionLeaseLost) {
 				continue
 			}
 			if ctx.Err() != nil {
@@ -131,9 +132,9 @@ func (worker *OSSDeletionWorker) claim(ctx context.Context) (ossDeletionJob, err
 			where attempts<max_attempts and ((status='pending' and next_attempt_at<=now())
 			   or (status='processing' and locked_at<now()-make_interval(secs => $1)))
 			order by next_attempt_at,id for update skip locked limit 1)
-		returning id,oss_file_id,bucket,endpoint,region,use_cname,object_key,attempts,max_attempts,raw_upload_binding_id::text`,
+		returning id,oss_file_id,bucket,endpoint,region,use_cname,object_key,attempts,max_attempts,raw_upload_binding_id::text,reason`,
 		int(ossDeletionLeaseTimeout/time.Second), job.LockToken).
-		Scan(&job.ID, &job.FileID, &job.Bucket, &job.Endpoint, &job.Region, &job.UseCName, &job.ObjectKey, &job.Attempts, &job.MaxAttempts, &job.RawUploadBindingID)
+		Scan(&job.ID, &job.FileID, &job.Bucket, &job.Endpoint, &job.Region, &job.UseCName, &job.ObjectKey, &job.Attempts, &job.MaxAttempts, &job.RawUploadBindingID, &job.Reason)
 	return job, err
 }
 
@@ -163,6 +164,14 @@ func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeleti
 		return fmt.Errorf("begin OSS deletion lease guard: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	expiry := job.Reason == externalImageExpiryReason && job.FileID != nil
+	var fileStatus, scanStatus string
+	if expiry {
+		err = tx.QueryRow(ctx, `select status,scan_status from oss_files where id=$1 and bucket=$2 and object_key=$3 for update`, *job.FileID, job.Bucket, job.ObjectKey).Scan(&fileStatus, &scanStatus)
+		if err != nil {
+			return err
+		}
+	}
 	var ownedID int64
 	err = tx.QueryRow(ctx, `select id from oss_object_deletion_outbox
 		where id=$1 and status='processing' and locked_by=$2 for share`, job.ID, job.LockToken).Scan(&ownedID)
@@ -171,6 +180,17 @@ func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeleti
 	}
 	if err != nil {
 		return fmt.Errorf("lock OSS deletion lease: %w", err)
+	}
+	if expiry {
+		switch {
+		case fileStatus == "pending" && scanStatus == "pending":
+			if _, err = tx.Exec(ctx, `update oss_files set status='deleted',updated_at=now() where id=$1`, *job.FileID); err != nil {
+				return err
+			}
+		case fileStatus == "deleted":
+		default:
+			return nil
+		}
 	}
 	// Keep the current lease locked through the provider side effect. Fencing
 	// only complete() cannot stop an expired worker deleting a reused object key.
@@ -204,6 +224,9 @@ func (worker *OSSDeletionWorker) deleteObject(ctx context.Context, job ossDeleti
 		Bucket: aliyunoss.Ptr(cfg.Bucket),
 		Key:    aliyunoss.Ptr(job.ObjectKey),
 	})
+	if err == nil && expiry {
+		return tx.Commit(ctx)
+	}
 	return err
 }
 

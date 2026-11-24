@@ -17,6 +17,7 @@ import (
 )
 
 const maxExternalModIconBytes = int64(8 << 20)
+const externalImageExpiryReason = "abandoned_external_image_import"
 
 var errUnsupportedExternalModIcon = errors.New("unsupported external mod icon URL")
 
@@ -126,11 +127,7 @@ func (s *Server) storeExternalImage(ctx context.Context, client *aliyunoss.Clien
 	if originalName == "." || originalName == "/" || originalName == "" {
 		originalName = digest + extension
 	}
-	_, err = s.db.Exec(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
-        content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
-        values($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$9,$10,$11,'pending','pending')
-        on conflict(object_key) do nothing`,
-		cfg.Bucket, cfg.Endpoint, cfg.Region, objectKey, options.category, options.source, originalName, contentType, len(data), digest, uploaderID)
+	objectKey, err = s.reserveExternalImage(ctx, cfg, options, uploaderID, digest, extension, objectKey, originalName, contentType, int64(len(data)))
 	if err != nil {
 		return mirroredExternalImage{}, err
 	}
@@ -178,11 +175,63 @@ func (s *Server) storeExternalImage(ctx context.Context, client *aliyunoss.Clien
 	if err != nil {
 		return mirroredExternalImage{}, err
 	}
+	// The same file→outbox order is used by expiry and administrative deletion.
+	// A successful write no longer needs its delayed cleanup intent.
+	if _, err = tx.Exec(ioCtx, `delete from oss_object_deletion_outbox where oss_file_id=$1 and reason=$2`, record.result.FileInternalID, externalImageExpiryReason); err != nil {
+		return mirroredExternalImage{}, err
+	}
 	if err = tx.Commit(ioCtx); err != nil {
 		return mirroredExternalImage{}, err
 	}
 	record.result.URL = ossStoredObjectURL(cfg, objectKey)
 	return record.result, nil
+}
+
+func (s *Server) reserveExternalImage(ctx context.Context, cfg ossConfigPayload, options externalImageMirrorOptions, uploaderID int64, digest, extension, initialKey, name, contentType string, size int64) (string, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	var key, previousID string
+	var expired bool
+	err = tx.QueryRow(ctx, `select file.object_key,file.public_id,file.status='deleted' and exists(
+        select 1 from oss_object_deletion_outbox where bucket=file.bucket and endpoint=file.endpoint and object_key=file.object_key
+        and oss_file_id=file.id and reason=$7)
+        from oss_files file where file.bucket=$1 and file.category=$2 and file.source=$3 and file.uploader_id=$4
+        and file.sha256=$5 and file.size_bytes=$6 order by file.id desc limit 1`, cfg.Bucket, options.category, options.source, uploaderID, digest, size, externalImageExpiryReason).
+		Scan(&key, &previousID, &expired)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		key = initialKey
+	case err != nil:
+		return "", err
+	case expired:
+		// Never reuse a key addressed by an old deletion job, even after replay.
+		key = strings.TrimSuffix(initialKey, extension) + "-" + previousID + extension
+	default:
+		return key, nil
+	}
+	var fileID int64
+	err = tx.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
+        content_type,size_bytes,source_size_bytes,sha256,uploader_id,status,scan_status)
+        values($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$9,$10,$11,'pending','pending')
+        on conflict(object_key) do nothing returning id`, cfg.Bucket, cfg.Endpoint, cfg.Region, key, options.category, options.source, name, contentType, size, digest, uploaderID).Scan(&fileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return key, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	// Use the existing deletion queue and its due-time index. Failed or
+	// interrupted transfers remain private and recoverable for a full day.
+	_, err = tx.Exec(ctx, `insert into oss_object_deletion_outbox(
+        oss_file_id,bucket,endpoint,region,use_cname,object_key,reason,next_attempt_at)
+        values($1,$2,$3,$4,$5,$6,$7,now()+interval '1 day')`, fileID, cfg.Bucket, cfg.Endpoint, cfg.Region, cfg.UseCName || isCustomOSSEndpoint(cfg.Endpoint), key, externalImageExpiryReason)
+	if err != nil {
+		return "", err
+	}
+	return key, tx.Commit(ctx)
 }
 
 func externalImageObjectKey(prefix string, options externalImageMirrorOptions, uploaderID int64, digest, extension string) string {
