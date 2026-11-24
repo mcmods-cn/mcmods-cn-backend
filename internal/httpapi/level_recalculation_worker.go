@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"mcmods-cn-backend/internal/diagnostic"
 )
 
 const (
@@ -17,12 +19,16 @@ const (
 	levelRecalculationLeaseTTL     = 30 * time.Second
 )
 
-const levelRecalculationBatchSQL = `with job as materialized (
-	select id,cursor_user_id,level_thresholds,role_track_code,role_ids
-	from level_recalculation_jobs
-	where id=$1 and status='processing' and locked_by=$2 and lease_expires_at>now()
-	for update
-), candidates as materialized (
+// A statement can begin while the lease is live and wait past expiry for
+// the job row. Establish ownership only after acquiring that row lock.
+const liveLevelRecalculationSQL = `with locked_job as materialized (
+	select id,cursor_user_id,level_thresholds,role_track_code,role_ids,lease_expires_at
+	from level_recalculation_jobs where id=$1 and status='processing' and locked_by=$2 for update
+), job as materialized (
+	select * from locked_job where lease_expires_at>clock_timestamp()
+)`
+
+const levelRecalculationBatchSQL = liveLevelRecalculationSQL + `, candidates as materialized (
 	select experience.user_id,experience.experience
 	from user_experience experience join job on experience.user_id>job.cursor_user_id
 	order by experience.user_id
@@ -72,7 +78,7 @@ const levelRecalculationBatchSQL = `with job as materialized (
 		processed_count=state.processed_count+summary.batch_count,
 		status=case when summary.done then 'completed' else 'processing' end,
 		locked_by=case when summary.done then '' else state.locked_by end,
-		lease_expires_at=case when summary.done then null else now()+make_interval(secs=>$4) end,
+		lease_expires_at=case when summary.done then null else clock_timestamp()+make_interval(secs=>$4) end,
 		last_error='',finished_at=case when summary.done then now() else null end,updated_at=now()
 	from summary where state.id=$1 and state.status='processing' and state.locked_by=$2
 	returning summary.batch_count,summary.done,state.cursor_user_id,state.processed_count,
@@ -161,7 +167,7 @@ func (worker *LevelRecalculationWorker) claim(ctx context.Context) (claimedLevel
 			(status='processing' and lease_expires_at<=now())
 		) order by config_version desc,id desc for update skip locked limit 1
 	) update level_recalculation_jobs job set status='processing',attempts=job.attempts+1,
-		locked_by=$1,lease_expires_at=now()+make_interval(secs=>$2),
+		locked_by=$1,lease_expires_at=clock_timestamp()+make_interval(secs=>$2),
 		started_at=coalesce(job.started_at,now()),finished_at=null,updated_at=now()
 	from candidate where job.id=candidate.id returning job.id`,
 		job.lockToken, int(levelRecalculationLeaseTTL/time.Second)).Scan(&job.id)
@@ -206,15 +212,13 @@ func (worker *LevelRecalculationWorker) fail(ctx context.Context, job claimedLev
 	if cause != nil {
 		message = strings.TrimSpace(cause.Error())
 	}
-	if len(message) > 2048 {
-		message = message[:2048]
-	}
-	_, err := worker.db.Exec(ctx, `update level_recalculation_jobs set
+	message = diagnostic.Text(message, 2048)
+	_, err := worker.db.Exec(ctx, liveLevelRecalculationSQL+`update level_recalculation_jobs state set
 		status=case when attempts>=max_attempts then 'dead' else 'queued' end,
 		next_attempt_at=case when attempts>=max_attempts then next_attempt_at
 			else now()+make_interval(secs=>least(900,5*(1<<least(attempts,7)))) end,
 		locked_by='',lease_expires_at=null,last_error=$3,
 		finished_at=case when attempts>=max_attempts then now() else null end,updated_at=now()
-		where id=$1 and status='processing' and locked_by=$2`, job.id, job.lockToken, message)
+		from job where state.id=job.id`, job.id, job.lockToken, message)
 	return err
 }

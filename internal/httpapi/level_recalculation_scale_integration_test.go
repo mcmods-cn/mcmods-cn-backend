@@ -210,7 +210,8 @@ func TestLevelRecalculationScaleIntegration(t *testing.T) {
 	if err != nil || !claimed {
 		t.Fatalf("recover expired lease: claimed=%t err=%v", claimed, err)
 	}
-	if err = worker.fail(ctx, recovered, errors.New("transient level recalculation failure")); err != nil {
+	failure := "transient " + strings.Repeat("等", 700)
+	if err = worker.fail(ctx, recovered, errors.New(failure)); err != nil {
 		t.Fatal(err)
 	}
 	var recoveredStatus, recoveredLock, recoveredError, exhaustedStatus string
@@ -223,7 +224,7 @@ func TestLevelRecalculationScaleIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	if recoveredStatus != "queued" || recoveredAttempts != 2 || recoveredLock != "" ||
-		!strings.Contains(recoveredError, "transient") || exhaustedStatus != "dead" {
+		!strings.HasPrefix(failure, recoveredError) || len(recoveredError) < 2046 || len(recoveredError) > 2048 || exhaustedStatus != "dead" {
 		t.Fatalf("recovery status=%q attempts=%d lock=%q error=%q exhausted=%q",
 			recoveredStatus, recoveredAttempts, recoveredLock, recoveredError, exhaustedStatus)
 	}
@@ -257,4 +258,56 @@ func invokeLevelConfigUpdateIntegration(
 
 func errorsIsNoRows(err error) bool {
 	return errors.Is(err, pgx.ErrNoRows)
+}
+
+func TestLevelRecalculationSettlesOnlyAfterTakingTheLiveJobLock(t *testing.T) {
+	f := newTEST013Fixture(t)
+	worker := NewLevelRecalculationWorker(f.db)
+	var job claimedLevelRecalculationJob
+	job.lockToken = "test-level-lease"
+	var deadline time.Time
+	if err := f.db.QueryRow(f.ctx, `insert into level_recalculation_jobs(config_version,status,attempts,locked_by,lease_expires_at)
+		values(1042,'processing',1,$1,clock_timestamp()+interval '3 seconds') returning id,lease_expires_at`, job.lockToken).Scan(&job.id, &deadline); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Rollback(f.ctx)
+	if _, err = holder.Exec(f.ctx, "select id from level_recalculation_jobs where id=$1 for no key update", job.id); err != nil {
+		t.Fatal(err)
+	}
+	batch, failure := make(chan error, 1), make(chan error, 1)
+	go func() { _, err := worker.processBatch(f.ctx, job); batch <- err }()
+	go func() { failure <- worker.fail(f.ctx, job, errors.New("stale worker")) }()
+	auditCompletionAwaitLocks(t, f, 2)
+	var enteredBeforeExpiry bool
+	if err = holder.QueryRow(f.ctx, "select clock_timestamp()<$1::timestamptz", deadline).Scan(&enteredBeforeExpiry); err != nil || !enteredBeforeExpiry {
+		t.Fatalf("operations did not reach the held row before expiry: %v", err)
+	}
+	if _, err = holder.Exec(f.ctx, "select pg_sleep(greatest(0,extract(epoch from $1::timestamptz-clock_timestamp())))", deadline); err != nil {
+		t.Fatal(err)
+	}
+	if err = holder.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-batch; !errors.Is(err, pgx.ErrNoRows) {
+		t.Errorf("expired batch: %v", err)
+	}
+	if err = <-failure; err != nil {
+		t.Fatalf("expired failure attempt: %v", err)
+	}
+	var status, lastError string
+	var count int
+	if err = f.db.QueryRow(f.ctx, "select status,last_error,processed_count from level_recalculation_jobs where id=$1", job.id).Scan(&status, &lastError, &count); err != nil || status != "processing" || lastError != "" || count != 0 {
+		t.Fatalf("expired owner changed job: %q %q %d %v", status, lastError, count, err)
+	}
+	fresh, claimed, err := worker.claim(f.ctx)
+	if err != nil || !claimed || fresh.id != job.id || fresh.lockToken == job.lockToken {
+		t.Fatalf("recovery: %#v %v %v", fresh, claimed, err)
+	}
+	if _, err = worker.processBatch(f.ctx, fresh); err != nil {
+		t.Fatalf("new lease: %v", err)
+	}
 }
