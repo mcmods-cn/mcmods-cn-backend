@@ -1,4 +1,3 @@
-import http from 'node:http';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
@@ -15,18 +14,6 @@ const site = new URL(runtime.frontendOrigin);
 const upstream = new URL(runtime.apiOrigin);
 assert.equal(site.hostname,'127.0.0.1');
 assert.equal(upstream.hostname,'127.0.0.1');
-const app = new URL('http://127.0.0.1:3991');
-const gateway = http.createServer((req, res) => {
-  const target = req.url.startsWith('/api/') ? upstream : app;
-  const proxied = http.request({hostname:target.hostname, port:target.port, path:req.url,
-    method:req.method,headers:{...req.headers,host:target===app?site.host:target.host,'x-forwarded-host':site.host,'x-forwarded-proto':site.protocol.slice(0,-1)}}, reply => {
-    res.writeHead(reply.statusCode,reply.headers);
-    reply.pipe(res);
-  });
-  proxied.on('error',()=>{ if(!res.headersSent) res.writeHead(502); res.end(); });
-  req.pipe(proxied);
-});
-await new Promise((done,reject)=>{gateway.on('error',reject);gateway.listen(Number(site.port),site.hostname,done);});
 const names={ plugin:'plugins',map:'maps',resource_pack:'resource-packs',shader_pack:'shaders',datapack:'datapacks',addon:'addons' };
 const httpFacts=[];
 const summary={fixture:process.env.CASE, frontend:process.env.FPIN,backend:process.env.BPIN,accepted:[],browserScreens:[],httpFacts, browserTraffic:[], pageErrors:[]};
@@ -60,7 +47,17 @@ try {
           summary.browserTraffic.push({path, method:res.request().method(),status:res.status()});
       });
       page.on('pageerror',err=>summary.pageErrors.push(err.name));
-      const identity=await ctx.request.get(site.origin+'/api/v1/auth/me');
+      page.on('requestfailed',req=>{
+        if(summary.browserTraffic.length<80)
+          summary.browserTraffic.push({path:new URL(req.url()).pathname,method:req.method(),failed:req.failure()?.errorText});
+      });
+      page.on('console',msg=>{
+        if(msg.type()==='error' && summary.pageErrors.length<12) {
+          const text=msg.text();
+          summary.pageErrors.push(text.includes('Content Security Policy')?'CSP':text.includes('hydration')?'hydration':msg.type());
+        }
+      });
+      const identity=await ctx.request.get(upstream.origin+'/api/v1/auth/me');
       assert.equal(identity.status(),200,'issued actor cookie did not resolve in the real HTTP API');
       let imported, jobId;
       if(sample.adapterSamplePath){
@@ -124,4 +121,4 @@ try {
   assert.equal(summary.accepted.length,11);
   summary.status='PASS';
 } catch(e){summary.status='FAIL';summary.reason=String(e.message).slice(0,550);throw e;}
-finally{await persist();await browser.close();gateway.close();}
+finally{await persist();await browser.close();}

@@ -41,12 +41,15 @@ PY
 done
 test -s "$OUT/runtime.json"
 cd "$FRONTEND_CHECKOUT"
-node node_modules/next/dist/bin/next dev -H 127.0.0.1 -p 3991 > "$RUNNER_TEMP/next.log" 2>&1 &
+NEXT_PUBLIC_API_BASE_URL=$(jq -r .apiOrigin "$OUT/runtime.json")
+NEXT_PUBLIC_YGGDRASIL_API_ROOT="$NEXT_PUBLIC_API_BASE_URL/api/yggdrasil/"
+node node_modules/next/dist/bin/next dev -H 127.0.0.1 -p "$edge" > "$RUNNER_TEMP/next.log" 2>&1 &
 next_pid=$!
 for i in $(seq 1 90); do
-  if curl --fail --silent --max-time 3 http://127.0.0.1:3991/authentication-write-config > "$RUNNER_TEMP/public-config.json"; then break; fi
+  if (echo > /dev/tcp/127.0.0.1/"$edge") 2>/dev/null; then break; fi
   sleep 1
 done
+curl --fail --silent --max-time 120 "$NEXT_PUBLIC_SITE_URL/plugins/new" > /dev/null
 node "$HARNESS/qa/provider-browser.mjs"
 touch "$OUT/STOP"
 wait "$fixture"
