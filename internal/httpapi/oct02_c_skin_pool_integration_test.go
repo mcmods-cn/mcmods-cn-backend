@@ -27,7 +27,14 @@ func TestOCT02CSkinUpdateReadsReviewConfigurationOnTransactionIntegration(t *tes
 	server := &Server{db: pool, cfg: f.server.cfg}
 	ctx, cancel := context.WithTimeout(f.ctx, 5*time.Second)
 	defer cancel()
-	ctx = context.WithValue(ctx, claimsContextKey, security.Claims{Subject: f.userIDs[f.editor]})
+	claims, err := security.ParseToken(f.server.cfg.JWTSecret, f.editor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = f.server.resolveClaimsSubject(ctx, &claims); err != nil {
+		t.Fatal(err)
+	}
+	ctx = context.WithValue(ctx, claimsContextKey, claims)
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/skins/"+asset.PublicID, bytes.NewBufferString(`{"name":"After update"}`)).WithContext(ctx)
 	response := httptest.NewRecorder()
 	server.updateSkinDetail(response, request, asset.PublicID)

@@ -16,7 +16,6 @@ import (
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestSEC034PrivateSkinProfilePrivacyMatrixIntegration(t *testing.T) {
@@ -49,13 +48,9 @@ func TestSEC034PrivateSkinProfilePrivacyMatrixIntegration(t *testing.T) {
 		}
 	})
 
-	var ownerID, viewerID int64
-	var ownerPublicID string
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,status)
-		values('Sec034Owner','sec034-owner@example.test','not-used','active') returning id,public_id`).
-		Scan(&ownerID, &ownerPublicID); err != nil {
-		t.Fatal(err)
-	}
+	owner := newCurrentWriteTestActor(t, ctx, pool, "sec034-owner", "skin.profile.write")
+	ownerID := owner.Subject
+	var viewerID int64
 	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,status)
 		values('Sec034Viewer','sec034-viewer@example.test','not-used','active') returning id`).Scan(&viewerID); err != nil {
 		t.Fatal(err)
@@ -211,7 +206,7 @@ func TestSEC034PrivateSkinProfilePrivacyMatrixIntegration(t *testing.T) {
 	visibilityBody := bytes.NewBufferString(`{"visibility":"public"}`)
 	request = httptest.NewRequest(http.MethodPut, "/api/v1/me/player-profiles/"+profilePublicIDs["private_private"], visibilityBody)
 	request.SetPathValue("publicId", profilePublicIDs["private_private"])
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: ownerID, PublicSubject: ownerPublicID}))
+	request = request.WithContext(context.WithValue(ctx, claimsContextKey, owner))
 	response = httptest.NewRecorder()
 	server.updatePlayerProfile(response, request, profilePublicIDs["private_private"])
 	if response.Code != http.StatusConflict {
@@ -228,7 +223,7 @@ func TestSEC034PrivateSkinProfilePrivacyMatrixIntegration(t *testing.T) {
 	}
 	request = httptest.NewRequest(http.MethodPut, "/api/v1/me/player-profiles/"+profilePublicIDs["empty_public"]+"/texture", bytes.NewReader(textureBody))
 	request.SetPathValue("publicId", profilePublicIDs["empty_public"])
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: ownerID, PublicSubject: ownerPublicID}))
+	request = request.WithContext(context.WithValue(ctx, claimsContextKey, owner))
 	response = httptest.NewRecorder()
 	server.setPlayerProfileTexture(response, request)
 	if response.Code != http.StatusConflict {
