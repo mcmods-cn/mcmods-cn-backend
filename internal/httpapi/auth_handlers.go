@@ -214,7 +214,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	account := strings.TrimSpace(req.Account)
-	if account == "" || len(account) > 320 || len(req.Password) > 1024 {
+	if account == "" || len(account) > 320 || len(req.Password) > security.MaxPasswordBytes {
 		writeError(w, http.StatusBadRequest, "账号或密码格式不正确")
 		return
 	}

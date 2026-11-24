@@ -13,6 +13,7 @@ import (
 
 const (
 	MinPasswordBytes     = 8
+	MaxPasswordBytes     = 1024
 	passwordSaltBytes    = 16
 	passwordKeyBytes     = 32
 	argon2Time           = uint32(3)
@@ -26,7 +27,7 @@ const (
 
 // ValidPasswordLength is the byte-length policy for newly chosen passwords.
 func ValidPasswordLength(password string) bool {
-	return len(password) >= MinPasswordBytes && len(password) <= 1024
+	return len(password) >= MinPasswordBytes && len(password) <= MaxPasswordBytes
 }
 
 func HashPassword(password string) (string, error) {

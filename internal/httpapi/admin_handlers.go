@@ -416,12 +416,12 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !strings.Contains(req.Email, "@") {
+	if !validEmailAddress(req.Email) {
 		writeError(w, http.StatusBadRequest, "邮箱格式不正确")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "密码至少需要 8 位")
+	if !security.ValidPasswordLength(req.Password) {
+		writeError(w, http.StatusBadRequest, "密码长度需要在 8 到 1024 字节之间")
 		return
 	}
 	if req.Status != "active" && req.Status != "disabled" && req.Status != "banned" && req.Status != "deleted" {
@@ -446,6 +446,14 @@ func (s *Server) createAdminUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if !claimsAllow(claims, "user.write") || (len(req.Roles) > 0 && !claimsAllow(claims, "permission.write")) {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
 
 	var user domain.User
 	err = tx.QueryRow(

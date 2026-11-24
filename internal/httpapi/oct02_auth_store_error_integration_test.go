@@ -71,12 +71,10 @@ func TestOCT02AdminUserStorageFailureIsNotAUsernameConflictIntegration(t *testin
 	if _, err := f.db.Exec(f.ctx, `alter table users add constraint oct02_reject_admin_user check(username<>'SyntheticAuthStore') not valid`); err != nil {
 		t.Fatal(err)
 	}
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/admin/users", strings.NewReader(`{"username":"SyntheticAuthStore","email":"synthetic-auth-store@example.invalid","password":"synthetic-long-password"}`)).WithContext(f.ctx)
-	w := httptest.NewRecorder()
-	(&Server{db: f.db}).createAdminUser(w, r)
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("nonunique storage failure status=%d want500 body=%s", w.Code, w.Body.String())
-	}
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "user.write")
+	f.require(t, f.reviewer, http.MethodPost, "/api/v1/admin/users", adminCreateUserRequest{
+		Username: "SyntheticAuthStore", Email: "synthetic-auth-store@example.invalid", Password: "synthetic-long-password",
+	}, http.StatusInternalServerError)
 	var exists bool
 	if err := f.db.QueryRow(f.ctx, `select exists(select 1 from users where username='SyntheticAuthStore')`).Scan(&exists); err != nil || exists {
 		t.Fatalf("failed admin create persisted user=%v err=%v", exists, err)

@@ -4,6 +4,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"mcmods-cn-backend/internal/activity"
 	"net/http"
+	"strings"
+
+	"mcmods-cn-backend/internal/security"
 	"testing"
 )
 
@@ -82,7 +85,17 @@ func TestAdminAccountCreationSeparatesRoleAssignmentIntegration(t *testing.T) {
 	account := adminCreateUserRequest{
 		Username: "provisioned_default", Email: "provisioned-default@example.invalid", Password: "synthetic-provisioning-password",
 	}
+	for _, change := range []func(*adminCreateUserRequest){
+		func(a *adminCreateUserRequest) { a.Email = "unusable@" },
+		func(a *adminCreateUserRequest) { a.Password = strings.Repeat("x", security.MaxPasswordBytes+1) },
+	} {
+		invalid := account
+		change(&invalid)
+		f.require(t, f.editor, http.MethodPost, path, invalid, http.StatusBadRequest)
+	}
+	account.Password = strings.Repeat("界", security.MaxPasswordBytes/3) + "x"
 	f.require(t, f.editor, http.MethodPost, path, account, http.StatusCreated)
+	f.require(t, "", http.MethodPost, "/api/v1/auth/login", loginRequest{Account: account.Email, Password: account.Password}, http.StatusOK)
 
 	rolesFor := func(name string, wantManual int) {
 		t.Helper()
