@@ -174,14 +174,31 @@ func TestSimpleProjectSecondaryMetadataFailuresAreVisible(t *testing.T) {
 
 func assertFreeTextDidNotClassifyResourcePack(t *testing.T, draft simpleProjectSnapshot) {
 	t.Helper()
-	if draft.Resolution != "16x" {
-		t.Fatalf("free text changed resolution to %q", draft.Resolution)
+	if draft.Resolution != "" {
+		t.Fatalf("resolution without a structured tag = %q", draft.Resolution)
 	}
 	if len(draft.Features) != 0 {
 		t.Fatalf("free text created features: %#v", draft.Features)
 	}
 	if !containsSimpleImportOption(draft.Categories, "vanilla_like") {
 		t.Fatalf("structured provider category was lost: %#v", draft.Categories)
+	}
+}
+
+func TestSimpleProjectImportsKeepUnspecifiedClassifications(t *testing.T) {
+	for _, kind := range []string{"resource_pack", "shader_pack", "map"} {
+		data := simpleProjectImportData{ProjectType: kind, Provider: "curseforge", ProviderProjectID: "27", Name: "Example", Slug: "example",
+			ProviderURL: "https://example.invalid/source", MinecraftVersions: []string{"1.20.1"}, StructuredValues: []string{"iris"}}
+		draft := simpleProjectDraftFromExternal(data)
+		if draft.Resolution != "" || draft.Performance != "" || draft.MapSize != "" {
+			t.Errorf("%s gained a classification without provider evidence: %q %q %q", kind, draft.Resolution, draft.Performance, draft.MapSize)
+		}
+		if err := normalizeAndValidateSimpleProjectDraft(&draft, true); err != nil {
+			t.Errorf("cannot edit %s draft without a classification: %v", kind, err)
+		}
+	}
+	if got := simpleProjectPerformanceFromExternal([]string{"lightweight"}); got != "low" {
+		t.Errorf("known shader performance was lost: %q", got)
 	}
 }
 

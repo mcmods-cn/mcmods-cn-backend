@@ -646,10 +646,10 @@ func normalizeAndValidateSimpleProjectDraft(snapshot *simpleProjectSnapshot, all
 	if (snapshot.ProjectType == "plugin" || snapshot.ProjectType == "shader_pack") && len(snapshot.Loaders) == 0 {
 		return errors.New("at least one loader is required")
 	}
-	if snapshot.ProjectType == "resource_pack" && !stringSet("8x_or_lower", "16x", "32x", "48x", "64x", "128x", "256x", "512x_or_higher")[snapshot.Resolution] ||
-		snapshot.ProjectType == "shader_pack" && !stringSet("potato", "low", "medium", "high", "cinematic", "supercomputer")[snapshot.Performance] ||
-		snapshot.ProjectType == "map" && !stringSet("tiny", "small", "medium", "large", "huge")[snapshot.MapSize] {
-		return errors.New("the project-specific classification is required")
+	if snapshot.ProjectType == "resource_pack" && !stringSet("", "8x_or_lower", "16x", "32x", "48x", "64x", "128x", "256x", "512x_or_higher")[snapshot.Resolution] ||
+		snapshot.ProjectType == "shader_pack" && !stringSet("", "potato", "low", "medium", "high", "cinematic", "supercomputer")[snapshot.Performance] ||
+		snapshot.ProjectType == "map" && !stringSet("", "tiny", "small", "medium", "large", "huge")[snapshot.MapSize] {
+		return errors.New("invalid project-specific classification")
 	}
 	if snapshot.IconURL != "" && !validHTTPURL(snapshot.IconURL) {
 		return errors.New("invalid project icon URL")

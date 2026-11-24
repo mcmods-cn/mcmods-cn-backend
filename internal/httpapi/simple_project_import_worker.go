@@ -115,8 +115,6 @@ func simpleProjectDraftFromExternal(data simpleProjectImportData) simpleProjectS
 		draft.Resolution = simpleProjectResolutionFromExternal(data.StructuredValues)
 	case "shader_pack":
 		draft.Performance = simpleProjectPerformanceFromExternal(data.StructuredValues)
-	case "map":
-		draft.MapSize = "medium"
 	}
 	return draft
 }
@@ -296,7 +294,7 @@ func simpleProjectResolutionFromExternal(values []string) string {
 			return option.code
 		}
 	}
-	return "16x"
+	return ""
 }
 
 func simpleProjectPerformanceFromExternal(values []string) string {
@@ -312,7 +310,7 @@ func simpleProjectPerformanceFromExternal(values []string) string {
 			return option.code
 		}
 	}
-	return "medium"
+	return ""
 }
 
 func mappedExternalOptions(values []string, mapping map[string][]string) []string {
