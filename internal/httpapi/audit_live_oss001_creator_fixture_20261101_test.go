@@ -279,6 +279,7 @@ func TestAuditOSS001CurrentDraftReceiptDistinguishesAbsenceFromReadFailure(t *te
 	f := newAuditFixGRFixture(t, 90*time.Second)
 	key := "creator:" + f.modCode
 	owner := f.userIDs[f.editor]
+	grantTEST044Permissions(t, f.ctx, f.db, owner, "user.draft.retention_seconds.3600")
 	if got, err := auditOSS001CurrentDraft(f.ctx, f.db, owner, key); err != nil || got["draftFound"] != false {
 		t.Fatalf("missing draft observation: %v, %v", got, err)
 	}
