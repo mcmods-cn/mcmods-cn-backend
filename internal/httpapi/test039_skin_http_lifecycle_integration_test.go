@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -370,6 +371,63 @@ func TestTEST039SharedBlobQuotaLastReferenceDeletionAndFreshKeyFullHTTPIntegrati
 		t.Fatal("actual old DELETE destroyed new shared incarnation or leaked retired bytes")
 	}
 	assertTEST039TextureBytes(t, f.require(t, "", http.MethodGet, fresh.TextureURL, nil, 200), fresh.TextureHash)
+}
+
+func TestSkinCreationUsesReviewPolicyInForceAfterFileProcessing(t *testing.T) {
+	f := newTEST039Fixture(t)
+	file := f.upload(t, f.editor, "policy.png", test039PNG(t, 64, 64, 17))
+	// Start with automatic publication, then have the operator require review
+	// while a normal submission is waiting for the account's creation lock.
+	if _, err := f.db.Exec(f.ctx, `update system_settings set value=jsonb_set(value,'{catalogCreate}','false') where key=$1`, reviewConfigSettingKey); err != nil {
+		t.Fatal(err)
+	}
+	policyChange, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer policyChange.Rollback(f.ctx)
+	if _, err = policyChange.Exec(f.ctx, "select id from users where id=$1 for no key update", f.userIDs[f.editor]); err != nil {
+		t.Fatal(err)
+	}
+	result := auditCompletionAsyncJSON(f.test013Fixture, f.editor, http.MethodPost, "/api/v1/skins",
+		skinAssetCreateRequest{FileID: file, Kind: "skin", Name: "Policy change", Visibility: "public"})
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		var waiting bool
+		if err = f.db.QueryRow(f.ctx, `select exists(select 1 from pg_stat_activity where datname=current_database()
+			and $1::int=any(pg_blocking_pids(pid)))`, policyChange.Conn().PgConn().PID()).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case <-tick.C:
+		case ended := <-result:
+			t.Fatalf("creation finished before policy change: %d %v", ended.status, ended.err)
+		case <-deadline.C:
+			t.Fatal("skin creation did not wait for the account row")
+		}
+	}
+	if _, err = policyChange.Exec(f.ctx, `update system_settings set value=jsonb_set(value,'{catalogCreate}','true') where key=$1`, reviewConfigSettingKey); err != nil {
+		t.Fatal(err)
+	}
+	if err = policyChange.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	completed := <-result
+	if completed.err != nil || completed.status != http.StatusCreated {
+		t.Fatalf("skin creation: %d %s %v", completed.status, completed.raw, completed.err)
+	}
+	asset := decodeTEST022Data[playerTextureResponse](t, completed.raw)
+	if asset.ReviewStatus != "pending" {
+		t.Fatalf("submitted skin review status=%q, want pending", asset.ReviewStatus)
+	}
+	f.pendingRevision(t, asset.PublicID)
+	f.require(t, "", http.MethodGet, "/api/v1/skins/"+asset.PublicID, nil, http.StatusNotFound)
 }
 
 func TestTEST039ActualDerivedUploadRollbackUsesDurableCompensationAndFreshRetryFullHTTPIntegration(t *testing.T) {
