@@ -2,7 +2,7 @@ package database
 
 // A vote records whether its score actually reached the route, global and
 // dimension facts. Removing that contribution must use the old receipt. User
-// and project changes reclassify existing votes through the same row trigger.
+// and project changes reclassify both ratings and social contributions.
 func ratingEligibilityStatements() []string {
 	return []string{
 		`create function classify_rating() returns trigger as $$
@@ -26,7 +26,7 @@ func ratingEligibilityStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_content_ratings_classify before insert or update on content_ratings
 			for each row execute function classify_rating()`,
-		`create function reclassify_user_ratings(actor_id bigint) returns void as $$
+		`create function reclassify_user_popularity(actor_id bigint) returns void as $$
 		begin
 			perform 1 from users where id=actor_id for no key update;
 			-- A concurrent edit or a change of the other eligibility scope can
@@ -35,9 +35,10 @@ func ratingEligibilityStatements() []string {
 			update content_ratings set counted=not counted
 			where author_id=actor_id and counted is distinct from
 				(status='published' and content_popularity_actor_eligible(object_route_id,author_id));
+			perform reclassify_social_contributions(actor_id,null);
 		end;
 		$$ language plpgsql`,
-		`create function reclassify_project_ratings(project_kind text,project_id bigint) returns void as $$
+		`create function reclassify_project_popularity(project_kind text,project_id bigint) returns void as $$
 		declare route_id bigint;
 		begin
 			select id into route_id from public_routes
@@ -47,41 +48,42 @@ func ratingEligibilityStatements() []string {
 			update content_ratings set counted=not counted
 			where object_route_id=route_id and counted is distinct from
 				(status='published' and content_popularity_actor_eligible(object_route_id,author_id));
+			perform reclassify_social_contributions(null,route_id);
 		end;
 		$$ language plpgsql`,
-		`create function reclassify_ratings_from_account() returns trigger as $$
+		`create function reclassify_popularity_from_account() returns trigger as $$
 		begin
-			perform reclassify_user_ratings(new.id);
+			perform reclassify_user_popularity(new.id);
 			return null;
 		end;
 		$$ language plpgsql`,
 		`create trigger trg_users_rating_eligibility after update of status,security_score on users
 			for each row when ((old.status='active' and old.security_score>=40) is distinct from
 				(new.status='active' and new.security_score>=40))
-			execute function reclassify_ratings_from_account()`,
-		`create function reclassify_ratings_from_claim() returns trigger as $$
+			execute function reclassify_popularity_from_account()`,
+		`create function reclassify_popularity_from_claim() returns trigger as $$
 		begin
-			if tg_op<>'INSERT' and old.status='approved' then perform reclassify_user_ratings(old.user_id); end if;
+			if tg_op<>'INSERT' and old.status='approved' then perform reclassify_user_popularity(old.user_id); end if;
 			if tg_op<>'DELETE' and new.status='approved' and (tg_op='INSERT' or
-				old.status<>'approved' or old.user_id<>new.user_id) then perform reclassify_user_ratings(new.user_id); end if;
+				old.status<>'approved' or old.user_id<>new.user_id) then perform reclassify_user_popularity(new.user_id); end if;
 			return null;
 		end;
 		$$ language plpgsql`,
 		`create trigger trg_claims_rating_eligibility
 			after insert or update of creator_id,user_id,status or delete on creator_claims
-			for each row execute function reclassify_ratings_from_claim()`,
-		`create function reclassify_ratings_from_binding() returns trigger as $$
+			for each row execute function reclassify_popularity_from_claim()`,
+		`create function reclassify_popularity_from_binding() returns trigger as $$
 		begin
-			if tg_op<>'INSERT' then perform reclassify_project_ratings(old.subject_type,old.subject_id); end if;
+			if tg_op<>'INSERT' then perform reclassify_project_popularity(old.subject_type,old.subject_id); end if;
 			if tg_op='INSERT' or (tg_op='UPDATE' and (old.subject_type,old.subject_id) is distinct from
-				(new.subject_type,new.subject_id)) then perform reclassify_project_ratings(new.subject_type,new.subject_id); end if;
+				(new.subject_type,new.subject_id)) then perform reclassify_project_popularity(new.subject_type,new.subject_id); end if;
 			return null;
 		end;
 		$$ language plpgsql`,
 		`create trigger trg_creator_bindings_rating_eligibility
 			after insert or update of subject_type,subject_id,creator_id,status,permission_granting or delete on content_creator_bindings
-			for each row execute function reclassify_ratings_from_binding()`,
-		`create function reclassify_ratings_from_creator() returns trigger as $$
+			for each row execute function reclassify_popularity_from_binding()`,
+		`create function reclassify_popularity_from_creator() returns trigger as $$
 		declare creator_ids bigint[]; actor_id bigint;
 		begin
 			if tg_table_name='creators' then
@@ -94,35 +96,35 @@ func ratingEligibilityStatements() []string {
 			else creator_ids:=array[old.member_creator_id,new.member_creator_id]; end if;
 			for actor_id in select distinct claim.user_id from creator_claims claim
 				where claim.creator_id=any(creator_ids) and claim.status='approved' order by claim.user_id loop
-				perform reclassify_user_ratings(actor_id);
+				perform reclassify_user_popularity(actor_id);
 			end loop;
 			return null;
 		end;
 		$$ language plpgsql`,
 		`create trigger trg_creators_rating_eligibility after update of kind,review_status on creators
 			for each row when ((old.kind,old.review_status) is distinct from (new.kind,new.review_status))
-			execute function reclassify_ratings_from_creator()`,
+			execute function reclassify_popularity_from_creator()`,
 		`create trigger trg_team_members_rating_eligibility
 			after insert or update of team_id,member_creator_id,status or delete on creator_team_members
-			for each row execute function reclassify_ratings_from_creator()`,
-		`create function reclassify_ratings_from_publication() returns trigger as $$
+			for each row execute function reclassify_popularity_from_creator()`,
+		`create function reclassify_popularity_from_publication() returns trigger as $$
 		begin
-			if tg_table_name='simple_projects' then perform reclassify_project_ratings(new.project_type,new.id);
-			else perform reclassify_project_ratings(tg_argv[0],new.id); end if;
+			if tg_table_name='simple_projects' then perform reclassify_project_popularity(new.project_type,new.id);
+			else perform reclassify_project_popularity(tg_argv[0],new.id); end if;
 			return null;
 		end;
 		$$ language plpgsql`,
 		`create trigger trg_mods_rating_eligibility after update of review_status on mods
 			for each row when ((old.review_status='approved') <> (new.review_status='approved'))
-			execute function reclassify_ratings_from_publication('mod')`,
+			execute function reclassify_popularity_from_publication('mod')`,
 		`create trigger trg_modpacks_rating_eligibility after update of review_status on modpacks
 			for each row when ((old.review_status='approved') <> (new.review_status='approved'))
-			execute function reclassify_ratings_from_publication('modpack')`,
+			execute function reclassify_popularity_from_publication('modpack')`,
 		`create trigger trg_simple_projects_rating_eligibility after update of review_status on simple_projects
 			for each row when ((old.review_status='approved') <> (new.review_status='approved'))
-			execute function reclassify_ratings_from_publication()`,
+			execute function reclassify_popularity_from_publication()`,
 		`create trigger trg_servers_rating_eligibility after update of review_status on minecraft_servers
 			for each row when ((old.review_status='approved') <> (new.review_status='approved'))
-			execute function reclassify_ratings_from_publication('minecraft_server')`,
+			execute function reclassify_popularity_from_publication('minecraft_server')`,
 	}
 }
