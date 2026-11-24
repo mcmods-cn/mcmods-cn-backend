@@ -60,9 +60,8 @@ type minecraftTextureBlob struct {
 	SizeBytes int64
 }
 
-// pendingTextureUpload identifies a provider object written inside a larger
-// business transaction. Until that transaction commits, a rollback must be
-// followed by a durable unregistered-object deletion job.
+// A PUT can succeed at the provider even when its receipt is lost. Both web
+// and launcher uploads retain the unique key until the business transaction commits.
 type pendingTextureUpload struct {
 	Config    ossConfigPayload
 	ObjectKey string
@@ -221,10 +220,6 @@ func (s *Server) loadMinecraftTextureUpload(ctx context.Context, file trustedRas
 }
 
 func persistSanitizedMinecraftTextureTx(ctx context.Context, tx pgx.Tx, client *aliyunoss.Client, cfg ossConfigPayload, texture sanitizedMinecraftTexture) (minecraftTextureBlob, *pendingTextureUpload, error) {
-	return persistSanitizedMinecraftTextureWithStore(ctx, tx, client, cfg, texture)
-}
-
-func persistSanitizedMinecraftTextureWithStore(ctx context.Context, store minecraftTextureStore, client *aliyunoss.Client, cfg ossConfigPayload, texture sanitizedMinecraftTexture) (minecraftTextureBlob, *pendingTextureUpload, error) {
 	var result minecraftTextureBlob
 	kind, err := normalizeMinecraftTextureKind(texture.Kind)
 	if err != nil {
@@ -250,10 +245,10 @@ func persistSanitizedMinecraftTextureWithStore(ctx context.Context, store minecr
 		return result, nil, fmt.Errorf("sanitized texture hash is invalid")
 	}
 
-	if err = lockMinecraftTextureLifecycleStore(ctx, store, computedHash); err != nil {
+	if err = lockMinecraftTextureLifecycleStore(ctx, tx, computedHash); err != nil {
 		return result, nil, fmt.Errorf("lock texture blob lifecycle: %w", err)
 	}
-	existing, fileStatus, err := minecraftTextureBlobByHashStore(ctx, store, computedHash)
+	existing, fileStatus, err := minecraftTextureBlobByHashStore(ctx, tx, computedHash)
 	hasExisting := err == nil
 	if hasExisting && fileStatus == "active" {
 		return existing, nil, nil
@@ -275,6 +270,7 @@ func persistSanitizedMinecraftTextureWithStore(ctx context.Context, store minecr
 		return result, nil, err
 	}
 	objectKey := path.Join(ossObjectPrefix(cfg.Prefix, textureCategory), computedHash+"-"+strings.ReplaceAll(lifecycleID, "-", "")+".png")
+	pendingUpload := &pendingTextureUpload{Config: cfg, ObjectKey: objectKey}
 	_, err = client.PutObject(ctx, &aliyunoss.PutObjectRequest{
 		Bucket:        aliyunoss.Ptr(cfg.Bucket),
 		Key:           aliyunoss.Ptr(objectKey),
@@ -284,12 +280,11 @@ func persistSanitizedMinecraftTextureWithStore(ctx context.Context, store minecr
 		Metadata:      map[string]string{"sha256": computedHash, "texture-kind": kind},
 	})
 	if err != nil {
-		return result, nil, fmt.Errorf("store sanitized texture: %w", err)
+		return result, pendingUpload, fmt.Errorf("store sanitized texture: %w", err)
 	}
-	pendingUpload := &pendingTextureUpload{Config: cfg, ObjectKey: objectKey}
 
 	var fileID int64
-	err = store.QueryRow(ctx, `insert into oss_files(
+	err = tx.QueryRow(ctx, `insert into oss_files(
 		bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
 		content_type,size_bytes,source_size_bytes,sha256,status,scan_status)
 		values($1,$2,$3,$4,$5,'minecraft_texture_derived',$6,$6,'image/png',$7,0,$8,'active','trusted_generated')
@@ -299,11 +294,11 @@ func persistSanitizedMinecraftTextureWithStore(ctx context.Context, store minecr
 		return result, pendingUpload, fmt.Errorf("record sanitized texture: %w", err)
 	}
 	if hasExisting {
-		_, err = store.Exec(ctx, `update skin_texture_blobs set
+		_, err = tx.Exec(ctx, `update skin_texture_blobs set
 			oss_file_id=$2,object_key=$3,width=$4,height=$5,size_bytes=$6
 			where hash=$1`, computedHash, fileID, objectKey, texture.Width, texture.Height, len(texture.Data))
 	} else {
-		_, err = store.Exec(ctx, `insert into skin_texture_blobs(hash,oss_file_id,object_key,width,height,size_bytes)
+		_, err = tx.Exec(ctx, `insert into skin_texture_blobs(hash,oss_file_id,object_key,width,height,size_bytes)
 			values($1,$2,$3,$4,$5,$6)`, computedHash, fileID, objectKey, texture.Width, texture.Height, len(texture.Data))
 	}
 	if err != nil {
