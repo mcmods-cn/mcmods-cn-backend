@@ -883,6 +883,17 @@ func TestBlueprintConversionUsesTheVariantPublishedWhileAdmissionWaits(t *testin
 		upload.publicID).Scan(&variantID); err != nil {
 		t.Fatal(err)
 	}
+	// This fixture owns its database. A site's default can be stronger than
+	// read committed; the admission transaction needs a fresh snapshot after waiting.
+	databaseName := pgx.Identifier{f.db.Config().ConnConfig.Database}.Sanitize()
+	if _, err := f.db.Exec(f.ctx, "alter database "+databaseName+" set default_transaction_isolation='repeatable read'"); err != nil {
+		t.Fatal(err)
+	}
+	f.db.Reset()
+	var defaultIsolation string
+	if err := f.db.QueryRow(f.ctx, "show default_transaction_isolation").Scan(&defaultIsolation); err != nil || defaultIsolation != "repeatable read" {
+		t.Fatalf("fixture isolation=%q err=%v", defaultIsolation, err)
+	}
 	publisher, err := f.db.Begin(f.ctx)
 	if err != nil {
 		t.Fatal(err)
