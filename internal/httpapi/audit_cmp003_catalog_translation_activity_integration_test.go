@@ -239,7 +239,7 @@ func TestCatalogTranslationEnqueueReportsStorageFailureWithoutDatabaseDetails(t 
 		t.Fatal(err)
 	}
 	result := x.request(t, map[string]string{"targetLocale": "fr-FR", "sourceLocale": "en-US"})
-	if result.status != http.StatusServiceUnavailable || bytes.Contains(result.raw, []byte(fault)) || !bytes.Contains(result.raw, []byte("Could not queue the translation")) {
+	if result.status != http.StatusServiceUnavailable || bytes.Contains(result.raw, []byte(fault)) || !bytes.Contains(result.raw, []byte("Could not confirm the translation request")) {
 		t.Errorf("catalog enqueue HTTP %d: %s", result.status, result.raw)
 	}
 	if f.number(t, `select count(*) from ai_tasks`) != 0 {

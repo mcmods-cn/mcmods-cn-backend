@@ -56,17 +56,12 @@ func TestAuditDGR001TranslationResultsRecheckCurrentSourceFullHTTPIntegration(t 
 		values('audit-notification-visible',$1,'fixture','fixture','failed','{}',$2)`, aiTaskNotificationTranslation, f.userIDs[f.editor]); err != nil {
 		t.Fatal(err)
 	}
-	for _, scope := range []string{"content", "community", "notifications"} {
-		task := map[string]string{"content": "audit-catalog-visible", "community": "audit-community-visible", "notifications": "audit-notification-visible"}[scope]
+	for scope, task := range map[string]string{"content": "audit-catalog-visible", "community": "audit-community-visible", "notifications": "audit-notification-visible"} {
 		if _, err := f.db.Exec(f.ctx, `update ai_tasks set status='failed',error=$2 where task_uid=$1`, task, marker); err != nil {
 			t.Fatal(err)
 		}
 		raw := f.require(t, f.editor, http.MethodGet, "/api/v1/"+scope+"/translations/"+task, nil, http.StatusOK)
-		var result struct {
-			Status string `json:"status"`
-			Error  string `json:"error"`
-		}
-		result = decodeTEST022Data[struct {
+		result := decodeTEST022Data[struct {
 			Status string `json:"status"`
 			Error  string `json:"error"`
 		}](t, raw)
@@ -74,6 +69,14 @@ func TestAuditDGR001TranslationResultsRecheckCurrentSourceFullHTTPIntegration(t 
 			t.Errorf("%s did not return a safe, actionable failed result: %s", scope, raw)
 		}
 	}
+
+	const catalogTask = "audit-catalog-visible"
+	if _, err := f.db.Exec(f.ctx, `update ai_tasks set created_by=null where task_uid=$1`, catalogTask); err != nil {
+		t.Fatal(err)
+	}
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "content.translate", "content.review")
+	f.require(t, f.reviewer, http.MethodGet, "/api/v1/content/translations/"+catalogTask, nil, http.StatusOK)
+	f.require(t, f.editor, http.MethodGet, "/api/v1/content/translations/"+catalogTask, nil, http.StatusForbidden)
 
 }
 

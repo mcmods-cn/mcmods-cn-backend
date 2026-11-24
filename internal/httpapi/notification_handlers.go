@@ -363,17 +363,17 @@ func (s *Server) notificationTranslationResult(w http.ResponseWriter, r *http.Re
 		return
 	}
 	claims := currentClaims(r)
-	var status, errorMessage string
+	var status string
 	var resultRaw, payloadRaw []byte
 	var inputTokens, outputTokens int64
 	err := s.db.QueryRow(
 		r.Context(),
-		`select status, result, payload, error, input_tokens, output_tokens
+		`select status, result, payload, input_tokens, output_tokens
 		 from ai_tasks where task_uid = $1 and created_by = $2 and task_type = $3`,
 		taskUID,
 		claims.Subject,
 		aiTaskNotificationTranslation,
-	).Scan(&status, &resultRaw, &payloadRaw, &errorMessage, &inputTokens, &outputTokens)
+	).Scan(&status, &resultRaw, &payloadRaw, &inputTokens, &outputTokens)
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "翻译任务不存在")
 		return
@@ -383,7 +383,7 @@ func (s *Server) notificationTranslationResult(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusInternalServerError, "读取翻译任务失败")
 		return
 	}
-	response := map[string]any{"status": status, "error": errorMessage, "inputTokens": inputTokens, "outputTokens": outputTokens}
+	response := map[string]any{"status": status, "error": publicTranslationTaskError(status), "inputTokens": inputTokens, "outputTokens": outputTokens}
 	if status == "completed" {
 		translated, decodeErr := decodeStoredNotificationTranslation(payloadRaw, resultRaw)
 		if decodeErr != nil {

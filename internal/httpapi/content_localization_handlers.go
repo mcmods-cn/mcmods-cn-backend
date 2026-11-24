@@ -394,12 +394,8 @@ func (s *Server) requestCatalogContentTranslation(w http.ResponseWriter, r *http
 	}
 	annotateActivity(r, 0, catalogActivityObjectType(entity.EntityType), publicID, 0)
 	task, err := s.enqueueCatalogContentTranslation(r.Context(), entity, source, request.TargetLocale, claims.Subject, limit, r)
-	if errors.Is(err, errAIQuotaExceeded) {
-		writeError(w, http.StatusTooManyRequests, "daily AI token allowance is insufficient")
-		return
-	}
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		writeContentTranslationEnqueueError(w, publicID, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
@@ -414,14 +410,14 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 		return
 	}
 	claims := currentClaims(r)
-	var status, errorMessage string
+	var status string
 	var resultRaw, payloadRaw []byte
 	var createdBy *int64
 	var inputTokens, outputTokens int64
 	err := s.db.QueryRow(r.Context(), `
-		select status,result,payload,error,created_by,input_tokens,output_tokens
+		select status,result,payload,created_by,input_tokens,output_tokens
 		from ai_tasks where task_uid=$1 and task_type=$2`, taskUID, aiTaskContentTranslation).Scan(
-		&status, &resultRaw, &payloadRaw, &errorMessage, &createdBy, &inputTokens, &outputTokens,
+		&status, &resultRaw, &payloadRaw, &createdBy, &inputTokens, &outputTokens,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "translation task does not exist")
@@ -432,7 +428,7 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "failed to load translation task")
 		return
 	}
-	if createdBy != nil && *createdBy != claims.Subject && !claimsAllow(claims, "content.review") {
+	if (createdBy == nil || *createdBy != claims.Subject) && !claimsAllow(claims, "content.review") {
 		writeError(w, http.StatusForbidden, "translation task belongs to another user")
 		return
 	}
@@ -456,7 +452,7 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 	}
 
 	response := map[string]any{
-		"taskId": taskUID, "status": status, "error": errorMessage,
+		"taskId": taskUID, "status": status, "error": publicTranslationTaskError(status),
 		"inputTokens": inputTokens, "outputTokens": outputTokens,
 	}
 	if status == "completed" {
@@ -655,11 +651,11 @@ func (s *Server) enqueueCatalogContentTranslation(
 	cfg := s.aiConfigFromSettings(ctx)
 	binding, ok := findAITaskModel(cfg.TaskModels, aiTaskContentTranslation)
 	if !ok {
-		return enqueuedContentTranslation{}, errors.New("content translation task has no configured AI model")
+		return enqueuedContentTranslation{}, errContentTranslationModel
 	}
 	provider, model, ok := resolveAIModel(cfg, binding.ModelKey)
 	if !ok {
-		return enqueuedContentTranslation{}, errors.New("content translation AI model or provider is unavailable")
+		return enqueuedContentTranslation{}, errContentTranslationModel
 	}
 	items := []map[string]string{
 		{"key": "name", "text": source.Name},
@@ -677,7 +673,7 @@ func (s *Server) enqueueCatalogContentTranslation(
 	rawPayload, _ := json.Marshal(payload)
 	reserved, err := aiTranslationReservationForPayload(aiTaskContentTranslation, binding, model, rawPayload)
 	if err != nil {
-		return enqueuedContentTranslation{}, err
+		return enqueuedContentTranslation{}, fmt.Errorf("%w: %w", errContentTranslationSize, err)
 	}
 	concurrencyKey := contentTranslationConcurrencyKey(entity.EntityType, entity.EntityID, source, targetLocale, actorID)
 	tx, err := s.db.Begin(ctx)
@@ -733,7 +729,7 @@ func (s *Server) enqueueCatalogContentTranslation(
 	}
 	if request != nil {
 		if err = enqueueRequestActivityTx(request, tx); err != nil {
-			return enqueuedContentTranslation{}, errors.New("failed to persist AI translation activity")
+			return enqueuedContentTranslation{}, fmt.Errorf("%w: %w", errContentTranslationActivity, err)
 		}
 	}
 	if err = tx.Commit(ctx); err != nil {

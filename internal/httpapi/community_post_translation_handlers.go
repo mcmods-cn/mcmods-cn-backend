@@ -58,12 +58,8 @@ func (s *Server) requestCommunityPostTranslation(w http.ResponseWriter, r *http.
 		return
 	}
 	task, err := s.enqueueCommunityPostTranslation(r.Context(), publicID, postID, revisionID, sourceLocale, targetLocale, title, body, claims.Subject, limit, r)
-	if errors.Is(err, errAIQuotaExceeded) {
-		writeError(w, http.StatusTooManyRequests, "daily AI token allowance is insufficient")
-		return
-	}
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		writeContentTranslationEnqueueError(w, publicID, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"taskId": task.TaskUID, "status": task.Status, "countsTowardDailyTokenQuota": true})
@@ -77,11 +73,11 @@ func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID s
 	cfg := s.aiConfigFromSettings(ctx)
 	binding, ok := findAITaskModel(cfg.TaskModels, aiTaskContentTranslation)
 	if !ok {
-		return enqueuedContentTranslation{}, errors.New("content translation is not configured")
+		return enqueuedContentTranslation{}, errContentTranslationModel
 	}
 	provider, model, ok := resolveAIModel(cfg, binding.ModelKey)
 	if !ok {
-		return enqueuedContentTranslation{}, errors.New("content translation model is unavailable")
+		return enqueuedContentTranslation{}, errContentTranslationModel
 	}
 	payload := map[string]any{"scope": "community_post", "postId": publicID, "postInternalId": postID,
 		"sourceRevisionId": revisionID, "sourceLocale": sourceLocale, "targetLocale": targetLocale,
@@ -89,7 +85,7 @@ func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID s
 	raw, _ := json.Marshal(payload)
 	reserved, err := aiTranslationReservationForPayload(aiTaskContentTranslation, binding, model, raw)
 	if err != nil {
-		return enqueuedContentTranslation{}, err
+		return enqueuedContentTranslation{}, fmt.Errorf("%w: %w", errContentTranslationSize, err)
 	}
 	concurrencyKey := "community-post:" + publicID + ":" + targetLocale + ":" + strconv.FormatInt(revisionID, 10) + ":actor:" + strconv.FormatInt(actorID, 10)
 	tx, err := s.db.Begin(ctx)
@@ -132,7 +128,7 @@ func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID s
 	}
 	if request != nil {
 		if err = enqueueRequestActivityTx(request, tx); err != nil {
-			return enqueuedContentTranslation{}, errors.New("failed to persist AI translation activity")
+			return enqueuedContentTranslation{}, fmt.Errorf("%w: %w", errContentTranslationActivity, err)
 		}
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -144,11 +140,11 @@ func (s *Server) enqueueCommunityPostTranslation(ctx context.Context, publicID s
 
 func (s *Server) communityPostTranslationResult(w http.ResponseWriter, r *http.Request) {
 	taskUID := strings.ToLower(strings.TrimSpace(r.PathValue("taskId")))
-	var status, errorText string
+	var status string
 	var createdBy int64
 	var payloadRaw []byte
-	err := s.db.QueryRow(r.Context(), `select status,error,coalesce(created_by,0),payload from ai_tasks where task_uid=$1 and task_type=$2`, taskUID, aiTaskContentTranslation).
-		Scan(&status, &errorText, &createdBy, &payloadRaw)
+	err := s.db.QueryRow(r.Context(), `select status,coalesce(created_by,0),payload from ai_tasks where task_uid=$1 and task_type=$2`, taskUID, aiTaskContentTranslation).
+		Scan(&status, &createdBy, &payloadRaw)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && createdBy != currentClaims(r).Subject) {
 		writeError(w, http.StatusNotFound, "translation task not found")
 		return
@@ -173,7 +169,7 @@ func (s *Server) communityPostTranslationResult(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusNotFound, "translation source not found")
 		return
 	}
-	response := map[string]any{"taskId": taskUID, "status": status, "error": errorText}
+	response := map[string]any{"taskId": taskUID, "status": status, "error": publicTranslationTaskError(status)}
 	if status == "completed" {
 		var title, body string
 		err = s.db.QueryRow(r.Context(), `select title,body_markdown from community_post_translations where post_id=$1 and locale=$2 and source_revision_id=$3`, payload.PostInternalID, payload.TargetLocale, payload.SourceRevision).Scan(&title, &body)
