@@ -134,3 +134,26 @@ func TestLootCardsRetainCanonicalAndImportedSummaryKeysIntegration(t *testing.T)
 		})
 	}
 }
+
+func TestResourcePresentationUsesPublishedDisplayNameIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	identity := resourceIdentity("minecraft.item", "example:display_name")
+	var entityID int64
+	if err := f.db.QueryRow(f.ctx, `insert into catalog_entities(identity_key,public_id,entity_type,status,default_locale)
+		values($1,$2,'resource','active','zh-CN') returning id`, identity.ID, identity.PublicID).Scan(&entityID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `insert into game_resources(entity_id,kind_code,canonical_id,namespace,resource_path,resolved)
+		values($1,'minecraft.item','example:display_name','example','display_name',true)`, entityID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,review_status)
+		values('resource',$1,$1,'zh-CN','Draft translation','pending'),('resource',$1,$1,'en-US','Published translation','approved')`, entityID); err != nil {
+		t.Fatal(err)
+	}
+	raw := f.require(t, "", http.MethodGet, "/api/v1/catalog/resource-presentation?ref="+identity.PublicID+"&locale=zh-CN", nil, http.StatusOK)
+	display := decodeTEST022Data[map[string]any](t, raw)
+	if display["name"] != "Published translation" || display["locale"] != "en-US" {
+		t.Fatalf("expected the approved fallback language, got name=%q locale=%q", display["name"], display["locale"])
+	}
+}
