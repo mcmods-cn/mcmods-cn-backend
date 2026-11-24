@@ -28,8 +28,17 @@ func TestProjectFilePageCursorBindsProjectSourceAndLimit(t *testing.T) {
 	raw := encodeProjectFilePageCursor(projectFilePageCursor{
 		Version: projectFileCursorVersion, Scope: request.Scope, CreatedAt: time.Date(2026, 8, 20, 12, 0, 0, 0, time.UTC), InternalID: 42,
 	})
-	if _, err = parseProjectFilePageRequest(url.Values{"source": {"internal"}, "limit": {"20"}, "cursor": {raw}}, project); err != nil {
+	nextPage := url.Values{"source": {"internal"}, "limit": {"20"}, "cursor": {raw}}
+	if _, err = parseProjectFilePageRequest(nextPage, project); err != nil {
 		t.Fatal(err)
+	}
+	for _, other := range []projectFileContext{
+		{ProjectType: project.ProjectType, ProjectID: "mod000002"},
+		{ProjectType: "modpack", ProjectID: project.ProjectID},
+	} {
+		if _, parseErr := parseProjectFilePageRequest(nextPage, other); parseErr == nil {
+			t.Errorf("accepted a previous project's file cursor after switching to %s/%s", other.ProjectType, other.ProjectID)
+		}
 	}
 	for _, values := range []url.Values{
 		{"source": {"internal"}, "limit": {"21"}, "cursor": {raw}},
