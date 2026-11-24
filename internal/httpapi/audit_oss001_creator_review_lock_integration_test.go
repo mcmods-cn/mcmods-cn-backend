@@ -28,7 +28,7 @@ func TestAuditOSS001CreatorReviewLockUsesActualKindAndExactEditorHTTPPostgresInt
 				Revision string `json:"revisionId"`
 				Request  string `json:"changeRequestId"`
 				Status   string `json:"reviewStatus"`
-			}](t, f.require(t, f.editor, http.MethodPut, "/api/v1/creators/"+id, map[string]any{"kind": kind, "name": "Edited profile for review lock " + id, "descriptionMarkdown": "A distinct requested biography", "defaultLocale": "en-US", "localizations": []map[string]any{{"locale": "en-US", "contentMarkdown": "A distinct requested biography"}}, "avatarUrl": "", "links": []any{}}, 200))
+			}](t, f.require(t, f.editor, http.MethodPut, "/api/v1/creators/"+id, map[string]any{"baseRevisionId": auditOSS001PublishedCreatorBody(t, f, id)["baseRevisionId"], "kind": kind, "name": "Edited profile for review lock " + id, "descriptionMarkdown": "A distinct requested biography", "defaultLocale": "en-US", "localizations": []map[string]any{{"locale": "en-US", "contentMarkdown": "A distinct requested biography"}}, "avatarUrl": "", "links": []any{}}, 200))
 			if changed.Status != "pending" || changed.Revision == "" || changed.Request == "" {
 				t.Fatal("ordinary edit must remain pending")
 			}

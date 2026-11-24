@@ -1,15 +1,8 @@
 package httpapi
 
 import (
-	"bytes"
-	"context"
 	"net/http"
-	"net/http/httptest"
 	"testing"
-
-	"mcmods-cn-backend/internal/config"
-	"mcmods-cn-backend/internal/querycache"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestOCT02CreatorIdentityClaimRequiresIndependentReviewerIntegration(t *testing.T) {
@@ -27,20 +20,14 @@ func TestOCT02CreatorIdentityClaimRequiresIndependentReviewerIntegration(t *test
 	if err := f.db.QueryRow(f.ctx, `insert into creator_claims(creator_id,user_id,proof_markdown) values($1,$2,'Synthetic proof') returning public_id`, creatorID, f.userIDs[f.editor]).Scan(&claimPublicID); err != nil {
 		t.Fatal(err)
 	}
-	cache := querycache.New(config.RedisConfig{})
-	t.Cleanup(func() { _ = cache.Close() })
-	s := &Server{db: f.db, cache: cache}
-	review := func(actor int64) int {
-		r := httptest.NewRequest(http.MethodPatch, "/api/v1/admin/creator-claims/"+claimPublicID, bytes.NewBufferString(`{"status":"approved","note":"Synthetic independent review"}`))
-		r.SetPathValue("id", claimPublicID)
-		r = r.WithContext(context.WithValue(f.ctx, claimsContextKey, security.Claims{Subject: actor, PermissionRules: []security.PermissionRule{{Code: "admin.*", Allow: true}, {Code: "creator.claim.review", Allow: true}}}))
-		w := httptest.NewRecorder()
-		s.reviewCreatorClaim(w, r)
-		return w.Code
+	for _, token := range []string{f.editor, f.reviewer} {
+		grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[token], "creator.claim.review")
 	}
-	if status := review(f.userIDs[f.editor]); status != http.StatusForbidden {
-		t.Errorf("claimant administrative self-review status=%d, want403", status)
+	review := func(token string, status int) {
+		f.require(t, token, http.MethodPatch, "/api/v1/admin/creator-claims/"+claimPublicID,
+			map[string]any{"status": "approved", "note": "Synthetic independent review"}, status)
 	}
+	review(f.editor, http.StatusForbidden)
 	var state string
 	var derived bool
 	if err := f.db.QueryRow(f.ctx, `select status from creator_claims where public_id=$1`, claimPublicID).Scan(&state); err != nil {
@@ -52,9 +39,7 @@ func TestOCT02CreatorIdentityClaimRequiresIndependentReviewerIntegration(t *test
 	if state != "pending" || derived {
 		t.Fatalf("self-review changed claim=%s derivedaccess=%v", state, derived)
 	}
-	if status := review(f.userIDs[f.reviewer]); status != http.StatusOK {
-		t.Fatalf("independent reviewer status=%d, want200", status)
-	}
+	review(f.reviewer, http.StatusOK)
 	if err := f.db.QueryRow(f.ctx, `select exists(select 1 from effective_project_access where user_id=$1 and source_type='author_claim' and project_id=$2)`, f.userIDs[f.editor], f.modID).Scan(&derived); err != nil || !derived {
 		t.Fatalf("independent approved claim missing derivedaccess=%v err=%v", derived, err)
 	}

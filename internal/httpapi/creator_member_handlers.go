@@ -60,6 +60,14 @@ func (s *Server) updateCreatorMembers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load creator")
 		return
 	}
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if !claimsAllow(claims, "admin.*") && !claimsAllow(claims, "team.members.manage") {
+		writeError(w, http.StatusForbidden, "team member management permission is required")
+		return
+	}
 	if kind != "team" {
 		writeError(w, http.StatusConflict, "only teams have managed members")
 		return

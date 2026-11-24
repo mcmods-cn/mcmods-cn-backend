@@ -23,10 +23,9 @@ func TestCreatorProfileAndAuditedTeamMemberUpdatesAreIsolatedIntegration(t *test
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	poolConfig, err := pgxpool.ParseConfig(config.Load().DB.ConnString())
-	if err != nil {
-		t.Fatal(err)
-	}
+	owner := newTEST018IsolatedDatabase(t, ctx)
+	claims := newCurrentWriteTestActor(t, ctx, owner, "team-members", "team.members.manage")
+	poolConfig := owner.Config().Copy()
 	poolConfig.MaxConns = 1
 	poolConfig.MinConns = 1
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
@@ -87,7 +86,7 @@ func TestCreatorProfileAndAuditedTeamMemberUpdatesAreIsolatedIntegration(t *test
 	}
 
 	server := &Server{db: pool, cache: querycache.New(config.RedisConfig{})}
-	response := invokeCreatorMemberUpdate(t, ctx, server, `{"members":[{"creatorId":"author002","roleId":"role00001","title":"Lead"}]}`)
+	response := invokeCreatorMemberUpdate(t, ctx, server, claims, `{"members":[{"creatorId":"author002","roleId":"role00001","title":"Lead"}]}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("member update returned %d: %s", response.Code, response.Body.String())
 	}
@@ -114,18 +113,15 @@ func TestCreatorProfileAndAuditedTeamMemberUpdatesAreIsolatedIntegration(t *test
 		check(action <> 'creator.team_members.replace') not valid`); err != nil {
 		t.Fatal(err)
 	}
-	response = invokeCreatorMemberUpdate(t, ctx, server, `{"members":[{"creatorId":"author001","roleId":"role00001","title":"Should Roll Back"}]}`)
+	response = invokeCreatorMemberUpdate(t, ctx, server, claims, `{"members":[{"creatorId":"author001","roleId":"role00001","title":"Should Roll Back"}]}`)
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("forced audit failure returned %d: %s", response.Code, response.Body.String())
 	}
 	assertCreatorMemberIntegrationState(t, ctx, pool, "author002", "Lead")
 }
 
-func invokeCreatorMemberUpdate(t *testing.T, ctx context.Context, server *Server, body string) *httptest.ResponseRecorder {
+func invokeCreatorMemberUpdate(t *testing.T, ctx context.Context, server *Server, claims security.Claims, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	claims := security.Claims{Subject: 99, PermissionRules: []security.PermissionRule{{
-		Code: "team.members.manage", Allow: true, Priority: 100,
-	}}}
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/creators/team00001/members", strings.NewReader(body))
 	request = request.WithContext(context.WithValue(ctx, claimsContextKey, claims))
 	request.SetPathValue("publicId", "team00001")

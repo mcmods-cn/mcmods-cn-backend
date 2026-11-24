@@ -10,13 +10,15 @@ import (
 func auditOSS001PublishedCreatorBody(t *testing.T, f auditFixGRFixture, id string) map[string]any {
 	t.Helper()
 	var raw []byte
-	if err := f.db.QueryRow(f.ctx, `select revision.snapshot from creators creator join content_revisions revision on revision.id=creator.published_revision_id where creator.public_id=$1`, id).Scan(&raw); err != nil {
+	var revisionID string
+	if err := f.db.QueryRow(f.ctx, `select revision.snapshot,revision.public_id from creators creator join content_revisions revision on revision.id=creator.published_revision_id where creator.public_id=$1`, id).Scan(&raw, &revisionID); err != nil {
 		t.Fatal(err)
 	}
 	var body map[string]any
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatal(err)
 	}
+	body["baseRevisionId"] = revisionID
 	return body
 }
 

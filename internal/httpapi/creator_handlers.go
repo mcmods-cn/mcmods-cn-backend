@@ -437,11 +437,15 @@ func (s *Server) createCreator(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.TrimSpace(strings.ToLower(r.PathValue("publicId")))
-	var snapshot creatorSnapshot
-	if err := decodeJSON(r, &snapshot); err != nil {
+	var request struct {
+		creatorSnapshot
+		BaseRevisionID *string `json:"baseRevisionId"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid creator payload")
 		return
 	}
+	snapshot := request.creatorSnapshot
 	if snapshot.Members != nil {
 		writeError(w, http.StatusBadRequest, "team members must be updated through the members endpoint")
 		return
@@ -450,7 +454,6 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	claims := currentClaims(r)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update creator")
@@ -461,11 +464,12 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	var kind, previousDescription string
 	var createdBy, baseRevisionID *int64
 	var currentAvatarFileID *string
-	var currentAvatarURL string
+	var currentAvatarURL, publishedRevision string
 	err = tx.QueryRow(r.Context(), `select id,kind,description_markdown,created_by,published_revision_id,
-		(select public_id from oss_files where id=creators.avatar_file_id),avatar_url
+		(select public_id from oss_files where id=creators.avatar_file_id),avatar_url,
+		coalesce((select public_id from content_revisions where id=creators.published_revision_id),'')
 		from creators where public_id=$1 for update`, publicID).
-		Scan(&id, &kind, &previousDescription, &createdBy, &baseRevisionID, &currentAvatarFileID, &currentAvatarURL)
+		Scan(&id, &kind, &previousDescription, &createdBy, &baseRevisionID, &currentAvatarFileID, &currentAvatarURL, &publishedRevision)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "creator not found")
 		return
@@ -474,10 +478,20 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load creator")
 		return
 	}
-	canEdit := claimsAllow(claims, "admin.*") || claimsAllow(claims, "creator.edit") ||
-		claimsAllow(claims, "creator.edit."+publicID)
-	if !canEdit {
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if !resolveCreatorCapabilities(claims, kind, publicID).EditProfile {
 		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if request.BaseRevisionID == nil {
+		writeAPIError(w, http.StatusPreconditionRequired, "CREATOR_REVISION_REQUIRED", "load the creator profile before editing", 0, nil)
+		return
+	}
+	if *request.BaseRevisionID != publishedRevision {
+		writeAPIError(w, http.StatusConflict, "CREATOR_EDIT_CONFLICT", "the creator profile changed after it was loaded", 0, nil)
 		return
 	}
 	if snapshot.Kind != kind {
@@ -747,6 +761,9 @@ func (s *Server) reviewCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load creator claim")
 		return
 	}
+	if !requireGovernancePermissions(w, r, tx, "creator.claim.review") {
+		return
+	}
 	if status != "pending" {
 		writeError(w, http.StatusConflict, "claim cannot be reviewed")
 		return
@@ -831,6 +848,9 @@ func (s *Server) revokeCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load author claim")
 		return
 	}
+	if !requireGovernancePermissions(w, r, tx, "creator.claim.review") {
+		return
+	}
 	claims := currentClaims(r)
 	request.Reason = strings.TrimSpace(request.Reason)
 	if _, err = tx.Exec(r.Context(), `update creator_claims set status='revoked',reviewed_by=$2,
@@ -839,8 +859,11 @@ func (s *Server) revokeCreatorClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, _ := json.Marshal(map[string]any{"claimId": claimPublicID, "authorId": authorID, "reason": request.Reason})
-	_, _ = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
-		values($1,$2,'author_claim.revoke',$3::jsonb)`, claims.Subject, userID, payload)
+	if _, err = tx.Exec(r.Context(), `insert into permission_audit_logs(operator_id,target_user_id,action,payload)
+		values($1,$2,'author_claim.revoke',$3::jsonb)`, claims.Subject, userID, payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record author claim revocation")
+		return
+	}
 	if err = enqueueTemplatedNotificationTx(r.Context(), tx, "creator.claim.revoked", userID, claims.Subject, "creator_claim_revoked",
 		map[string]string{"name": authorName, "reason": request.Reason},
 		map[string]any{"creatorId": authorID, "claimId": claimPublicID, "url": "/authors/" + authorID},

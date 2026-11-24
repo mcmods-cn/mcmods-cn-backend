@@ -84,7 +84,7 @@ func TestAuditOSS001BoundSignedLegacyReferenceHasSafeDTOAndCanBeRetainedByAnothe
 		changed := decodeTEST022Data[struct {
 			Revision string `json:"revisionId"`
 			Status   string `json:"reviewStatus"`
-		}](t, f.require(t, f.otherEditor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload("author", id, fileID, stable), 200))
+		}](t, f.require(t, f.otherEditor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload(t, f, "author", id, fileID, stable), 200))
 		if changed.Status != "pending" {
 			t.Fatal("legacy normalization still requires independent review")
 		}
@@ -111,7 +111,7 @@ func TestAuditOSS001UnboundSignedLegacyReferenceHoldsWithoutClearingPublishedOrC
 		t.Error("unbound signed legacy reference must be a precise data HOLD, never labelled stable")
 	}
 	before := auditOSS001CreatorWriteFacts(t, f, id)
-	f.require(t, f.editor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload("author", id, "", legacy), 400)
+	f.require(t, f.editor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload(t, f, "author", id, "", legacy), 400)
 	if after := auditOSS001CreatorWriteFacts(t, f, id); !bytes.Equal(before, after) {
 		t.Fatal("unverifiable legacy must not be deleted, rebound or copied into a new revision")
 	}
@@ -126,7 +126,7 @@ func TestAuditOSS001ExternalStableLegacyQueryRemainsAnUnchangedReferenceHTTPPost
 	}
 	changed := decodeTEST022Data[struct {
 		Revision string `json:"revisionId"`
-	}](t, f.require(t, f.editor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload("team", id, "", stable), 200))
+	}](t, f.require(t, f.editor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload(t, f, "team", id, "", stable), 200))
 	f.require(t, f.reviewer, http.MethodPatch, "/api/v1/content-revisions/"+changed.Revision, map[string]any{"status": "approved", "note": "Retain the exact old external stable reference; no byte/ownership claim"}, 200)
 	var stored string
 	var file *int64

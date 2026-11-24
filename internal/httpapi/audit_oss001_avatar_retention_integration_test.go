@@ -7,8 +7,9 @@ import (
 	"testing"
 )
 
-func auditOSS001ProfilePayload(kind, id, fileID, reference string) map[string]any {
-	body := map[string]any{"kind": kind, "name": "Retained profile biography " + id, "descriptionMarkdown": "A requested ordinary biography update", "defaultLocale": "en-US", "localizations": []map[string]any{{"locale": "en-US", "contentMarkdown": "A requested ordinary biography update"}}, "avatarUrl": reference, "links": []any{}}
+func auditOSS001ProfilePayload(t *testing.T, f auditFixGRFixture, kind, id, fileID, reference string) map[string]any {
+	t.Helper()
+	body := map[string]any{"baseRevisionId": auditOSS001PublishedCreatorBody(t, f, id)["baseRevisionId"], "kind": kind, "name": "Retained profile biography " + id, "descriptionMarkdown": "A requested ordinary biography update", "defaultLocale": "en-US", "localizations": []map[string]any{{"locale": "en-US", "contentMarkdown": "A requested ordinary biography update"}}, "avatarUrl": reference, "links": []any{}}
 	if fileID != "" {
 		body["avatarFileId"] = fileID
 	}
@@ -47,7 +48,7 @@ func TestAuditOSS001LegacyStoredAvatarSurvivesUnrelatedEditHTTPPostgresIntegrati
 			response := decodeTEST022Data[struct {
 				Revision string `json:"revisionId"`
 				Status   string `json:"reviewStatus"`
-			}](t, f.require(t, f.editor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload(kind, id, "", stable), 200))
+			}](t, f.require(t, f.editor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload(t, f, kind, id, "", stable), 200))
 			if response.Status != "pending" {
 				t.Fatal("legacy unrelated edit must remain pending")
 			}
@@ -75,7 +76,7 @@ func TestAuditOSS001DifferentEditorRetainsOnlyCurrentBoundAvatarHTTPPostgresInte
 			changed := decodeTEST022Data[struct {
 				Revision string `json:"revisionId"`
 				Status   string `json:"reviewStatus"`
-			}](t, f.require(t, f.otherEditor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload(kind, id, fileID, stable), 200))
+			}](t, f.require(t, f.otherEditor, http.MethodPut, "/api/v1/creators/"+id, auditOSS001ProfilePayload(t, f, kind, id, fileID, stable), 200))
 			if changed.Status != "pending" {
 				t.Fatal("ordinary other editor must retain independent review")
 			}
@@ -86,7 +87,7 @@ func TestAuditOSS001DifferentEditorRetainsOnlyCurrentBoundAvatarHTTPPostgresInte
 			}
 			_, foreignFile := auditOSS001Upload(t, f, f.editor, "mod_resource:audit-gr-"+f.modCode+":item:icon", auditOSS001PNG(t, 210))
 			before := auditOSS001CreatorWriteFacts(t, f, id)
-			body := auditOSS001ProfilePayload(kind, id, foreignFile, stable)
+			body := auditOSS001ProfilePayload(t, f, kind, id, foreignFile, stable)
 			body["name"] = "Reject unauthorized avatar replacement " + id
 			raw := f.require(t, f.otherEditor, http.MethodPut, "/api/v1/creators/"+id, body, 400)
 			var problem struct {
