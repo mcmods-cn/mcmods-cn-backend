@@ -68,9 +68,11 @@ func TestLoadObserverPropagatesDatabaseSamplingEncodingAndOutputFailures(t *test
 		t.Fatalf("database failure = %v", err)
 	}
 
-	samplingFailure := newRuntime(&fakeObserverPool{queryErr: errors.New("sample timeout")})
-	if err := runLoadObserver(context.Background(), samplingFailure); err == nil || !strings.Contains(err.Error(), "sample timeout") {
-		t.Fatalf("sampling failure = %v", err)
+	sampleErr := errors.New("synthetic-private-connection-details")
+	samplingFailure := newRuntime(&fakeObserverPool{queryErr: sampleErr})
+	if err := runLoadObserver(context.Background(), samplingFailure); !errors.Is(err, sampleErr) ||
+		strings.Contains(err.Error(), sampleErr.Error()) || !strings.Contains(err.Error(), "0 successful samples and 4 errors") {
+		t.Fatal("sampling failure must retain counts and cause with a safe message")
 	}
 
 	encodingFailure := newRuntime(&fakeObserverPool{})

@@ -1,6 +1,6 @@
 # PostgreSQL load observer
 
-`cmd/load-observer` samples the current database's rows in `pg_stat_activity` every 250 ms and emits one JSON report. The counts include its single `mcmods-load-observer` session. Connection failures report the stage without printing the connection string. It is read-only and does not reset, migrate, or seed the database.
+`cmd/load-observer` samples the current database's rows in `pg_stat_activity` every 250 ms and emits one JSON report. The counts include its single `mcmods-load-observer` session. Connection and sampling failures report the stage and error classification. Connection strings, driver messages and database identities are omitted. It is read-only and does not reset, migrate, or seed the database.
 
 ## Connection configuration
 

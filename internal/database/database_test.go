@@ -48,7 +48,7 @@ func TestConnectionErrorsKeepSafeDiagnosticsAndOriginalCause(t *testing.T) {
 		{"invalid code", &pgconn.PgError{Code: "sensitive\ncode", Message: "synthetic-sensitive-server-message"}, "connect to database: *pgconn.PgError"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			err := &connectionError{stage: "connect to database", cause: test.cause}
+			err := RedactedError("connect to database", test.cause)
 			if err.Error() != test.message {
 				t.Error("connection error did not retain safe diagnostic classification")
 			}

@@ -137,7 +137,7 @@ func runLoadObserver(parent context.Context, runtime observerRuntime) error {
 	}
 	if samplingErr != nil {
 		return fmt.Errorf("load observer sampling failed after %d successful samples and %d errors: %w",
-			result.Samples, result.Errors, samplingErr)
+			result.Samples, result.Errors, database.RedactedError("query database activity", samplingErr))
 	}
 	return nil
 }
