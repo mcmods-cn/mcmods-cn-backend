@@ -27,3 +27,11 @@ go test -race ./internal/httpapi -run '^TestAuditAntiAbuseCanonical' -count=1 -v
 ```
 
 数据库场景必须显式设置 `APP_ENV=test`、`MCMODS_RUN_DB_INTEGRATION=1`、`DATABASE_URL` 和 `MCMODS_TEST_DATABASE_URL`；未设置时的 SKIP 仅证明编译，不能计为 HTTP/数据库验收。
+
+## 评论重试与指纹
+
+创建评论与回复共用业务请求的幂等键，优先读取正文，缺省时读取请求头。只有成功提交过的同用户键可以进入回读流程。服务端再次检查当前目标与权限，再在事务内核对键所属记录。原记录消失时返回 409。编辑与私有插眼命令各自执行正常风险检查。
+
+发表评论或重试成功后，公开详情可用时返回完整评论。待审核时返回 `id`、`status=pending` 与 `moderation=true`。详情暂不可读时，服务器返回已提交的 ID、状态和 `detailsUnavailable=true`。客户端可刷新详情；已发布的写入无需重新提交。
+
+SimHash 逐项累加相同的字符特征及其重复次数。已存指纹、相似度阈值和语言处理规则持续适用。
