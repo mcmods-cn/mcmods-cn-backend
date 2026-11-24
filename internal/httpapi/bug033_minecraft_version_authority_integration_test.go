@@ -90,7 +90,7 @@ func TestBUG033ProjectCompatibilityWritesUseAuthoritativeMinecraftVersionsIntegr
 	changelogRequest := httptest.NewRequest(http.MethodPost, "/api/v1/projects/mod/b033m0001/changelog", bytes.NewBufferString(changelogBody))
 	changelogRequest = changelogRequest.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: userID}))
 	changelogResponse := httptest.NewRecorder()
-	server.createProjectChangelog(changelogResponse, changelogRequest, projectChangelogTarget{RouteID: routeID, EntityType: "mod", PublicID: projectID, Name: "BUG033 project", CanEdit: true})
+	server.submitProjectChangelog(changelogResponse, changelogRequest, projectChangelogTarget{RouteID: routeID, EntityType: "mod", PublicID: projectID, Name: "BUG033 project", CanEdit: true}, "", nil)
 	if changelogResponse.Code != http.StatusBadRequest {
 		t.Fatalf("unknown-version changelog status=%d body=%s, want 400", changelogResponse.Code, changelogResponse.Body.String())
 	}
