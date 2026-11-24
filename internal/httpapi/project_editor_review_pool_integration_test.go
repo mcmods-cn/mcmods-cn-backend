@@ -106,8 +106,9 @@ func TestEditorApplicationReadFailureRollsBackSubmissionIntegration(t *testing.T
 		t.Fatal(err)
 	}
 	f.require(t, f.otherEditor, http.MethodPost, path, submission, http.StatusInternalServerError)
-	if got := f.number(t, `select count(*) from project_editor_applications`); got != 0 {
-		t.Fatalf("failed submission left %d application(s)", got)
+	var remaining int
+	if err := f.db.QueryRow(f.ctx, `select count(*) from project_editor_applications`).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("failed submission left %d application(s): %v", remaining, err)
 	}
 	if _, err := f.db.Exec(f.ctx, `alter table unavailable_editor_attachments rename to project_editor_application_attachments`); err != nil {
 		t.Fatal(err)
