@@ -487,8 +487,17 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
+	// Sending a revision precondition can release the duplicate claim in Redis.
+	// End the transaction before that network operation or the client's retry.
+	rejectEdit := func(status int, code, message string) {
+		if err := tx.Rollback(r.Context()); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to close creator update")
+			return
+		}
+		writeAPIError(w, status, code, message, 0, nil)
+	}
 	if request.BaseRevisionID == nil {
-		writeAPIError(w, http.StatusPreconditionRequired, "CREATOR_REVISION_REQUIRED", "load the creator profile before editing", 0, nil)
+		rejectEdit(http.StatusPreconditionRequired, "CREATOR_REVISION_REQUIRED", "load the creator profile before editing")
 		return
 	}
 	// A publication can commit while the row lock is pending. Read the
@@ -501,7 +510,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if *request.BaseRevisionID != publishedRevision {
-		writeAPIError(w, http.StatusConflict, "CREATOR_EDIT_CONFLICT", "the creator profile changed after it was loaded", 0, nil)
+		rejectEdit(http.StatusConflict, "CREATOR_EDIT_CONFLICT", "the creator profile changed after it was loaded")
 		return
 	}
 	if snapshot.Kind != kind {
@@ -525,7 +534,7 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, errReviewInProgress) {
-			writeError(w, http.StatusConflict, errReviewInProgress.Error())
+			rejectEdit(http.StatusConflict, "", errReviewInProgress.Error())
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create creator revision")
