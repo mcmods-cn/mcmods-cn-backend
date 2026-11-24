@@ -11,7 +11,7 @@ import re
 import subprocess
 import tempfile
 
-from review_ledger import covered, fingerprint, protected_input, read_json, read_ranges, rows, safe_text
+from review_ledger import covered, fingerprint, has_review_note, protected_input, read_json, read_ranges, rows, safe_text
 
 
 REPOSITORIES = {"mcmods-cn-backend", "mcmods-cn-frontend", "mcmods_exporter"}
@@ -156,20 +156,21 @@ def evaluate(records, commit, oid, sha256, lines, roots, *, reread=False, inspec
         current.append({**{key: clean_detail(record[key], roots) for key in REVIEW_FIELDS if key in record},
                         "source": source, "commit": recorded_commit, "read_ranges": ranges,
                         "declared_status": record.get("status", "reviewing"),
-                        "semantic_basis": safe_text(basis, roots) if isinstance(basis, str) else "",
-                        "inspection": safe_text(method, roots)})
+                        "semantic_basis": safe_text(basis.strip(), roots) if has_review_note(basis) else "",
+                        "inspection": safe_text(method.strip(), roots) if has_review_note(method) else ""})
     ranges = sorted({tuple(interval) for record in current for interval in record["read_ranges"]})
     read_complete = lines is not None and bool(current) and covered({"read_ranges": ranges}, lines)
     inspected = inspection_allowed and any(record["inspection"] for record in current)
     signed_off = any(record["declared_status"] == "reviewed" for record in current)
-    if signed_off and (read_complete or inspected):
+    declared = any(record["semantic_basis"] for record in current)
+    if signed_off and (read_complete and declared or inspected):
         status = "reviewed"
     elif current:
         status = "reviewing"
     else:
         status = "stale" if stale else "pending"
     return {"status": status, "reading": {"ranges": ranges, "complete": read_complete},
-            "semantic": {"declared": any(record["semantic_basis"] for record in current)},
+            "semantic": {"declared": declared},
             "runtime": {"reported": any(record.get("validation") for record in current)},
             "inspected": inspected, "evidence": current, "previous_evidence": sorted(set(stale))}
 

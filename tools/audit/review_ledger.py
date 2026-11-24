@@ -108,15 +108,18 @@ def covered(row, lines):
     return end >= lines
 
 
+def has_review_note(value):
+    return (isinstance(value, str) and bool(value.strip())
+            and value.strip().lower().replace("_", " ") not in {"not reviewed", "not verified"})
+
+
 def semantic(row):
     for key in ("semantic_review", "semantic", "semanticReview"):
         if key in row:
             value = row[key]
             if isinstance(value, bool):
                 return value
-            return (isinstance(value, str) and len(value.strip()) > 10
-                    and value.strip().lower() not in {
-                        "not_reviewed", "not reviewed", "not_verified", "not verified"})
+            return has_review_note(value) and len(value.strip()) > 10
     return row.get("state") in {
         "baseline_complete_semantic_review",
         "baseline_semantic_reviewed_final_workspace_unavailable",

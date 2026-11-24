@@ -39,6 +39,17 @@ class ReviewSnapshotTests(unittest.TestCase):
         self.assertTrue(item["semantic"]["declared"])
         self.assertFalse(item["runtime"]["reported"])
 
+    def test_reviewed_count_requires_a_semantic_conclusion_or_valid_inspection(self):
+        for note in ("", "   ", "not reviewed", "not_verified", False):
+            with self.subTest(note=note):
+                item = self.evaluate([proof(read_ranges=[[1, 6]], semantic_review=note)])
+                self.assertTrue(item["reading"]["complete"])
+                self.assertFalse(item["semantic"]["declared"])
+                self.assertEqual(item["status"], "reviewing")
+        item = self.evaluate([proof(semantic_review="", inspection="  ")], inspection_allowed=True)
+        self.assertFalse(item["inspected"])
+        self.assertEqual(item["status"], "reviewing")
+
     def test_mismatched_fingerprint_and_changed_caller_require_review(self):
         for evidence, options in (
             (proof(final_sha256="d" * 64, read_ranges=[[1, 6]]), {}),
