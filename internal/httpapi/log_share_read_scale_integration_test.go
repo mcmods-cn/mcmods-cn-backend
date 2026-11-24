@@ -167,7 +167,7 @@ func TestLogShareDownloadRequiresEveryReadyEntryIntegration(t *testing.T) {
 			t.Fatalf("entry %d: name=%s body=%q err=%v", i, file.Name, text, err)
 		}
 	}
-	if _, err = pool.Exec(ctx, "update log_share_entries set sanitized_text=null where log_share_id=$1 and entry_index=1", shareID); err != nil {
+	if _, err = pool.Exec(ctx, "update log_share_entries set sanitized_text=null,sanitized_object_key='test-only/non-inline' where log_share_id=$1 and entry_index=1", shareID); err != nil {
 		t.Fatal(err)
 	}
 	body, status, err = get()
