@@ -22,18 +22,10 @@ func TestReportResolutionRequiresClaimOwnerAndAuditedTakeoverIntegration(t *test
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	poolConfig.MaxConns = 1
-	poolConfig.MinConns = 1
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	if _, err = pool.Exec(ctx, `
+	pool := governanceReviewTestPool(t, ctx, databaseURL)
+	reviewerOne := governanceReviewTestActor(t, ctx, pool, "claimone", "report.review")
+	reviewerTwo := governanceReviewTestActor(t, ctx, pool, "claimtwo", "report.review")
+	if _, err := pool.Exec(ctx, `
 		create temporary table reports(
 			id bigint primary key,public_id text not null unique,target_type text not null,target_public_id text not null,
 			reporter_id bigint not null,target_actor_id bigint,target_actor_role text not null,status text not null,
@@ -66,8 +58,6 @@ func TestReportResolutionRequiresClaimOwnerAndAuditedTakeoverIntegration(t *test
 	}
 
 	server := &Server{db: pool}
-	reviewerOne := security.Claims{Subject: 101}
-	reviewerTwo := security.Claims{Subject: 202}
 
 	unclaimed := invokeBUG112ReportResolve(ctx, server, reviewerOne, "unclaimed")
 	if unclaimed.Code != http.StatusConflict {
@@ -83,19 +73,19 @@ func TestReportResolutionRequiresClaimOwnerAndAuditedTakeoverIntegration(t *test
 	if otherReviewer.Code != http.StatusConflict {
 		t.Fatalf("non-owner resolution status=%d body=%s", otherReviewer.Code, otherReviewer.Body.String())
 	}
-	assertBUG112ReportState(t, ctx, pool, "in_review", 101, 0, 0, 1)
+	assertBUG112ReportState(t, ctx, pool, "in_review", reviewerOne.Subject, 0, 0, 1)
 
 	forbiddenTakeover := invokeBUG112ReportAction(ctx, server, reviewerTwo, "takeover", `{"reason":"urgent handoff"}`)
 	if forbiddenTakeover.Code != http.StatusForbidden {
 		t.Fatalf("unprivileged takeover status=%d body=%s", forbiddenTakeover.Code, forbiddenTakeover.Body.String())
 	}
 
-	reviewerTwo.PermissionRules = []security.PermissionRule{{Code: "report.action.takeover", Allow: true, Priority: 1}}
+	grantTEST044Permissions(t, ctx, pool, reviewerTwo.Subject, "report.action.takeover")
 	takenOver := invokeBUG112ReportAction(ctx, server, reviewerTwo, "takeover", `{"reason":"urgent handoff"}`)
 	if takenOver.Code != http.StatusOK {
 		t.Fatalf("takeover status=%d body=%s", takenOver.Code, takenOver.Body.String())
 	}
-	assertBUG112ReportState(t, ctx, pool, "in_review", 202, 0, 0, 2)
+	assertBUG112ReportState(t, ctx, pool, "in_review", reviewerTwo.Subject, 0, 0, 2)
 
 	oldOwner := invokeBUG112ReportResolve(ctx, server, reviewerOne, "old-owner")
 	if oldOwner.Code != http.StatusConflict {
@@ -105,11 +95,11 @@ func TestReportResolutionRequiresClaimOwnerAndAuditedTakeoverIntegration(t *test
 	if newOwner.Code != http.StatusOK {
 		t.Fatalf("new owner resolution status=%d body=%s", newOwner.Code, newOwner.Body.String())
 	}
-	assertBUG112ReportState(t, ctx, pool, "resolved_invalid", 202, 1, 1, 2)
+	assertBUG112ReportState(t, ctx, pool, "resolved_invalid", reviewerTwo.Subject, 1, 1, 2)
 
 	var firstAction, secondAction, secondReason string
 	var firstAssignee, previousAssignee, secondAssignee int64
-	if err = pool.QueryRow(ctx, `select
+	if err := pool.QueryRow(ctx, `select
 		(select action from report_assignment_events where id=1),
 		(select assignee_id from report_assignment_events where id=1),
 		(select action from report_assignment_events where id=2),
@@ -119,7 +109,7 @@ func TestReportResolutionRequiresClaimOwnerAndAuditedTakeoverIntegration(t *test
 		Scan(&firstAction, &firstAssignee, &secondAction, &previousAssignee, &secondAssignee, &secondReason); err != nil {
 		t.Fatal(err)
 	}
-	if firstAction != "claim" || firstAssignee != 101 || secondAction != "takeover" || previousAssignee != 101 || secondAssignee != 202 || secondReason != "urgent handoff" {
+	if firstAction != "claim" || firstAssignee != reviewerOne.Subject || secondAction != "takeover" || previousAssignee != reviewerOne.Subject || secondAssignee != reviewerTwo.Subject || secondReason != "urgent handoff" {
 		t.Fatalf("assignment audit mismatch: first=%s/%d second=%s/%d/%d/%q", firstAction, firstAssignee, secondAction, previousAssignee, secondAssignee, secondReason)
 	}
 }

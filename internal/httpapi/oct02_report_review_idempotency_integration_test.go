@@ -16,9 +16,9 @@ import (
 )
 
 func TestOCT02ReportReopenRejectsPreviouslyUsedReviewKeyIntegration(t *testing.T) {
-	ctx, server := newOCT02ReportReviewFixture(t, "resolved_invalid")
+	ctx, server, reviewer := newOCT02ReportReviewFixture(t, "resolved_invalid")
 	before := captureOCT02ReportReviewFacts(t, ctx, server.db)
-	response := invokeOCT02ReportReviewAction(ctx, server, "reopen", `{"reason":"new evidence","idempotencyKey":"old-review"}`)
+	response := invokeOCT02ReportReviewAction(ctx, server, reviewer, "reopen", `{"reason":"new evidence","idempotencyKey":"old-review"}`)
 	if response.Code != http.StatusConflict {
 		t.Errorf("reopen reused key status=%d, want 409", response.Code)
 	}
@@ -28,9 +28,9 @@ func TestOCT02ReportReopenRejectsPreviouslyUsedReviewKeyIntegration(t *testing.T
 }
 
 func TestOCT02ReportResolveRejectsPreviouslyUsedReviewKeyIntegration(t *testing.T) {
-	ctx, server := newOCT02ReportReviewFixture(t, "in_review")
+	ctx, server, reviewer := newOCT02ReportReviewFixture(t, "in_review")
 	before := captureOCT02ReportReviewFacts(t, ctx, server.db)
-	response := invokeOCT02ReportReviewAction(ctx, server, "resolve", `{"conclusion":"invalid","note":"new review","idempotencyKey":"old-review"}`)
+	response := invokeOCT02ReportReviewAction(ctx, server, reviewer, "resolve", `{"conclusion":"invalid","note":"new review","idempotencyKey":"old-review"}`)
 	if response.Code != http.StatusConflict {
 		t.Errorf("resolve reused key status=%d, want 409", response.Code)
 	}
@@ -40,7 +40,7 @@ func TestOCT02ReportResolveRejectsPreviouslyUsedReviewKeyIntegration(t *testing.
 }
 
 func TestOCT02ReportFreshReviewKeysPreserveLifecycleIntegration(t *testing.T) {
-	ctx, server := newOCT02ReportReviewFixture(t, "resolved_invalid")
+	ctx, server, reviewer := newOCT02ReportReviewFixture(t, "resolved_invalid")
 	for _, step := range []struct {
 		action string
 		body   string
@@ -49,7 +49,7 @@ func TestOCT02ReportFreshReviewKeysPreserveLifecycleIntegration(t *testing.T) {
 		{"claim", `{}`},
 		{"resolve", `{"conclusion":"invalid","note":"reviewed again","idempotencyKey":"fresh-resolve"}`},
 	} {
-		response := invokeOCT02ReportReviewAction(ctx, server, step.action, step.body)
+		response := invokeOCT02ReportReviewAction(ctx, server, reviewer, step.action, step.body)
 		if response.Code != http.StatusOK {
 			t.Fatalf("%s status=%d, want 200", step.action, response.Code)
 		}
@@ -66,19 +66,19 @@ func TestOCT02ReportFreshReviewKeysPreserveLifecycleIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status != "resolved_invalid" || claimant != 101 || version != 4 || !resolved || conclusions != "invalid,reopened,invalid" || evidenceStatus != "pending_delete" || !cleanupScheduled || notificationCount != 1 || assignmentCount != 1 || logCount != 2 {
+	if status != "resolved_invalid" || claimant != reviewer.Subject || version != 4 || !resolved || conclusions != "invalid,reopened,invalid" || evidenceStatus != "pending_delete" || !cleanupScheduled || notificationCount != 1 || assignmentCount != 1 || logCount != 2 {
 		t.Fatalf("unexpected lifecycle facts: status=%s claimant=%d version=%d resolved=%t reviews=%s evidence=%s cleanup=%t notifications=%d assignments=%d logs=%d", status, claimant, version, resolved, conclusions, evidenceStatus, cleanupScheduled, notificationCount, assignmentCount, logCount)
 	}
 }
 
 func TestOCT02ReportReopenConflictingOpenTargetReturnsConflictIntegration(t *testing.T) {
-	ctx, server := newOCT02ReportReviewFixture(t, "resolved_invalid")
+	ctx, server, reviewer := newOCT02ReportReviewFixture(t, "resolved_invalid")
 	if _, err := server.db.Exec(ctx, `insert into reports(id,public_id,target_type,target_public_id,reporter_id,target_actor_role,status)
 		values(2,'new-report','comment','comment01',10,'author','pending')`); err != nil {
 		t.Fatal(err)
 	}
 	before := captureOCT02ReportReviewFacts(t, ctx, server.db)
-	response := invokeOCT02ReportReviewAction(ctx, server, "reopen", `{"reason":"new evidence","idempotencyKey":"fresh-reopen"}`)
+	response := invokeOCT02ReportReviewAction(ctx, server, reviewer, "reopen", `{"reason":"new evidence","idempotencyKey":"fresh-reopen"}`)
 	if response.Code != http.StatusConflict {
 		t.Errorf("reopen conflicting open target status=%d, want 409", response.Code)
 	}
@@ -88,7 +88,7 @@ func TestOCT02ReportReopenConflictingOpenTargetReturnsConflictIntegration(t *tes
 }
 
 func TestOCT02ReportReopenOtherDatabaseFailureRemainsServerErrorIntegration(t *testing.T) {
-	ctx, server := newOCT02ReportReviewFixture(t, "resolved_invalid")
+	ctx, server, reviewer := newOCT02ReportReviewFixture(t, "resolved_invalid")
 	// Inject a different unique constraint failure. Only the actual open-target
 	// business constraint should be classified as a recoverable HTTP conflict.
 	if _, err := server.db.Exec(ctx, `create unique index oct02_injected_status_unique on reports(status);
@@ -97,7 +97,7 @@ func TestOCT02ReportReopenOtherDatabaseFailureRemainsServerErrorIntegration(t *t
 		t.Fatal(err)
 	}
 	before := captureOCT02ReportReviewFacts(t, ctx, server.db)
-	response := invokeOCT02ReportReviewAction(ctx, server, "reopen", `{"reason":"new evidence","idempotencyKey":"fresh-reopen"}`)
+	response := invokeOCT02ReportReviewAction(ctx, server, reviewer, "reopen", `{"reason":"new evidence","idempotencyKey":"fresh-reopen"}`)
 	if response.Code != http.StatusInternalServerError {
 		t.Errorf("reopen unrelated database failure status=%d, want 500", response.Code)
 	}
@@ -109,7 +109,7 @@ func TestOCT02ReportReopenOtherDatabaseFailureRemainsServerErrorIntegration(t *t
 // The explicit test URL is supplied by the isolated test environment. A single
 // connection keeps this fixture's temporary tables local and exercises all
 // transaction-owned queries without replacing the PostgreSQL implementation.
-func newOCT02ReportReviewFixture(t *testing.T, status string) (context.Context, *Server) {
+func newOCT02ReportReviewFixture(t *testing.T, status string) (context.Context, *Server, security.Claims) {
 	t.Helper()
 	databaseURL := strings.TrimSpace(os.Getenv("MCMODS_TEST_DATABASE_URL"))
 	if databaseURL == "" || os.Getenv("MCMODS_RUN_DB_INTEGRATION") != "1" {
@@ -117,18 +117,9 @@ func newOCT02ReportReviewFixture(t *testing.T, status string) (context.Context, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	t.Cleanup(cancel)
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal("invalid explicit test database configuration")
-	}
-	poolConfig.MaxConns = 1
-	poolConfig.MinConns = 1
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		t.Fatal("failed to create isolated test database pool")
-	}
-	t.Cleanup(pool.Close)
-	if _, err = pool.Exec(ctx, `
+	pool := governanceReviewTestPool(t, ctx, databaseURL)
+	actor := governanceReviewTestActor(t, ctx, pool, "reviewkeys", "report.review", "report.action.reopen")
+	if _, err := pool.Exec(ctx, `
 		create temporary table reports(
 			id bigint primary key,public_id text not null unique,target_type text not null,target_public_id text not null,
 			reporter_id bigint not null,target_actor_id bigint,target_actor_role text not null,status text not null,
@@ -165,18 +156,21 @@ func newOCT02ReportReviewFixture(t *testing.T, status string) (context.Context, 
 		t.Fatal(err)
 	}
 	if status == "in_review" {
-		if _, err = pool.Exec(ctx, `update reports set status='in_review',resolved_at=null where id=1;
+		if _, err := pool.Exec(ctx, `update reports set status='in_review',resolved_at=null where id=1;
 			update report_evidence set status='bound',cleanup_after='infinity' where report_id=1`); err != nil {
 			t.Fatal(err)
 		}
 	}
-	return ctx, &Server{db: pool}
+	if _, err := pool.Exec(ctx, `update reports set claimed_by=$1 where id=1`, actor.Subject); err != nil {
+		t.Fatal(err)
+	}
+	return ctx, &Server{db: pool}, actor
 }
 
-func invokeOCT02ReportReviewAction(ctx context.Context, server *Server, action, body string) *httptest.ResponseRecorder {
+func invokeOCT02ReportReviewAction(ctx context.Context, server *Server, reviewer security.Claims, action, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/admin/reports/report-oct02/"+action, bytes.NewBufferString(body))
 	request.SetPathValue("id", "report-oct02")
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: 101}))
+	request = request.WithContext(context.WithValue(ctx, claimsContextKey, reviewer))
 	response := httptest.NewRecorder()
 	switch action {
 	case "resolve":

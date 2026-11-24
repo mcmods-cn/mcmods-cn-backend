@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestReportModerationRecipientsDistinguishSubmittersFromDevelopersIntegration(t *testing.T) {
@@ -91,18 +89,9 @@ func TestResolveProjectReportNotifiesDevelopersInsteadOfSubmitterIntegration(t *
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	poolConfig, err := pgxpool.ParseConfig(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	poolConfig.MaxConns = 1
-	poolConfig.MinConns = 1
-	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pool.Close()
-	if _, err = pool.Exec(ctx, `
+	pool := governanceReviewTestPool(t, ctx, databaseURL)
+	claims := governanceReviewTestActor(t, ctx, pool, "recipientreview", "report.review", "report.action.delete")
+	if _, err := pool.Exec(ctx, `
 		create temporary table reports(
 			id bigint primary key,public_id text not null unique,target_type text not null,target_public_id text not null,
 			reporter_id bigint not null,target_actor_id bigint,target_actor_role text not null,status text not null,
@@ -148,10 +137,10 @@ func TestResolveProjectReportNotifiesDevelopersInsteadOfSubmitterIntegration(t *
 		`{"conclusion":"valid","note":"confirmed","deleteTarget":true,"idempotencyKey":"bug109-resolution"}`,
 	))
 	request.SetPathValue("id", "report001")
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{
-		Subject:         99,
-		PermissionRules: []security.PermissionRule{{Code: "report.action.delete", Allow: true, Priority: 1}},
-	}))
+	if _, err := pool.Exec(ctx, `update reports set claimed_by=$1 where id=1`, claims.Subject); err != nil {
+		t.Fatal(err)
+	}
+	request = request.WithContext(context.WithValue(ctx, claimsContextKey, claims))
 	response := httptest.NewRecorder()
 	server.resolveUnifiedReport(response, request)
 	if response.Code != http.StatusOK {

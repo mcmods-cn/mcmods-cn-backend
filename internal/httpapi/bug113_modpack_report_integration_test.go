@@ -50,18 +50,13 @@ func TestModpackReportLifecycleIntegration(t *testing.T) {
 		}
 	}()
 
-	var reviewerID int64
-	if err = pool.QueryRow(ctx, `insert into users(public_id,username,email,password_hash)
-		values('ubug113aa','bug113-reviewer','bug113@example.test','not-a-real-hash') returning id`).Scan(&reviewerID); err != nil {
-		t.Fatal(err)
-	}
+	claims := governanceReviewTestActor(t, ctx, pool, "packreviewer", "report.create", "report.review", "report.action.delete")
 	var modpackID, modpackPublicID string
 	if err = pool.QueryRow(ctx, `insert into modpacks(slug,primary_name,summary,body_markdown,review_status,submitted_by)
 		values('bug-113-pack','BUG-113 Pack','reportable modpack','modpack body','approved',$1)
-		returning id::text,public_id`, reviewerID).Scan(&modpackID, &modpackPublicID); err != nil {
+		returning id::text,public_id`, claims.Subject).Scan(&modpackID, &modpackPublicID); err != nil {
 		t.Fatal(err)
 	}
-	claims := security.Claims{Subject: reviewerID, PermissionRules: []security.PermissionRule{{Code: "admin.*", Allow: true, Priority: 100}}}
 	server := &Server{db: pool}
 
 	createRequest := httptest.NewRequest(http.MethodPost, "/api/v1/reports", bytes.NewBufferString(

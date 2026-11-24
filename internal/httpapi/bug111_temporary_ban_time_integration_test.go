@@ -119,8 +119,12 @@ func TestTemporaryBanPersistenceAndExpirationLifecycleIntegration(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	target, err := lockBanSubjectTx(ctx, tx, "user00001", 99)
+	if err != nil {
+		t.Fatal(err)
+	}
 	past := time.Now().Add(-time.Hour)
-	if _, _, err = createBanTx(ctx, tx, "user00001", 99, 0, "spam", "", "", "", &past); err == nil {
+	if _, _, err = createBanTx(ctx, tx, target, 99, 0, "spam", "", "", "", &past); err == nil {
 		t.Fatal("createBanTx accepted an already elapsed end")
 	}
 	var bans, bindings int
@@ -131,7 +135,7 @@ func TestTemporaryBanPersistenceAndExpirationLifecycleIntegration(t *testing.T) 
 		t.Fatalf("elapsed ban persisted partial facts: bans=%d bindings=%d", bans, bindings)
 	}
 	future := time.Now().Add(2 * minimumTemporaryBanDuration)
-	if _, _, err = createBanTx(ctx, tx, "user00001", 99, 0, "spam", "", "", "", &future); err != nil {
+	if _, _, err = createBanTx(ctx, tx, target, 99, 0, "spam", "", "", "", &future); err != nil {
 		t.Fatalf("valid temporary ban failed: %v", err)
 	}
 	if err = tx.Commit(ctx); err != nil {

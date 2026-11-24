@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -668,6 +669,20 @@ func decodeReportSnapshot(raw []byte) (map[string]any, error) {
 	return decodeStoredJSONObject(raw, "report snapshot")
 }
 
+func requireGovernancePermissions(w http.ResponseWriter, r *http.Request, tx pgx.Tx, codes ...string) bool {
+	current, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return false
+	}
+	for _, code := range codes {
+		if !claimsAllow(current, code) {
+			writeError(w, http.StatusForbidden, "无权执行该治理操作")
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Server) claimReport(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	tx, err := s.db.Begin(r.Context())
@@ -685,6 +700,9 @@ func (s *Server) claimReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "领取举报失败")
+		return
+	}
+	if !requireGovernancePermissions(w, r, tx, "report.review") {
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `insert into report_assignment_events(report_id,action,actor_id,assignee_id)
@@ -705,10 +723,6 @@ func (s *Server) claimReport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) takeoverReport(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	if !claimsAllow(claims, "report.action.takeover") {
-		writeError(w, http.StatusForbidden, "无权接管举报")
-		return
-	}
 	var request struct {
 		Reason string `json:"reason"`
 	}
@@ -737,6 +751,9 @@ func (s *Server) takeoverReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取举报责任人失败")
+		return
+	}
+	if !requireGovernancePermissions(w, r, tx, "report.action.takeover") {
 		return
 	}
 	if previousAssigneeID != nil && *previousAssigneeID == claims.Subject {
@@ -807,14 +824,6 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	claims := currentClaims(r)
-	if request.DeleteTarget && !claimsAllow(claims, "report.action.delete") {
-		writeError(w, 403, "无权删除被举报内容")
-		return
-	}
-	if request.BanUserID != "" && !claimsAllow(claims, "report.action.ban") {
-		writeError(w, 403, "无权封禁用户")
-		return
-	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, 500, "创建审核事务失败")
@@ -833,6 +842,27 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, 500, "读取举报失败")
+		return
+	}
+	required := []string{"report.review"}
+	if request.DeleteTarget {
+		required = append(required, "report.action.delete")
+	}
+	var banTarget banSubject
+	var targetErr error
+	if request.BanUserID != "" {
+		required = append(required, "report.action.ban")
+		banTarget, targetErr = lockBanSubjectTx(r.Context(), tx, request.BanUserID, claims.Subject)
+		if targetErr != nil && !errors.Is(targetErr, pgx.ErrNoRows) {
+			writeGovernanceActionError(w, targetErr)
+			return
+		}
+	}
+	if !requireGovernancePermissions(w, r, tx, required...) {
+		return
+	}
+	if targetErr != nil {
+		writeGovernanceActionError(w, targetErr)
 		return
 	}
 	var moderationRecipients []int64
@@ -854,7 +884,10 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.DeleteTarget {
 		if err = s.moderationHideTarget(r.Context(), tx, targetType, targetID); err != nil {
-			writeError(w, 400, err.Error())
+			writeGovernanceActionError(w, err)
+			return
+		}
+		if !requireGovernancePermissions(w, r, tx, required...) {
 			return
 		}
 		_, err = tx.Exec(r.Context(), `insert into moderation_actions(report_id,action_type,target_type,target_public_id,actor_id,before_summary,after_summary,reason,idempotency_key)
@@ -868,8 +901,8 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	var bannedUserID int64
 	if request.BanUserID != "" {
 		var banPublicID string
-		if bannedUserID, banPublicID, err = createBanTx(r.Context(), tx, request.BanUserID, claims.Subject, reportID, request.BanReasonCode, request.BanCustomReason, request.PublicRecordMarkdown, "", request.BanEndsAt); err != nil {
-			writeError(w, 400, err.Error())
+		if bannedUserID, banPublicID, err = createBanTx(r.Context(), tx, banTarget, claims.Subject, reportID, request.BanReasonCode, request.BanCustomReason, request.PublicRecordMarkdown, "", request.BanEndsAt); err != nil {
+			writeGovernanceActionError(w, err)
 			return
 		}
 		if err = enqueueTemplatedNotificationTx(r.Context(), tx, "ban.created", bannedUserID, 0, "account_banned", nil,
@@ -959,6 +992,9 @@ func (s *Server) reopenUnifiedReport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "重新打开举报失败")
 		return
 	}
+	if !requireGovernancePermissions(w, r, tx, "report.action.reopen") {
+		return
+	}
 	reviewTag, err := tx.Exec(r.Context(), `insert into report_reviews(report_id,reviewer_id,conclusion,note,idempotency_key)
 		values($1,$2,'reopened',$3,$4) on conflict(report_id,idempotency_key) do nothing`, reportID, currentClaims(r).Subject, strings.TrimSpace(request.Reason), strings.TrimSpace(request.IdempotencyKey))
 	if err != nil {
@@ -988,12 +1024,35 @@ func (s *Server) reopenUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "pending"})
 }
 
+type governanceActionInputError string
+
+func (e governanceActionInputError) Error() string { return string(e) }
+
+func writeGovernanceActionError(w http.ResponseWriter, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusBadRequest, "封禁用户不存在")
+		return
+	}
+	var invalid governanceActionInputError
+	if errors.As(err, &invalid) {
+		writeError(w, http.StatusBadRequest, invalid.Error())
+		return
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		slog.Error("governance action failed", "sqlstate", pgErr.Code)
+	} else {
+		slog.Error("governance action failed", "error_class", fmt.Sprintf("%T", err))
+	}
+	writeError(w, http.StatusInternalServerError, "治理操作未能保存，请稍后重试")
+}
+
 func (s *Server) moderationHideTarget(ctx context.Context, tx pgx.Tx, targetType, publicID string) error {
 	switch targetType {
 	case "comment":
 		return expectModerationUpdate(tx.Exec(ctx, `update comments set status='hidden',updated_at=now() where public_id=$1 and status not in ('deleted','spam')`, publicID))
 	case "user":
-		return errors.New("用户主页不能作为内容删除；请使用封禁动作")
+		return governanceActionInputError("用户主页不能作为内容删除；请使用封禁动作")
 	case "mod":
 		if err := expectModerationUpdate(tx.Exec(ctx, `update mods set review_status='rejected',updated_at=now() where project_code=$1 and review_status<>'rejected'`, publicID)); err != nil {
 			return err
@@ -1019,7 +1078,7 @@ func (s *Server) moderationHideTarget(ctx context.Context, tx pgx.Tx, targetType
 		if err := tx.QueryRow(ctx, `select id,blob_hash from skin_assets
 			where public_id=$1 and status='active' for update`, publicID).Scan(&assetID, &blobHash); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return errors.New("举报目标不存在、已经隐藏或状态已变化")
+				return governanceActionInputError("举报目标不存在、已经隐藏或状态已变化")
 			}
 			return err
 		}
@@ -1029,7 +1088,7 @@ func (s *Server) moderationHideTarget(ctx context.Context, tx pgx.Tx, targetType
 	case "server":
 		return expectModerationUpdate(tx.Exec(ctx, `update minecraft_servers set review_status='rejected',updated_at=now() where public_id=$1 and review_status<>'rejected'`, publicID))
 	}
-	return errors.New("不支持处置该举报目标")
+	return governanceActionInputError("不支持处置该举报目标")
 }
 
 func expectModerationUpdate(tag pgconn.CommandTag, err error) error {
@@ -1037,48 +1096,65 @@ func expectModerationUpdate(tag pgconn.CommandTag, err error) error {
 		return err
 	}
 	if tag.RowsAffected() != 1 {
-		return errors.New("举报目标不存在、已经隐藏或状态已变化")
+		return governanceActionInputError("举报目标不存在、已经隐藏或状态已变化")
 	}
 	return nil
 }
 
 func validateTemporaryBanEnd(endsAt *time.Time, now time.Time) error {
 	if endsAt != nil && endsAt.Before(now.Add(minimumTemporaryBanDuration)) {
-		return errors.New("临时封禁结束时间必须至少晚于当前时间 1 分钟")
+		return governanceActionInputError("临时封禁结束时间必须至少晚于当前时间 1 分钟")
 	}
 	return nil
 }
 
-func createBanTx(ctx context.Context, tx pgx.Tx, userPublicID string, moderatorID, reportID int64, reasonCode, customReason, publicMarkdown, internalNote string, endsAt *time.Time) (int64, string, error) {
+type banSubject struct {
+	id               int64
+	username, avatar string
+}
+
+func lockBanSubjectTx(ctx context.Context, tx pgx.Tx, publicID string, actorID int64) (banSubject, error) {
+	// Two moderators can act on one another. Lock both account rows in ID
+	// order before checking the actor's session or changing the target's roles.
+	var target banSubject
+	err := tx.QueryRow(ctx, `with locked as materialized (
+		select id,public_id,username,avatar_url,status from users
+		where public_id=$1 or id=$2 order by id for no key update
+	) select id,username,avatar_url from locked where public_id=$1 and status<>'deleted'`, publicID, actorID).
+		Scan(&target.id, &target.username, &target.avatar)
+	return target, err
+}
+
+func createBanTx(ctx context.Context, tx pgx.Tx, target banSubject, moderatorID, reportID int64, reasonCode, customReason, publicMarkdown, internalNote string, endsAt *time.Time) (int64, string, error) {
 	if err := validateTemporaryBanEnd(endsAt, time.Now()); err != nil {
 		return 0, "", err
 	}
 	reasonCode = strings.TrimSpace(reasonCode)
 	customReason = strings.TrimSpace(customReason)
 	if reasonCode == "" || (reasonCode == "other" && customReason == "") {
-		return 0, "", errors.New("封禁理由不能为空")
-	}
-	var userID int64
-	var username, avatar string
-	if err := tx.QueryRow(ctx, `select id,username,avatar_url from users where public_id=$1 and status<>'deleted' for update`, userPublicID).Scan(&userID, &username, &avatar); err != nil {
-		return 0, "", errors.New("封禁用户不存在")
+		return 0, "", governanceActionInputError("封禁理由不能为空")
 	}
 	var banID int64
 	var banPublicID string
-	err := tx.QueryRow(ctx, `insert into ban_records(user_id,moderator_id,report_id,reason_code,custom_reason,public_record_markdown,internal_note,username_snapshot,avatar_snapshot,ends_at) values($1,$2,nullif($3,0),$4,$5,$6,$7,$8,$9,$10) returning id,public_id`, userID, moderatorID, reportID, reasonCode, customReason, publicMarkdown, internalNote, username, avatar, endsAt).Scan(&banID, &banPublicID)
+	err := tx.QueryRow(ctx, `insert into ban_records(user_id,moderator_id,report_id,reason_code,custom_reason,public_record_markdown,internal_note,username_snapshot,avatar_snapshot,ends_at) values($1,$2,nullif($3,0),$4,$5,$6,$7,$8,$9,$10) returning id,public_id`, target.id, moderatorID, reportID, reasonCode, customReason, publicMarkdown, internalNote, target.username, target.avatar, endsAt).Scan(&banID, &banPublicID)
 	if err != nil {
-		return 0, "", errors.New("用户已有生效封禁或理由无效")
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && ((pgErr.Code == "23505" && pgErr.ConstraintName == "uq_ban_records_active_user") ||
+			(pgErr.Code == "23503" && pgErr.ConstraintName == "ban_records_reason_code_fkey")) {
+			return 0, "", governanceActionInputError("用户已有生效封禁或理由无效")
+		}
+		return 0, "", err
 	}
 	tag, err := tx.Exec(ctx, `insert into user_role_bindings(user_id,role_id,source,source_key,expires_at)
 		select $1,id,$2,$3,$4 from roles where code='banned'`,
-		userID, authorizationSourceGovernanceBan, strconv.FormatInt(banID, 10), endsAt)
+		target.id, authorizationSourceGovernanceBan, strconv.FormatInt(banID, 10), endsAt)
 	if err == nil && tag.RowsAffected() != 1 {
 		err = errors.New("封禁权限组不存在")
 	}
 	if err == nil {
-		_, err = tx.Exec(ctx, `update users set auth_version=auth_version+1,updated_at=now() where id=$1`, userID)
+		_, err = tx.Exec(ctx, `update users set auth_version=auth_version+1,updated_at=now() where id=$1`, target.id)
 	}
-	return userID, banPublicID, err
+	return target.id, banPublicID, err
 }
 
 type createBanRequest struct {
@@ -1133,10 +1209,21 @@ func (s *Server) adminBans(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback(r.Context())
-		bannedUserID, banPublicID, createErr := createBanTx(r.Context(), tx, req.UserID, currentClaims(r).Subject, 0, req.ReasonCode, req.CustomReason, req.PublicRecordMarkdown, req.InternalNote, req.EndsAt)
+		target, lookupErr := lockBanSubjectTx(r.Context(), tx, req.UserID, currentClaims(r).Subject)
+		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+			writeGovernanceActionError(w, lookupErr)
+			return
+		}
+		if !requireGovernancePermissions(w, r, tx, "ban.create") {
+			return
+		}
+		if lookupErr != nil {
+			writeGovernanceActionError(w, lookupErr)
+			return
+		}
+		bannedUserID, banPublicID, createErr := createBanTx(r.Context(), tx, target, currentClaims(r).Subject, 0, req.ReasonCode, req.CustomReason, req.PublicRecordMarkdown, req.InternalNote, req.EndsAt)
 		if createErr != nil {
-			e = createErr
-			writeError(w, 400, e.Error())
+			writeGovernanceActionError(w, createErr)
 			return
 		}
 		if e = enqueueTemplatedNotificationTx(r.Context(), tx, "ban.created", bannedUserID, 0, "account_banned", nil,
@@ -1233,6 +1320,9 @@ func (s *Server) revokeBan(w http.ResponseWriter, r *http.Request) {
 	}
 	if e != nil {
 		writeError(w, 500, "解除封禁失败")
+		return
+	}
+	if !requireGovernancePermissions(w, r, tx, "ban.revoke") {
 		return
 	}
 	_, e = tx.Exec(r.Context(), `delete from user_role_bindings

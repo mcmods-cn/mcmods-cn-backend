@@ -6,6 +6,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/security"
+	"mcmods-cn-backend/tools/testing/postgrestarget"
 )
 
 func TestReportResolutionUsesCurrentActionGrantAfterAssignmentLockIntegration(t *testing.T) {
@@ -91,4 +96,41 @@ func TestBanStorageFailureIsRecoverableAndLeavesNoSanctionIntegration(t *testing
 	if err = f.db.QueryRow(f.ctx, `select (select count(*) from ban_records)+(select count(*) from user_role_bindings where source='governance_ban')`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("failed sanction persisted %d rows: %v", count, err)
 	}
+}
+
+// Keep the fault-injection tables local to one session while authorization uses the installed schema.
+func governanceReviewTestPool(t *testing.T, ctx context.Context, databaseURL string) *pgxpool.Pool {
+	t.Helper()
+	base, err := postgrestarget.ParseSingleLoopback(databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := newTEST018IsolatedDatabaseWithConfig(t, ctx, base)
+	pc := db.Config()
+	pc.MaxConns, pc.MinConns = 1, 1
+	pool, err := pgxpool.NewWithConfig(ctx, pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func governanceReviewTestActor(t *testing.T, ctx context.Context, db *pgxpool.Pool, label string, codes ...string) security.Claims {
+	t.Helper()
+	cfg := config.Load()
+	cfg.JWTSecret = "governance-fixture-only-session-signing"
+	id, _, token := createTEST044User(t, ctx, db, cfg, label, "UTC")
+	grantTEST044Permissions(t, ctx, db, id, codes...)
+	claims, err := security.ParseToken(cfg.JWTSecret, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims.Subject = id
+	access, err := resolveUsersRootPermissionsQuery(ctx, db, []int64{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims.PermissionRules = access[id].Permissions
+	return claims
 }
