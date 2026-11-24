@@ -33,11 +33,15 @@ func TestOSSDeletionFailureBudgetLeaseAndDeadAlertAreAtomicIntegration(t *testin
 		t.Fatal(err)
 	}
 	worker := &OSSDeletionWorker{server: &Server{db: pool}, workerID: "test-worker"}
-	dead, err := worker.recordFailure(ctx, ossDeletionJob{ID: 1, Attempts: 1, MaxAttempts: 3, LockToken: "worker:retry"}, errors.New("temporary transport failure"))
+	dead, err := worker.recordFailure(ctx, ossDeletionJob{ID: 1, Attempts: 1, MaxAttempts: 3, LockToken: "worker:retry"}, errors.New("temporary\x00 transport\xff failure"))
 	if err != nil || dead {
 		t.Fatalf("retryable failure = dead %t/error %v", dead, err)
 	}
 	assertOSSDeletionState(t, ctx, pool, 1, "pending", 1, "unknown", 0)
+	var storedError string
+	if err := pool.QueryRow(ctx, "select last_error from oss_object_deletion_outbox where id=1").Scan(&storedError); err != nil || storedError != "temporary� transport� failure" {
+		t.Fatalf("retry diagnostic = %q, error %v", storedError, err)
+	}
 
 	dead, err = worker.recordFailure(ctx, ossDeletionJob{ID: 2, Attempts: 3, MaxAttempts: 3, LockToken: "worker:budget"}, errors.New("still unavailable"))
 	if err != nil || !dead {

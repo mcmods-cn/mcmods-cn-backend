@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -103,7 +104,7 @@ func TestFailedLoaderSyncPreservesPreviousVersions(t *testing.T) {
 	}
 	sources := []minecraftLoaderVersionSource{{code: "Forge", primaryURL: forgeMavenMetadataURL}, {code: "Fabric", primaryURL: fabricGameVersionsURL}}
 	results := map[string]minecraftLoaderVersionResult{
-		"forge":  {source: sources[0], err: errors.New("temporary source failure")},
+		"forge":  {source: sources[0], err: errors.New("metadata\x00" + strings.Repeat("界", 170))},
 		"fabric": {source: sources[1], versions: []string{"1.21.1"}, sourceURLs: []string{fabricGameVersionsURL}},
 	}
 	applyMinecraftLoaderVersionResults(&config, sources, results)
@@ -112,6 +113,9 @@ func TestFailedLoaderSyncPreservesPreviousVersions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(config.Loaders[1].Versions, []string{"1.21.1"}) {
 		t.Fatalf("successful Fabric sync did not replace versions: %#v", config.Loaders[1].Versions)
+	}
+	if got, want := config.LoaderSyncs[0].Error, "metadata�"+strings.Repeat("界", 163); got != want {
+		t.Fatalf("stored provider diagnostic = %q, want %q", got, want)
 	}
 	if config.LoaderSyncs[0].Status != "failed" || config.LoaderSyncs[1].Status != "synced" {
 		t.Fatalf("unexpected loader sync statuses: %#v", config.LoaderSyncs)

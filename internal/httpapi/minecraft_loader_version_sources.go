@@ -16,6 +16,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/singleflight"
+
+	"mcmods-cn-backend/internal/diagnostic"
 )
 
 const (
@@ -672,9 +674,5 @@ func findMinecraftLoader(loaders []minecraftLoaderOption, code string) int {
 }
 
 func truncateMinecraftSyncError(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) > 500 {
-		return value[:500]
-	}
-	return value
+	return diagnostic.Text(strings.TrimSpace(value), 500)
 }

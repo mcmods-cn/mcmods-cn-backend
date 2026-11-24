@@ -8,7 +8,6 @@ import (
 	"net"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
@@ -16,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/diagnostic"
 )
 
 const (
@@ -377,12 +377,7 @@ func truncateOSSDeletionError(err error) string {
 	if err == nil {
 		return ""
 	}
-	value := err.Error()
-	for len(value) > 2000 {
-		_, size := utf8.DecodeLastRuneInString(value)
-		value = value[:len(value)-size]
-	}
-	return value
+	return diagnostic.Text(err.Error(), 2000)
 }
 
 func (s *Server) tombstoneOSSFileTx(ctx context.Context, tx pgx.Tx, fileID int64, reason string) error {
