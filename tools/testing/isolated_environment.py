@@ -16,9 +16,9 @@ from urllib.parse import parse_qsl, urlsplit
 REPOSITORY = Path(__file__).resolve().parents[2]
 DEFAULT_STATE = REPOSITORY / ".audit-test-environment"
 IMAGES = {
-    "postgres": "public.ecr.aws/docker/library/postgres@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722",
-    "redis": "public.ecr.aws/docker/library/redis@sha256:c6eabf748fc7a61dbb5a705c78bcf3d6377b1127a97d0ce965c11c44ba46896f",
-    "nats": "public.ecr.aws/docker/library/nats@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00",
+    "postgres": "docker.io/library/postgres@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722",
+    "redis": "docker.io/library/redis@sha256:c6eabf748fc7a61dbb5a705c78bcf3d6377b1127a97d0ce965c11c44ba46896f",
+    "nats": "docker.io/library/nats@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00",
 }
 LABEL = "mcmods.audit.owner"
 TYPESENSE_IMAGE = "typesense/typesense@sha256:316b7e71c21f7e5e5caa8daa150e1b3f2be8c876081ee1f77bc2d92cd7f137d0"

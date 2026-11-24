@@ -10,7 +10,7 @@
 需要 Python 3.9+、[go.mod](../go.mod) 声明的 Go 工具链 和可用的本地 Docker daemon。
 工具明确使用 `/var/run/docker.sock`，不使用继承的远程 Docker context/host。
 官方镜像固定 digest：PostgreSQL 18.6、Redis 7.4.11、NATS 2.11.17。
-镜像来自官方 Docker Library 的 ECR 公共镜像；首次运行需要下载权限和足够磁盘空间。
+三个镜像都按内容摘要从 Docker Hub 的官方 `library` 仓库获取。首次运行需要能访问该仓库并有足够的本地磁盘空间。
 没有 Docker 时，本项目也可以使用原生回环服务，但必须自行建立并核实专用可丢弃数据库，
 不能把已有连接串作为清空目标。
 
