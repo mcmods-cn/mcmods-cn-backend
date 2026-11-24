@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 )
 
@@ -37,7 +36,8 @@ type authoritativeRecipeRenderState struct {
 
 // hydrateAuthoritativeRecipeRenderLayouts projects the canonical editor model
 // into the same public render shape as imported observations. It is set-based
-// for the entire result page and never manufactures an import snapshot.
+// for the entire result page. decorateRecipeResources resolves public display
+// fields after both canonical and imported layouts have been assembled.
 func (s *Server) hydrateAuthoritativeRecipeRenderLayouts(ctx context.Context, recipes []map[string]any) error {
 	ids := make([]int64, 0, len(recipes))
 	states := make(map[int64]*authoritativeRecipeRenderState, len(recipes))
@@ -62,10 +62,7 @@ func (s *Server) hydrateAuthoritativeRecipeRenderLayouts(ctx context.Context, re
 		slot.id,slot.slot_key,slot.role,slot.ordinal,slot.x::float8,slot.y::float8,slot.width::float8,slot.height::float8,slot.definition,
 		binding.id,binding.definition,candidate.candidate_index,resource_entity.public_id,resource.kind_code,
 		resource.canonical_id,resource.namespace,candidate.amount::float8,candidate.probability::float8,
-		candidate.byproduct,candidate.definition,resource_entity.default_locale,
-		coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-			where localization.catalog_entity_id=resource_entity.id and localization.name<>''),'{}'::jsonb),
-		coalesce(imported.revision_id,''),coalesce(imported.icon_path,'')
+		candidate.byproduct,candidate.definition,resource_entity.default_locale
 		from recipes recipe
 		join recipe_definitions definition on definition.recipe_id=recipe.entity_id
 		join recipe_types type on type.entity_id=recipe.recipe_type_id
@@ -75,10 +72,6 @@ func (s *Server) hydrateAuthoritativeRecipeRenderLayouts(ctx context.Context, re
 		left join recipe_binding_candidates candidate on candidate.binding_id=binding.id
 		left join game_resources resource on resource.entity_id=candidate.resource_id
 		left join catalog_entities resource_entity on resource_entity.id=resource.entity_id
-		left join lateral (select snapshot.revision_id,snapshot.icon_path from resource_import_snapshots snapshot
-			join catalog_import_revisions revision on revision.id=snapshot.revision_id
-			where snapshot.resource_id=resource.entity_id and revision.is_active and revision.status in ('ready','partial')
-			order by (snapshot.icon_path<>'') desc,coalesce(revision.activated_at,revision.created_at) desc,snapshot.id desc limit 1) imported on true
 		where recipe.entity_id=any($1::bigint[])
 		order by recipe.entity_id,slot.ordinal,candidate.candidate_index`, ids)
 	if err != nil {
@@ -93,14 +86,13 @@ func (s *Server) hydrateAuthoritativeRecipeRenderLayouts(ctx context.Context, re
 		var recipeDefinition, slotDefinition []byte
 		var bindingID, candidateIndex sql.NullInt64
 		var bindingDefinition, candidateDefinition []byte
-		var resourcePublicID, kindCode, canonicalID, namespace, defaultLocale, sourceRevisionID, iconPath sql.NullString
+		var resourcePublicID, kindCode, canonicalID, namespace, defaultLocale sql.NullString
 		var amount, probability sql.NullFloat64
 		var byproduct sql.NullBool
-		var names []byte
 		if err = rows.Scan(&recipeID, &recipeTypeID, &recipeDefinition, &templateKey, &canvasWidth, &canvasHeight, &imageScale,
 			&slotID, &slotKey, &role, &ordinal, &x, &y, &width, &height, &slotDefinition,
 			&bindingID, &bindingDefinition, &candidateIndex, &resourcePublicID, &kindCode, &canonicalID, &namespace,
-			&amount, &probability, &byproduct, &candidateDefinition, &defaultLocale, &names, &sourceRevisionID, &iconPath); err != nil {
+			&amount, &probability, &byproduct, &candidateDefinition, &defaultLocale); err != nil {
 			return err
 		}
 		state := states[recipeID]
@@ -172,9 +164,6 @@ func (s *Server) hydrateAuthoritativeRecipeRenderLayouts(ctx context.Context, re
 		candidate["chance"] = nullableSQLFloat(probability)
 		candidate["byproduct"] = byproduct.Valid && byproduct.Bool
 		candidate["locale"] = defaultLocale.String
-		candidate["names"] = json.RawMessage(names)
-		candidate["sourceRevisionId"] = sourceRevisionID.String
-		candidate["iconPath"] = iconPath.String
 		alternatives, _ := slot["alternatives"].([]any)
 		slot["alternatives"] = append(alternatives, candidate)
 	}
