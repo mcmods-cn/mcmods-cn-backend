@@ -2,7 +2,7 @@
 
 ## 统一模型
 
-举报接口使用白名单目标类型与公开 ID，覆盖 Mod、插件、地图、光影、材质包、数据包、附属资源、讨论、BUG、新闻、教程、皮肤、蓝图、服务器、评论和用户主页。目标适配器解析公开 ID、校验目标类型并生成快照；`reports` 实际保存数值 `target_id` 和 `target_type`，通过复合外键连接 `public_routes(entity_type,internal_id)`。客户端不能传表名或内部数据库 ID。
+举报接口接受目标类型和公开 ID。支持 Mod、整合包、插件、地图、光影、材质包、数据包、附属项目、讨论、问题、新闻、教程、皮肤、蓝图、服务器、评论和用户主页。服务端按目标类型检查可见性，再把 `target_type`、`target_public_id`、当时的内容责任人和角色保存到 `reports`。项目投稿者和具有开发者权限的用户分别记录。
 
 理由由 `GET /api/v1/reports/reasons` 返回稳定代码和理由版本。每类目标拥有自己的理由集合，统一附加 `other`；数据库保存代码、版本、显示资源键快照、自定义原因和补充说明。理由代码的显示文本由前端语言资源提供。
 
@@ -23,16 +23,16 @@
 
 ## 审核流程
 
-状态为 `pending -> in_review -> resolved_valid/resolved_invalid`，领取和处理均锁定举报行并检查 `lock_version`/当前状态，防止重复处置。结论与动作分开保存：`report_reviews` 记录结论，`moderation_actions` 记录隐藏内容、封禁等副作用及前后摘要。幂等键避免重复点击重复执行。
+举报从 `pending` 进入 `in_review`，最终成为 `resolved_valid` 或 `resolved_invalid`。领取与重新打开有状态条件。接管和结案在事务中锁定举报行，结案还须匹配当前领取人。每项操作按锁后的登录会话和当前权限决定能否提交。审核人另需相应动作权限才可隐藏内容或封禁账号。结论保存在 `report_reviews`，隐藏处置保存在 `moderation_actions`，关联封禁见 `ban_records.report_id`。
 
 幂等键在单条举报的全部审核与重新打开操作之间共享。复用已有键返回 HTTP 409，并回滚本次状态、附件、处置和通知变更；重新打开后再次处理须使用新的键，不能把旧审核记录当作新一轮操作的记录。同一举报人对同一目标已有开放举报时，重新打开也返回 HTTP 409。
 
-有效举报可选择调用各对象的权威软隐藏/驳回流程，也可创建封禁；无效举报不修改目标。处理后通过事务 Outbox 发送举报人和目标作者通知，不在事务提交前发布 NATS 消息。重新打开会恢复证据绑定并取消待删除时间。
+有效举报可选择调用各对象的权威软隐藏/驳回流程，也可创建封禁；无效举报不修改目标。处理结果通过事务 Outbox 通知举报人。隐藏处置还通知直接内容的作者或所有者，项目类目标按当前有效开发者授权确定收件人，不在事务提交前发布 NATS 消息。重新打开会恢复证据绑定并取消待删除时间。
 
 ## 权限与防滥用
 
 - 用户：`report.create`、`report.view_own`；
 - 审核：`report.review`、`report.snapshot.view`、`report.evidence.view`；
-- 动作：`report.action.delete`、`report.action.ban`、`report.action.reopen`。
+- 动作：`report.action.takeover`、`report.action.delete`、`report.action.ban`、`report.action.reopen`。
 
 举报与证据上传进入现有统一反滥用 `report.create` 动作，组合用户、Session、IP、设备、内容和重复目标；开放举报有唯一索引，阻止同一用户对同一目标反复制造待处理记录。被封禁账号在统一写请求防火墙处被拒绝。

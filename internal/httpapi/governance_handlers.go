@@ -853,7 +853,7 @@ func (s *Server) resolveUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	if request.BanUserID != "" {
 		required = append(required, "report.action.ban")
 		banTarget, targetErr = lockBanSubjectTx(r.Context(), tx, request.BanUserID, claims.Subject)
-		if targetErr != nil && !errors.Is(targetErr, pgx.ErrNoRows) {
+		if targetErr != nil && !errors.Is(targetErr, errBanSubjectMissing) {
 			writeGovernanceActionError(w, targetErr)
 			return
 		}
@@ -1024,15 +1024,13 @@ func (s *Server) reopenUnifiedReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "pending"})
 }
 
+const errBanSubjectMissing governanceActionInputError = "封禁用户不存在"
+
 type governanceActionInputError string
 
 func (e governanceActionInputError) Error() string { return string(e) }
 
 func writeGovernanceActionError(w http.ResponseWriter, err error) {
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusBadRequest, "封禁用户不存在")
-		return
-	}
 	var invalid governanceActionInputError
 	if errors.As(err, &invalid) {
 		writeError(w, http.StatusBadRequest, invalid.Error())
@@ -1114,14 +1112,22 @@ type banSubject struct {
 }
 
 func lockBanSubjectTx(ctx context.Context, tx pgx.Tx, publicID string, actorID int64) (banSubject, error) {
-	// Two moderators can act on one another. Lock both account rows in ID
-	// order before checking the actor's session or changing the target's roles.
+	// Release and expiration lock the active sanction before changing account
+	// roles. A concurrent replacement must wait in the same order.
 	var target banSubject
+	if _, err := tx.Exec(ctx, `select ban.id from ban_records ban join users subject on subject.id=ban.user_id
+		where subject.public_id=$1 and ban.status='active' for update of ban`, publicID); err != nil {
+		return target, err
+	}
+	// Two moderators can act on one another. Lock both accounts in ID order.
 	err := tx.QueryRow(ctx, `with locked as materialized (
 		select id,public_id,username,avatar_url,status from users
 		where public_id=$1 or id=$2 order by id for no key update
 	) select id,username,avatar_url from locked where public_id=$1 and status<>'deleted'`, publicID, actorID).
 		Scan(&target.id, &target.username, &target.avatar)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return target, errBanSubjectMissing
+	}
 	return target, err
 }
 
@@ -1210,7 +1216,7 @@ func (s *Server) adminBans(w http.ResponseWriter, r *http.Request) {
 		}
 		defer tx.Rollback(r.Context())
 		target, lookupErr := lockBanSubjectTx(r.Context(), tx, req.UserID, currentClaims(r).Subject)
-		if lookupErr != nil && !errors.Is(lookupErr, pgx.ErrNoRows) {
+		if lookupErr != nil && !errors.Is(lookupErr, errBanSubjectMissing) {
 			writeGovernanceActionError(w, lookupErr)
 			return
 		}
