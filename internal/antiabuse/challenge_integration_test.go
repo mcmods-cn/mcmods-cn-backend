@@ -48,7 +48,8 @@ func TestFormAndHumanChallengesAreBoundAndSingleUse(t *testing.T) {
 	antiCfg := cfg.AntiAbuse
 	antiCfg.Enabled, antiCfg.HMACSecret, antiCfg.IPHashSecret = true, "integration-hmac-secret-that-is-at-least-32-bytes", "integration-ip-secret-that-is-at-least-32-bytes"
 	antiCfg.FormTokenTTL, antiCfg.FormMinimumAge, antiCfg.ChallengeTTL, antiCfg.ChallengeProvider = time.Minute, 0, time.Minute, "proof"
-	service := New(context.Background(), antiCfg, pool, querycache.New(config.RedisConfig{}))
+	service := New(ctx, antiCfg, pool, querycache.New(config.RedisConfig{}))
+	defer service.Close(context.Background())
 	objectKey, sessionID, ip := "/api/v1/comment-targets/community_post/test/comments", "integration-session", "192.0.2.20"
 	form, err := service.IssueFormToken(ctx, userID, sessionID, ip, "comment.create", objectKey)
 	if err != nil {
@@ -99,7 +100,8 @@ func TestFormAndHumanChallengesAreBoundAndSingleUse(t *testing.T) {
 	defer provider.Close()
 	turnstileCfg := antiCfg
 	turnstileCfg.ChallengeProvider, turnstileCfg.TurnstileSiteKey, turnstileCfg.TurnstileSecretKey, turnstileCfg.TurnstileVerifyURL = "turnstile", "test-site", "test-secret", provider.URL
-	turnstile := New(context.Background(), turnstileCfg, pool, querycache.New(config.RedisConfig{}))
+	turnstile := New(ctx, turnstileCfg, pool, querycache.New(config.RedisConfig{}))
+	defer turnstile.Close(context.Background())
 	challenge, err := turnstile.createChallenge(ctx, base, turnstile.privateHash("session", sessionID), turnstile.privateHash("ip", ip))
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +109,27 @@ func TestFormAndHumanChallengesAreBoundAndSingleUse(t *testing.T) {
 	degraded, err := turnstile.Evaluate(ctx, withEvaluation(base, "", "provider outage content", challenge.ID+":provider-token"))
 	if err != nil || degraded.Outcome != Moderation || !degraded.Moderation {
 		t.Fatalf("challenge outage did not degrade to moderation: decision=%+v err=%v", degraded, err)
+	}
+
+	// Expiration can occur while the provider is processing a legitimate proof.
+	slowProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if _, err := pool.Exec(ctx, `update anti_abuse_challenges set expires_at=clock_timestamp() where public_id=$1`, challenge.ID); err != nil {
+			t.Errorf("advance challenge expiry: %v", err)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer slowProvider.Close()
+	turnstile.cfg.TurnstileVerifyURL = slowProvider.URL
+	proof := withEvaluation(base, "", "", challenge.ID+":provider-token")
+	passedLate, available := turnstile.verifyChallenge(ctx, proof, turnstile.privateHash("session", sessionID), turnstile.privateHash("ip", ip))
+	var consumed bool
+	if err := pool.QueryRow(ctx, `select consumed_at is not null from anti_abuse_challenges where public_id=$1`, challenge.ID).Scan(&consumed); err != nil {
+		t.Fatal(err)
+	}
+	if passedLate || !available || consumed {
+		t.Fatalf("expired challenge passed=%t available=%t consumed=%t", passedLate, available, consumed)
 	}
 }
 

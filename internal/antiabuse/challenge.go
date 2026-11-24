@@ -93,7 +93,7 @@ func (s *Service) verifyChallenge(ctx context.Context, input Evaluation, session
 	var metadata []byte
 	err := s.db.QueryRow(ctx, `select provider,answer_hash,metadata from anti_abuse_challenges
 		where public_id=$1 and kind='human' and status='pending' and user_id=$2 and session_hash=$3 and action=$4 and object_key=$5
-		  and expires_at>now() and (ip_hash='' or ip_hash=$6) for update`, publicID, input.UserID, sessionHash, input.Action,
+		  and expires_at>clock_timestamp() and (ip_hash='' or ip_hash=$6)`, publicID, input.UserID, sessionHash, input.Action,
 		truncate(input.ObjectKey, 160), ipHash).Scan(&provider, &answerHash, &metadata)
 	if err != nil {
 		return false, true
@@ -119,7 +119,7 @@ func (s *Service) verifyChallenge(ctx context.Context, input Evaluation, session
 	}
 	command, updateErr := s.db.Exec(ctx, `update anti_abuse_challenges set status=$2,failure_count=failure_count+case when $3 then 0 else 1 end,
 		passed_at=case when $3 then now() else passed_at end,consumed_at=case when $3 then now() else consumed_at end
-		where public_id=$1 and status='pending'`, publicID, status, passed)
+		where public_id=$1 and status='pending' and expires_at>clock_timestamp()`, publicID, status, passed)
 	return updateErr == nil && command.RowsAffected() == 1 && passed, available
 }
 
@@ -142,7 +142,12 @@ func (s *Service) verifyTurnstile(ctx context.Context, token, remoteIP string) (
 		return false, err
 	}
 	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return false, err
