@@ -39,14 +39,3 @@ func TestCommentPopularityRouteFunctionUsesUnambiguousParameters(t *testing.T) {
 		}
 	}
 }
-
-func TestCommentPopularityRefreshUsesUnambiguousAuthorVariable(t *testing.T) {
-	t.Parallel()
-	definition := strings.ToLower(contentPopularityCommentRefreshFunctionStatement())
-	if !strings.Contains(definition, "comment.author_id=changed.author_id") {
-		t.Fatal("comment popularity refresh does not use its unambiguous author variable")
-	}
-	if strings.Contains(definition, "comment.author_id=author_id") {
-		t.Fatal("comment popularity refresh keeps its ambiguous author expression")
-	}
-}

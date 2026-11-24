@@ -80,3 +80,26 @@ func TestSocialEligibilityChangesDuringInteractionIntegration(t *testing.T) {
 	}
 	assert(true, 1, 1)
 }
+
+func TestCommentPopularityTransfersTheCorrectAuthorContributionIntegration(t *testing.T) {
+	ctx, pool := newPopularityConcurrencyPool(t)
+	if _, err := pool.Exec(ctx, `insert into users(id,username,email,password_hash,security_score) values
+		(61,'first_author','first@example.invalid','fixture',80),(62,'second_author','second@example.invalid','fixture',80);
+		insert into mods(id,project_code,slug,primary_name,review_status) values(63,'authorcnt','author-count','Authors','approved');
+		insert into comments(id,target_type,target_id,author_id,body) values
+		(64,'mod',63,61,'First'),(65,'mod',63,61,'Second'),(66,'mod',63,62,'Third');
+		update comments set author_id=62 where id=64`); err != nil {
+		t.Fatal(err)
+	}
+	var first, second, total, authors int
+	if err := pool.QueryRow(ctx, `select first.published_comments,second.published_comments,facts.comment_count,facts.effective_commenter_count
+		from public_routes route join content_popularity_lifetime_facts facts on facts.object_route_id=route.id
+		join content_social_contributions first on first.object_route_id=route.id and first.actor_id=61
+		join content_social_contributions second on second.object_route_id=route.id and second.actor_id=62
+		where route.entity_type='mod' and route.internal_id=63`).Scan(&first, &second, &total, &authors); err != nil {
+		t.Fatal(err)
+	}
+	if first != 1 || second != 2 || total != 3 || authors != 2 {
+		t.Fatalf("stored author contributions=%d/%d, total/distinct=%d/%d; want 1/2 and 3/2", first, second, total, authors)
+	}
+}

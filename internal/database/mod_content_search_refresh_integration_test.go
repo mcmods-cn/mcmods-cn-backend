@@ -53,12 +53,17 @@ func TestResourceSearchRefreshWritesOnlyAffectedPlacementsIntegration(t *testing
 				t.Fatal(err)
 			}
 			defer tx.Rollback(ctx)
+			// The backend can still have counters pending flush after an earlier rollback.
+			const updates = `select n_tup_upd from pg_stat_xact_user_tables where relid='mod_content_section_resources'::regclass`
+			var before int
+			if err := tx.QueryRow(ctx, updates).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := tx.Exec(ctx, tc.update); err != nil {
 				t.Fatal(err)
 			}
 			var writes, matched, version int
-			if err := tx.QueryRow(ctx, `select n_tup_upd from pg_stat_xact_user_tables
-				where relid='mod_content_section_resources'::regclass`).Scan(&writes); err != nil {
+			if err := tx.QueryRow(ctx, updates).Scan(&writes); err != nil {
 				t.Fatal(err)
 			}
 			if err := tx.QueryRow(ctx, `select count(*),coalesce(min(version_id),0)
@@ -66,6 +71,7 @@ func TestResourceSearchRefreshWritesOnlyAffectedPlacementsIntegration(t *testing
 				Scan(&matched, &version); err != nil {
 				t.Fatal(err)
 			}
+			writes -= before
 			if writes != tc.writes || matched != 1 || version != tc.version {
 				t.Fatalf("projection writes=%d, matching versions=%d, first=%d; want %d,1,%d", writes, matched, version, tc.writes, tc.version)
 			}

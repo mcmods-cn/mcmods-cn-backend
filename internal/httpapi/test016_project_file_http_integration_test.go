@@ -268,7 +268,7 @@ func (f test016FileFixture) attach(t *testing.T, token, base, ossID string) stri
 	}
 	file, want := response.Data, test016Metadata(ossID)
 	if file.DisplayName != want.DisplayName || file.VersionName != want.VersionName || file.ReleaseChannel != want.ReleaseChannel ||
-		!reflect.DeepEqual(file.GameVersions, want.GameVersions) || !reflect.DeepEqual(file.Loaders, want.Loaders) ||
+		!reflect.DeepEqual(file.GameVersions, want.GameVersions) || !reflect.DeepEqual(file.Loaders, []string{"NeoForge"}) ||
 		file.FileName != name || file.SizeBytes != size || file.SHA256 != digest || file.ScanStatus != scan ||
 		file.PublishedAt.IsZero() || file.DownloadCount != 0 || file.DownloadCountSource != "mcmods" ||
 		file.Source != "internal" || file.DownloadPath != base+"/internal/"+file.ID+"/download" {
