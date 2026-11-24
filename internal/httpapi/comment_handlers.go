@@ -785,7 +785,7 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer tx.Rollback(r.Context())
-		previousBody, _, err := updateCommentBodyAtVersion(r.Context(), tx, commentID, request.Body, request.BaseUpdatedAt)
+		previousBody, updatedAt, err := updateCommentBodyAtVersion(r.Context(), tx, commentID, request.Body, request.BaseUpdatedAt)
 		var conflict *commentEditConflictError
 		if errors.As(err, &conflict) {
 			writeAPIError(w, http.StatusConflict, "COMMENT_EDIT_CONFLICT",
@@ -807,11 +807,16 @@ func (s *Server) commentItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		skipRequestActivity(r)
-		items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
-		if len(items) > 0 {
+		items, err := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
+		if err == nil && len(items) == 1 {
 			writeJSON(w, http.StatusOK, items[0])
 			return
 		}
+		// The edit committed even if its author, reactions or attachments could
+		// not be loaded. Return the version the client needs for its next edit.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id": publicID, "body": request.Body, "updatedAt": updatedAt, "detailsUnavailable": true,
+		})
 	case http.MethodDelete:
 		tx, err := s.db.Begin(r.Context())
 		if err != nil {

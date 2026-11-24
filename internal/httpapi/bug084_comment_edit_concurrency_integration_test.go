@@ -148,3 +148,30 @@ func assertBUG084Body(t *testing.T, ctx context.Context, pool *pgxpool.Pool, wan
 		t.Fatalf("comment body=%q want=%q", body, want)
 	}
 }
+
+func TestCommentEditReturnsCommittedRevisionWhenDetailsUnavailable(t *testing.T) {
+	f := newTEST038Fixture(t)
+	comment := f.comment(t, f.otherEditor, f.modCode, "edit-receipt", "Original synthetic comment", "")
+	// Disable only the decorative attachment read in this disposable child database.
+	if _, err := f.db.Exec(f.ctx, "alter table comment_attachments rename to test_unavailable_comment_attachments"); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{"body": "Edited synthetic comment", "baseUpdatedAt": comment.UpdatedAt}
+	raw := f.require(t, f.otherEditor, http.MethodPatch, "/api/v1/comments/"+comment.ID, payload, http.StatusOK)
+	var expectedVersion time.Time
+	var activities int
+	if err := f.db.QueryRow(f.ctx, `select updated_at,(select count(*) from activity_event_outbox
+		where object_public_id=$1 and action_id=(select id from activity_actions where code='edit'))
+		from comments where public_id=$1 and body=$2`, comment.ID, payload["body"]).Scan(&expectedVersion, &activities); err != nil {
+		t.Fatal(err)
+	}
+	got := decodeTEST022Data[struct {
+		ID                 string
+		Body               string
+		UpdatedAt          time.Time
+		DetailsUnavailable bool
+	}](t, raw)
+	if !got.DetailsUnavailable || activities != 1 || got.ID != comment.ID || got.Body != payload["body"] || !got.UpdatedAt.Equal(expectedVersion) {
+		t.Fatalf("edit receipt=%+v expected version=%v activity events=%d", got, expectedVersion, activities)
+	}
+}
