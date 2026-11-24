@@ -15,6 +15,8 @@ import (
 
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 type yggdrasilTexturePayload struct {
@@ -318,7 +320,8 @@ func (s *Server) yggdrasilSetTexture(w http.ResponseWriter, r *http.Request) {
 		writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Account is unavailable.", "")
 		return
 	}
-	if err = lockYggdrasilTextureSessionTx(r.Context(), tx, yggdrasilBearerToken(r), userID, profileID); err != nil {
+	assetLimit, err = authorizeYggdrasilTextureSessionTx(r.Context(), tx, yggdrasilBearerToken(r), userID, profileID)
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeYggdrasilError(w, http.StatusUnauthorized, "UnauthorizedException", "Invalid access token.", "")
 		} else {
@@ -419,7 +422,7 @@ func (s *Server) yggdrasilDeleteTexture(w http.ResponseWriter, r *http.Request) 
 		writeYggdrasilError(w, http.StatusForbidden, "ForbiddenOperationException", "Account is unavailable.", "")
 		return
 	}
-	if err = lockYggdrasilTextureSessionTx(r.Context(), tx, yggdrasilBearerToken(r), userID, profileID); err != nil {
+	if _, err = authorizeYggdrasilTextureSessionTx(r.Context(), tx, yggdrasilBearerToken(r), userID, profileID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeYggdrasilError(w, http.StatusUnauthorized, "UnauthorizedException", "Invalid access token.", "")
 		} else {
@@ -448,21 +451,32 @@ func (s *Server) yggdrasilDeleteTexture(w http.ResponseWriter, r *http.Request) 
 // order: account, profile, then token. Keep these locks through the write so
 // revocation, credential rotation and profile deletion cannot pass between the
 // authorization check and the texture mutation.
-func lockYggdrasilTextureSessionTx(ctx context.Context, tx pgx.Tx, token string, userID, profileID int64) error {
+func authorizeYggdrasilTextureSessionTx(ctx context.Context, tx pgx.Tx, token string, userID, profileID int64) (int, error) {
 	var lockedID int64
 	if err := tx.QueryRow(ctx, `select user_id from yggdrasil_accounts
 		where user_id=$1 and enabled=true for update`, userID).Scan(&lockedID); err != nil {
-		return err
+		return 0, err
 	}
 	if err := tx.QueryRow(ctx, `select id from player_profiles
 		where id=$1 and user_id=$2 and status='active' for update`, profileID, userID).Scan(&lockedID); err != nil {
-		return err
+		return 0, err
 	}
-	return tx.QueryRow(ctx, `with locked_token as materialized (
+	if err := tx.QueryRow(ctx, `with locked_token as materialized (
 		select id,status,expires_at from yggdrasil_tokens
 		where access_token_hash=$1 and user_id=$2 and player_profile_id=$3 for update
 	) select id from locked_token where status='active' and expires_at>clock_timestamp()`,
-		hashYggdrasilToken(token), userID, profileID).Scan(&lockedID)
+		hashYggdrasilToken(token), userID, profileID).Scan(&lockedID); err != nil {
+		return 0, err
+	}
+	resolved, err := resolveUsersRootPermissionsQuery(ctx, tx, []int64{userID})
+	if err != nil {
+		return 0, err
+	}
+	actor := security.Claims{Subject: userID, PermissionRules: resolved[userID].Permissions}
+	if !claimsAllow(actor, yggdrasilLoginPermission) || claimsExplicitlyAllow(actor, "account.banned") {
+		return 0, pgx.ErrNoRows
+	}
+	return skinAssetLimit(actor.PermissionRules), nil
 }
 
 func (s *Server) authorizeYggdrasilTextureChange(r *http.Request, uuid string) (int64, int64, bool) {
