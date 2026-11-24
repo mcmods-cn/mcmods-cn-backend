@@ -188,6 +188,9 @@ func TestIndependentP1CONT001StaleBaselineConflictsWithoutPublication(t *testing
 				if err != nil {
 					t.Fatal(err)
 				}
+				if err := s.resolveClaimsSubject(f.ctx, &claims); err != nil {
+					t.Fatal(err)
+				}
 				r := httptest.NewRequest(http.MethodPut, "/internal/independent-existing-history", nil).WithContext(context.WithValue(f.ctx, claimsContextKey, claims))
 				got, err := s.submitCatalogEditorMutation(r, snapshot, &base)
 				if err != nil {
