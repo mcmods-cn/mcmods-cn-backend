@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"net/http"
 	"reflect"
 	"testing"
 )
@@ -33,5 +34,31 @@ func TestOCT02LogRetentionCanonicalKeyWinsAndAliasesAreDeterministic(t *testing.
 		if len(got.CategoryDays) != len(defaultLogConfig().CategoryDays)+1 {
 			t.Fatalf("aliases became duplicate persisted categories: %+v", got.CategoryDays)
 		}
+	}
+}
+
+func TestSavedLogCategoryCanInheritTheSiteRetentionIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.reviewer], "log.write", "log.read")
+	const settings = "/api/v1/admin/logs/config"
+	f.require(t, f.reviewer, http.MethodPut, settings, logRetentionConfig{
+		Enabled: true, DefaultDays: 365, CategoryDays: map[string]int{"api_access": 0},
+	}, http.StatusOK)
+	config := decodeTEST022Data[logRetentionConfig](t, f.require(t, f.reviewer, http.MethodGet, settings, nil, http.StatusOK))
+	if days, explicit := config.CategoryDays["api_access"]; !explicit || days != 0 {
+		t.Fatalf("saved inheritance was replaced with %d days; present=%v", days, explicit)
+	}
+	for _, days := range []int{180, 400} {
+		if _, err := f.db.Exec(f.ctx, `insert into app_logs(category,action,created_at)
+			values('api_access','inherit-retention',now()-make_interval(days=>$1::int))`, days); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.require(t, f.reviewer, http.MethodPost, "/api/v1/admin/logs/cleanup", nil, http.StatusOK)
+	var within, expired int
+	err := f.db.QueryRow(f.ctx, `select count(*) filter(where created_at>now()-interval '365 days'),
+		count(*) filter(where created_at<now()-interval '365 days') from app_logs where action='inherit-retention'`).Scan(&within, &expired)
+	if err != nil || within != 1 || expired != 0 {
+		t.Fatalf("within policy=%d expired=%d err=%v", within, expired, err)
 	}
 }

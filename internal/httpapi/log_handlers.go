@@ -452,7 +452,11 @@ func normalizeLogConfig(payload logRetentionConfig) logRetentionConfig {
 		}
 		seen[category] = true
 		if days <= 0 {
-			delete(normalized, category)
+			// Persist inheritance for built-in categories. Omitting the key
+			// would restore its factory period the next time the worker reads it.
+			if _, builtIn := defaults.CategoryDays[category]; builtIn {
+				normalized[category] = 0
+			}
 			continue
 		}
 		normalized[category] = min(days, 3650)
