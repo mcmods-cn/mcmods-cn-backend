@@ -70,3 +70,27 @@ func TestBUG054InstallCapturesStructuredAndLegacyLogsWithAuthoritativeLevels(t *
 		t.Errorf("legacy severity inference was lost by the slog bridge: %#v", entries[3])
 	}
 }
+
+func TestOversizePartialWriteKeepsOneDiagnosticLine(t *testing.T) {
+	store := NewStore(4)
+	prefix := strings.Repeat("a", maxLineBytes)
+	for _, part := range []string{prefix[:500], prefix[500:] + "over", "flow", "\nnext line\npartial", " end\n"} {
+		n, err := store.Write([]byte(part))
+		if n != len(part) || err != nil {
+			t.Fatalf("write = %d, %v", n, err)
+		}
+	}
+	entries := store.Entries()
+	if len(entries) != 3 || entries[0].Line != prefix+" …[truncated]" || entries[1].Line != "next line" || entries[2].Line != "partial end" {
+		t.Fatalf("unexpected stored lines after truncation (count=%d)", len(entries))
+	}
+}
+
+func BenchmarkStoreLongCompletedLine(b *testing.B) {
+	store := NewStore(1)
+	record := append([]byte(strings.Repeat("a", 128<<10)), '\n')
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = store.Write(record)
+	}
+}

@@ -31,13 +31,14 @@ type Entry struct {
 // state rather than business facts, so losing the previous process's buffer on
 // restart is intentional. Persistent system events continue to use app_logs.
 type Store struct {
-	mu       sync.RWMutex
-	entries  []Entry
-	capacity int
-	start    int
-	size     int
-	nextID   uint64
-	partial  []byte
+	mu                  sync.RWMutex
+	entries             []Entry
+	capacity            int
+	start               int
+	size                int
+	nextID              uint64
+	partial             []byte
+	discardUntilNewline bool
 }
 
 var processStore = NewStore(defaultCapacity)
@@ -95,31 +96,39 @@ func (s *Store) Write(payload []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	originalLength := len(payload)
-	s.partial = append(s.partial, payload...)
-	for {
-		newline := bytes.IndexByte(s.partial, '\n')
-		if newline < 0 {
-			break
+	for len(payload) > 0 {
+		part, rest, complete := bytes.Cut(payload, []byte{'\n'})
+		payload = rest
+		if s.discardUntilNewline {
+			s.discardUntilNewline = !complete
+			continue
 		}
-		s.appendLineLocked(string(s.partial[:newline]))
-		s.partial = s.partial[newline+1:]
-	}
-	// The standard logger normally writes complete lines. Bound a malformed or
-	// third-party partial write so it cannot grow process memory without limit.
-	if len(s.partial) > maxLineBytes {
-		s.appendLineLocked(string(s.partial[:maxLineBytes]))
+
+		remaining := maxLineBytes - len(s.partial)
+		truncated := len(part) > remaining
+		part = part[:min(len(part), remaining)]
+		if !complete && !truncated {
+			s.partial = append(s.partial, part...)
+			continue
+		}
+		if len(s.partial) != 0 {
+			s.partial = append(s.partial, part...)
+			part = s.partial
+		}
+		s.appendLineLocked(part, truncated)
 		s.partial = s.partial[:0]
+		s.discardUntilNewline = truncated && !complete
 	}
 	return originalLength, nil
 }
 
-func (s *Store) appendLineLocked(line string) {
-	line = strings.TrimRight(line, "\r")
+func (s *Store) appendLineLocked(payload []byte, truncated bool) {
+	line := string(bytes.TrimRight(payload, "\r"))
+	if truncated {
+		line += " …[truncated]"
+	}
 	if line == "" {
 		return
-	}
-	if len(line) > maxLineBytes {
-		line = line[:maxLineBytes] + " …[truncated]"
 	}
 	createdAt := time.Now()
 	if strings.HasPrefix(line, "time=") {
