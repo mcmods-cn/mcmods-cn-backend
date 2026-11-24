@@ -371,7 +371,7 @@ func matchedActivityPublicID(r *http.Request) string {
 			continue
 		}
 		name, named = strings.CutSuffix(name, "}")
-		if !named || !(name == "id" || strings.HasSuffix(name, "Id") || name == "targetKey") {
+		if !named || !(name == "id" || strings.HasSuffix(name, "Id")) {
 			continue
 		}
 		if value := strings.ToLower(r.PathValue(name)); validCatalogPublicID(value) {

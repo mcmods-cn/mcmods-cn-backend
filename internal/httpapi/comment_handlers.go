@@ -262,6 +262,7 @@ func (s *Server) commentFloor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取楼层失败")
 		return
 	}
+	annotateActivity(r, activity.ActionView, activity.ObjectComment, items[0].ID, 0)
 	writeJSON(w, http.StatusOK, map[string]any{"comment": items[0], "target": target})
 }
 
