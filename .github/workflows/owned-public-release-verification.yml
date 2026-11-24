@@ -1,0 +1,42 @@
+name: Verify a public release checksum using the application downloader
+on:
+  push:
+    branches: [qa/public-release-checksum-nov24]
+permissions:
+  contents: read
+jobs:
+  official-checksum:
+    runs-on: ubuntu-latest
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 214195c8984b19d516044c7716c076278b7c6f77
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+      - name: Verify the public release and checksum with the production transport
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 214195c8984b19d516044c7716c076278b7c6f77
+          export MCMODS_AUDIT_PUBLIC_CDN_DIR="$RUNNER_TEMP/official-public-cdn"
+          export MCMODS_RUN_PUBLIC_CDN=1
+          case_name=TestAuditDGR003OfficialPublicGitHubCDNChecksumIntegration
+          go test ./internal/httpapi -mod=readonly -count=1 -timeout=3m -json -run "^${case_name}$" > "$RUNNER_TEMP/public-cdn.jsonl"
+          python3 - "$RUNNER_TEMP/public-cdn.jsonl" "$case_name" <<'PY'
+          import json, sys
+          events = [json.loads(x) for x in open(sys.argv[1])]
+          states = [x['Action'] for x in events if x.get('Test') == sys.argv[2] and x['Action'] in {'run', 'pass', 'fail', 'skip'}]
+          assert states == ['run', 'pass'], states
+          print(sys.argv[2], states)
+          PY
+      - name: Preserve the queryless download receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: public-release-checksum-214195c
+          path: ${{ runner.temp }}/official-public-cdn/public-cdn-result.json
+          if-no-files-found: error
+          retention-days: 14
