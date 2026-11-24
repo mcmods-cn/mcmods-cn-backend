@@ -1248,18 +1248,9 @@ func availableSimpleProjectSiteID(ctx context.Context, tx pgx.Tx, projectType, n
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1,0))`, "simple-project-slug:"+projectType+":"+base); err != nil {
 		return "", err
 	}
-	for suffix := 0; suffix < 1000; suffix++ {
-		candidate := base
-		if suffix > 0 {
-			candidate = fmt.Sprintf("%s_%d", base, suffix+1)
-		}
-		if err := ensureSimpleProjectSiteIDAvailable(ctx, tx, projectType, candidate, 0); err == nil {
-			return candidate, nil
-		} else if !errors.Is(err, errSimpleProjectSiteIDTaken) {
-			return "", err
-		}
-	}
-	return "", fmt.Errorf("unable to allocate project site ID: %w", errSimpleProjectSiteIDTaken)
+	return availableProjectSiteID(base, errSimpleProjectSiteIDTaken, func(candidate string) error {
+		return ensureSimpleProjectSiteIDAvailable(ctx, tx, projectType, candidate, 0)
+	})
 }
 
 func ensureSimpleProjectSiteIDAvailable(ctx context.Context, query databaseQuery, projectType, siteID string, excludeID int64) error {

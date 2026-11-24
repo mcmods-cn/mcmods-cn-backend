@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -800,19 +801,30 @@ func newModUniqueID() (string, error) {
 }
 
 func availableModSiteID(ctx context.Context, query databaseQuery, name string) (string, error) {
-	base := modSiteIDBase(name)
-	for suffix := 0; suffix < 1000; suffix++ {
+	return availableProjectSiteID(modSiteIDBase(name), errModSiteIDTaken, func(candidate string) error {
+		return ensureModSiteIDAvailable(ctx, query, candidate, 0)
+	})
+}
+
+const maxProjectSiteIDLength = 100
+
+func availableProjectSiteID(base string, occupied error, check func(string) error) (string, error) {
+	for number := 1; number <= 1000; number++ {
 		candidate := base
-		if suffix > 0 {
-			candidate = fmt.Sprintf("%s_%d", base, suffix+1)
+		if number > 1 {
+			suffix := "_" + strconv.Itoa(number)
+			prefix := base[:min(len(base), maxProjectSiteIDLength-len(suffix))]
+			candidate = strings.TrimRight(prefix, "_") + suffix
 		}
-		if err := ensureModSiteIDAvailable(ctx, query, candidate, 0); err == nil {
+		err := check(candidate)
+		if err == nil {
 			return candidate, nil
-		} else if !errors.Is(err, errModSiteIDTaken) {
+		}
+		if !errors.Is(err, occupied) {
 			return "", err
 		}
 	}
-	return "", errors.New("unable to allocate mod site ID")
+	return "", fmt.Errorf("unable to allocate project site ID: %w", occupied)
 }
 
 func ensureModSiteIDAvailable(ctx context.Context, query databaseQuery, siteID string, excludeModID int64) error {
@@ -831,7 +843,7 @@ func normalizeModSiteID(value string) string {
 }
 
 func validModSiteID(value string) bool {
-	if len(value) == 0 || len(value) > 100 || !isASCIIAlphaNumeric(value[0]) || !isASCIIAlphaNumeric(value[len(value)-1]) {
+	if len(value) == 0 || len(value) > maxProjectSiteIDLength || !isASCIIAlphaNumeric(value[0]) || !isASCIIAlphaNumeric(value[len(value)-1]) {
 		return false
 	}
 	for index := 1; index < len(value)-1; index++ {
@@ -866,8 +878,8 @@ func modSiteIDBase(value string) string {
 	if siteID == "" {
 		return "mod"
 	}
-	if len(siteID) > 100 {
-		siteID = strings.Trim(siteID[:100], "_")
+	if len(siteID) > maxProjectSiteIDLength {
+		siteID = strings.Trim(siteID[:maxProjectSiteIDLength], "_")
 	}
 	return siteID
 }

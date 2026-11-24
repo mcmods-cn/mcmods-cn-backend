@@ -392,7 +392,7 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		err = ensureModpackSiteIDAvailable(r.Context(), tx, snapshot.SiteID, 0)
 	}
 	if err != nil {
-		writeError(w, http.StatusConflict, "modpack site ID is already used")
+		writeModpackSiteIDError(w, err)
 		return
 	}
 	snapshot.IconURL, err = validateStoredProjectIconURL(r.Context(), tx, ossCfg, snapshot.IconURL, "", claims.Subject)
@@ -526,7 +526,7 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 	if err = ensureModpackSiteIDAvailable(r.Context(), tx, request.Snapshot.SiteID, current.ID); err != nil {
-		writeError(w, http.StatusConflict, "modpack site ID is already used")
+		writeModpackSiteIDError(w, err)
 		return
 	}
 	if err = validateModpackGalleryFilesTx(r.Context(), tx, current.ID, claims.Subject, request.Snapshot.GalleryImages); err != nil {
@@ -1123,18 +1123,20 @@ func canEditModpack(claims security.Claims, item modpackResponse) bool {
 	return canEditProjectRevision(claims, "modpack", item.PublicID)
 }
 
+var errModpackSiteIDTaken = errors.New("modpack site ID exists")
+
 func availableModpackSiteID(ctx context.Context, query databaseQuery, name string) (string, error) {
-	base := modSiteIDBase(name)
-	for suffix := 0; suffix < 1000; suffix++ {
-		candidate := base
-		if suffix > 0 {
-			candidate = fmt.Sprintf("%s_%d", base, suffix+1)
-		}
-		if err := ensureModpackSiteIDAvailable(ctx, query, candidate, 0); err == nil {
-			return candidate, nil
-		}
+	return availableProjectSiteID(modSiteIDBase(name), errModpackSiteIDTaken, func(candidate string) error {
+		return ensureModpackSiteIDAvailable(ctx, query, candidate, 0)
+	})
+}
+
+func writeModpackSiteIDError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errModpackSiteIDTaken) {
+		writeError(w, http.StatusConflict, "modpack site ID is already used")
+	} else {
+		writeError(w, http.StatusInternalServerError, "failed to check modpack site ID")
 	}
-	return "", errors.New("unable to allocate modpack site ID")
 }
 
 func ensureModpackSiteIDAvailable(ctx context.Context, query databaseQuery, siteID string, excludeID int64) error {
@@ -1143,7 +1145,7 @@ func ensureModpackSiteIDAvailable(ctx context.Context, query databaseQuery, site
 		return err
 	}
 	if exists {
-		return errors.New("modpack site ID exists")
+		return errModpackSiteIDTaken
 	}
 	return nil
 }
