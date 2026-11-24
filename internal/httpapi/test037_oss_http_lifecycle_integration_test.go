@@ -42,6 +42,7 @@ type test037Store struct {
 	sequence             int
 	failCopy, failAbort  atomic.Bool
 	waitForAbortDeadline atomic.Bool
+	failAfterPut         atomic.Bool
 }
 
 type test037Fixture struct {
@@ -217,6 +218,10 @@ func newTEST037FixtureWithBase(t *testing.T, base test013Fixture) test037Fixture
 				return
 			}
 			f.store.objects[key] = test036Object{data: bytes.Clone(raw), contentType: r.Header.Get("Content-Type"), hash: r.Header.Get("x-oss-meta-sha256")}
+			if f.store.failAfterPut.Load() {
+				providerError(http.StatusServiceUnavailable, "ServiceUnavailable")
+				return
+			}
 		case http.MethodGet, http.MethodHead:
 			object, ok := f.store.objects[key]
 			if !ok {

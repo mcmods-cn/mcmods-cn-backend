@@ -373,55 +373,69 @@ func TestTEST039SharedBlobQuotaLastReferenceDeletionAndFreshKeyFullHTTPIntegrati
 }
 
 func TestTEST039ActualDerivedUploadRollbackUsesDurableCompensationAndFreshRetryFullHTTPIntegration(t *testing.T) {
-	f := newTEST039Fixture(t)
-	file := f.upload(t, f.editor, "compensation.png", test039PNG(t, 64, 64, 6))
-	if _, err := f.db.Exec(f.ctx, "alter table skin_assets add constraint test039_fail_after_derived_put check(display_name <> 'compensation')"); err != nil {
-		t.Fatal(err)
+	for _, scenario := range []struct {
+		name   string
+		status int
+	}{
+		{"database rejects asset", http.StatusInternalServerError},
+		{"upload receipt unavailable", http.StatusServiceUnavailable},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			f := newTEST039Fixture(t)
+			file := f.upload(t, f.editor, "compensation.png", test039PNG(t, 64, 64, 6))
+			if scenario.status == http.StatusServiceUnavailable {
+				f.store.failAfterPut.Store(true)
+			} else if _, err := f.db.Exec(f.ctx, "alter table skin_assets add constraint test039_fail_after_derived_put check(display_name <> 'compensation')"); err != nil {
+				t.Fatal(err)
+			}
+			before := f.facts(t)
+			request := skinAssetCreateRequest{FileID: file, Kind: "skin", Name: "compensation", Visibility: "public"}
+			f.require(t, f.editor, http.MethodPost, "/api/v1/skins", request, scenario.status)
+			after := f.facts(t)
+			delete(before, "oss_object_deletion_outbox")
+			delete(after, "oss_object_deletion_outbox")
+			if !reflect.DeepEqual(before, after) {
+				t.Fatal("failed skin insert committed business/derived file facts")
+			}
+			var abandonedKey string
+			var lineage *int64
+			if err := f.db.QueryRow(f.ctx, "select object_key,oss_file_id from oss_object_deletion_outbox where reason='minecraft-texture-transaction-aborted'").Scan(&abandonedKey, &lineage); err != nil {
+				t.Fatal(err)
+			}
+			if lineage != nil || abandonedKey == "" {
+				t.Fatal("actual failed derived PUT lacked unregistered durable cleanup")
+			}
+			f.store.mu.Lock()
+			_, exists := f.store.objects[abandonedKey]
+			f.store.mu.Unlock()
+			if !exists {
+				t.Fatal("fixture did not exercise actual external PUT before rollback")
+			}
+			if scenario.status == http.StatusServiceUnavailable {
+				f.store.failAfterPut.Store(false)
+			} else if _, err := f.db.Exec(f.ctx, "alter table skin_assets drop constraint test039_fail_after_derived_put"); err != nil {
+				t.Fatal(err)
+			}
+			worker := NewOSSDeletionWorker(f.server.cfg, f.db)
+			worker.drain(f.ctx)
+			f.store.mu.Lock()
+			_, exists = f.store.objects[abandonedKey]
+			f.store.mu.Unlock()
+			if exists {
+				t.Fatal("production cleanup failed to delete unregistered external bytes")
+			}
+			asset := f.asset(t, f.editor, file, "compensation", "public")
+			var liveKey string
+			if err := f.db.QueryRow(f.ctx, "select object_key from skin_texture_blobs where hash=$1", asset.TextureHash).Scan(&liveKey); err != nil {
+				t.Fatal(err)
+			}
+			if liveKey == abandonedKey {
+				t.Fatal("actual retry reused abandoned object incarnation")
+			}
+			f.review(t, asset.PublicID, "approved")
+			assertTEST039TextureBytes(t, f.require(t, "", http.MethodGet, asset.TextureURL, nil, 200), asset.TextureHash)
+		})
 	}
-	before := f.facts(t)
-	request := skinAssetCreateRequest{FileID: file, Kind: "skin", Name: "compensation", Visibility: "public"}
-	f.require(t, f.editor, http.MethodPost, "/api/v1/skins", request, 500)
-	after := f.facts(t)
-	delete(before, "oss_object_deletion_outbox")
-	delete(after, "oss_object_deletion_outbox")
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("failed skin insert committed business/derived file facts")
-	}
-	var abandonedKey string
-	var lineage *int64
-	if err := f.db.QueryRow(f.ctx, "select object_key,oss_file_id from oss_object_deletion_outbox where reason='minecraft-texture-transaction-aborted'").Scan(&abandonedKey, &lineage); err != nil {
-		t.Fatal(err)
-	}
-	if lineage != nil || abandonedKey == "" {
-		t.Fatal("actual failed derived PUT lacked unregistered durable cleanup")
-	}
-	f.store.mu.Lock()
-	_, exists := f.store.objects[abandonedKey]
-	f.store.mu.Unlock()
-	if !exists {
-		t.Fatal("fixture did not exercise actual external PUT before rollback")
-	}
-	if _, err := f.db.Exec(f.ctx, "alter table skin_assets drop constraint test039_fail_after_derived_put"); err != nil {
-		t.Fatal(err)
-	}
-	worker := NewOSSDeletionWorker(f.server.cfg, f.db)
-	worker.drain(f.ctx)
-	f.store.mu.Lock()
-	_, exists = f.store.objects[abandonedKey]
-	f.store.mu.Unlock()
-	if exists {
-		t.Fatal("production cleanup failed to delete unregistered external bytes")
-	}
-	asset := f.asset(t, f.editor, file, "compensation", "public")
-	var liveKey string
-	if err := f.db.QueryRow(f.ctx, "select object_key from skin_texture_blobs where hash=$1", asset.TextureHash).Scan(&liveKey); err != nil {
-		t.Fatal(err)
-	}
-	if liveKey == abandonedKey {
-		t.Fatal("actual retry reused abandoned object incarnation")
-	}
-	f.review(t, asset.PublicID, "approved")
-	assertTEST039TextureBytes(t, f.require(t, "", http.MethodGet, asset.TextureURL, nil, 200), asset.TextureHash)
 }
 
 func TestTEST039ConcurrentFullHTTPLibraryAndProfileLimitsSerializeExactlyIntegration(t *testing.T) {
