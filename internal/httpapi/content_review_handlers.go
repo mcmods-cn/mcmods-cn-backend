@@ -96,7 +96,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			where entry.public_id=$1`, aggregateKey).Scan(&parent.RouteID, &parent.EntityType, &parent.InternalID, &parent.CanonicalPath)
 		var parentStatus string
 		if err == nil {
-			parent.Name, parentStatus, err = changelogProjectState(r.Context(), tx, parent, true)
+			parent.Name, parentStatus, err = readProjectNameAndStatus(r.Context(), tx, parent.EntityType, parent.InternalID, true)
 		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "changelog target not found")

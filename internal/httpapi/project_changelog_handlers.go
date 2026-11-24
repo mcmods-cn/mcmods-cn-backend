@@ -193,7 +193,7 @@ func (s *Server) submitProjectChangelog(w http.ResponseWriter, r *http.Request, 
 	// keeps the parent visible through commit and leaves the existing manual
 	// and upstream aggregate -> entry -> source-binding lock order intact.
 	var parentStatus string
-	target.Name, parentStatus, err = changelogProjectState(ctx, tx, target, true)
+	target.Name, parentStatus, err = readProjectNameAndStatus(ctx, tx, target.EntityType, target.InternalID, true)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && parentStatus != "approved") {
 		writeError(w, http.StatusNotFound, "changelog target not found")
 		return
@@ -412,7 +412,7 @@ func (s *Server) resolveProjectChangelogTarget(ctx context.Context, entityType, 
 		return target, err
 	}
 	var status string
-	target.Name, status, err = changelogProjectState(ctx, s.db, target, false)
+	target.Name, status, err = readProjectNameAndStatus(ctx, s.db, target.EntityType, target.InternalID, false)
 	if err == nil && status != "approved" {
 		return target, pgx.ErrNoRows
 	}
@@ -422,10 +422,10 @@ func (s *Server) resolveProjectChangelogTarget(ctx context.Context, entityType, 
 	return target, err
 }
 
-func changelogProjectState(ctx context.Context, db databaseQuery, target projectChangelogTarget, lock bool) (string, string, error) {
+func readProjectNameAndStatus(ctx context.Context, db databaseQuery, projectType string, internalID int64, lock bool) (string, string, error) {
 	var query string
-	args := []any{target.InternalID}
-	switch target.EntityType {
+	args := []any{internalID}
+	switch projectType {
 	case "mod":
 		query = `select primary_name,review_status from mods where id=$1`
 	case "modpack":
@@ -434,7 +434,7 @@ func changelogProjectState(ctx context.Context, db databaseQuery, target project
 		query = `select name,review_status from minecraft_servers where id=$1`
 	default:
 		query = `select primary_name,review_status from simple_projects where id=$1 and project_type=$2`
-		args = append(args, target.EntityType)
+		args = append(args, projectType)
 	}
 	if lock {
 		query += " for share"

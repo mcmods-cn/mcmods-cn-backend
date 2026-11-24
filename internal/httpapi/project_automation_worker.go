@@ -680,8 +680,7 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 			_ = tx.Rollback(ctx)
 			return nil, err
 		}
-		target := projectChangelogTarget{EntityType: job.ProjectType, InternalID: job.InternalID}
-		_, status, err := changelogProjectState(ctx, tx, target, true)
+		_, status, err := readProjectNameAndStatus(ctx, tx, job.ProjectType, job.InternalID, true)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && status != "approved") {
 			_ = tx.Rollback(ctx)
 			return nil, errProjectAutomationParentUnavailable

@@ -466,15 +466,13 @@ func (s *Server) reviewProjectAuthorshipRelation(w http.ResponseWriter, r *http.
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var bindingID int64
-	var subjectType, projectID, creatorKind string
+	// Project revision writes hold the parent before reconciling its bindings.
+	// Read the identity without a lock, then acquire both locks in that order.
+	ctx := r.Context()
+	var subjectType string
 	var subjectID int64
-	err = tx.QueryRow(r.Context(), `select binding.id,binding.subject_type,binding.subject_id,route.public_id,creator.kind
-		from content_creator_bindings binding
-		join public_routes route on route.entity_type=binding.subject_type and route.internal_id=binding.subject_id
-		join creators creator on creator.id=binding.creator_id
-		where binding.public_id=$1 for update of binding`, r.PathValue("id")).
-		Scan(&bindingID, &subjectType, &subjectID, &projectID, &creatorKind)
+	err = tx.QueryRow(ctx, `select subject_type,subject_id from content_creator_bindings where public_id=$1`,
+		r.PathValue("id")).Scan(&subjectType, &subjectID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "project authorship relationship does not exist")
 		return
@@ -483,21 +481,47 @@ func (s *Server) reviewProjectAuthorshipRelation(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "failed to load project authorship relationship")
 		return
 	}
-	claims := currentClaims(r)
-	required := "project.authorship.manage"
-	if creatorKind == "team" {
-		required = "project.team_relation.manage"
+	var parentStatus string
+	if request.Status == "approved" && (subjectType == "mod" || subjectType == "modpack" || simpleProjectTypes[subjectType]) {
+		_, parentStatus, err = readProjectNameAndStatus(ctx, tx, subjectType, subjectID, true)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusInternalServerError, "failed to read project publication state")
+			return
+		}
 	}
-	if !claimsAllow(claims, required) && !claimsAllow(claims, "admin.*") {
+	var bindingID int64
+	var projectID, creatorKind, status string
+	err = tx.QueryRow(ctx, `select binding.id,route.public_id,creator.kind,binding.status
+		from content_creator_bindings binding
+		join public_routes route on route.entity_type=binding.subject_type and route.internal_id=binding.subject_id
+		join creators creator on creator.id=binding.creator_id
+		where binding.public_id=$1 and binding.subject_type=$2 and binding.subject_id=$3 for update of binding`,
+		r.PathValue("id"), subjectType, subjectID).Scan(&bindingID, &projectID, &creatorKind, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "project authorship relationship does not exist")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to lock project authorship relationship")
+		return
+	}
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
+	if !relationshipChangeAllowed(creatorKind, canManageAuthors, canManageTeams) {
 		writeError(w, http.StatusForbidden, "project relationship review permission is required")
 		return
 	}
-	if request.Status == "approved" {
-		approved, approveErr := projectTargetPublishedTx(r.Context(), tx, subjectType, subjectID)
-		if approveErr != nil || !approved {
-			writeError(w, http.StatusConflict, "project must be public before this relationship can grant access")
-			return
-		}
+	if request.Status == "approved" && parentStatus != "approved" {
+		writeError(w, http.StatusConflict, "project must be public before this relationship can grant access")
+		return
+	}
+	if status == request.Status {
+		skipRequestActivity(r)
+		writeJSON(w, http.StatusOK, map[string]any{"id": r.PathValue("id"), "status": status})
+		return
 	}
 	if _, err = tx.Exec(r.Context(), `update content_creator_bindings set status=$2,approved_by=case when $2='approved' then $3::bigint else null end,
 		approved_at=case when $2='approved' then now() else null end where id=$1`, bindingID, request.Status, claims.Subject); err != nil {
@@ -520,26 +544,4 @@ func (s *Server) reviewProjectAuthorshipRelation(w http.ResponseWriter, r *http.
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": r.PathValue("id"), "status": request.Status})
-}
-
-func projectTargetPublishedTx(ctx context.Context, tx pgx.Tx, projectType string, projectID int64) (bool, error) {
-	var query string
-	switch projectType {
-	case "mod":
-		query = `select review_status='approved' from mods where id=$1`
-	case "modpack":
-		query = `select review_status='approved' from modpacks where id=$1`
-	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
-		query = `select review_status='approved' from simple_projects where id=$1 and project_type=$2`
-	default:
-		return false, nil
-	}
-	var approved bool
-	var err error
-	if strings.Contains(query, "$2") {
-		err = tx.QueryRow(ctx, query, projectID, projectType).Scan(&approved)
-	} else {
-		err = tx.QueryRow(ctx, query, projectID).Scan(&approved)
-	}
-	return approved, err
 }

@@ -306,6 +306,12 @@ func TestTEST014AuthorApprovalMetadataSurvivesReviewedEditsHTTPIntegration(t *te
 		return facts
 	}
 	before := approvalFacts()
+	for _, id := range bindings {
+		f.require(t, f.reviewer, http.MethodPatch, "/api/v1/admin/project-authorship-relations/"+id, map[string]any{"status": "approved"}, http.StatusOK)
+	}
+	if got := approvalFacts(); got != before {
+		t.Fatal("repeating a completed review replaced the original approval facts")
+	}
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "project.edit."+item.PublicID)
 	for round := 0; round < 2; round++ {
 		snapshot.Localizations[0].Summary = fmt.Sprintf("changed metadata %d", round)
