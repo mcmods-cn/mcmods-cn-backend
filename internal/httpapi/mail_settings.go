@@ -14,7 +14,11 @@ import (
 	"mcmods-cn-backend/internal/security"
 )
 
-var errMailSettingsUnavailable = errors.New("mail settings are unavailable")
+var (
+	errMailSettingsUnavailable = errors.New("mail settings are unavailable")
+	errMailPasswordDecision    = errors.New("choose a new SMTP password or clear the saved password")
+	errMailWriteForbidden      = errors.New("changing SMTP settings requires mail.write")
+)
 
 type mailSettingsReader interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
@@ -56,7 +60,7 @@ func (s *Server) activeMailer(ctx context.Context) (mailer.Mailer, error) {
 	return mailer.New(smtpConfigFromPayload(payload)), err
 }
 
-func (s *Server) saveMailConfig(ctx context.Context, payload mailConfigPayload, actorID int64) (mailConfigPayload, error) {
+func (s *Server) saveMailConfig(ctx context.Context, payload mailConfigPayload, clearPassword bool, claims security.Claims) (mailConfigPayload, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return mailConfigPayload{}, fmt.Errorf("%w: %w", errMailSettingsUnavailable, err)
@@ -67,10 +71,28 @@ func (s *Server) saveMailConfig(ctx context.Context, payload mailConfigPayload, 
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('settings:mail.smtp',0))`); err != nil {
 		return mailConfigPayload{}, fmt.Errorf("%w: %w", errMailSettingsUnavailable, err)
 	}
-	if strings.TrimSpace(payload.Password) == "" {
+	actor, err := resolveCurrentWriteActorTx(ctx, tx, claims)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errWriteAccountBanned) {
+			return mailConfigPayload{}, err
+		}
+		return mailConfigPayload{}, fmt.Errorf("%w: %w", errMailSettingsUnavailable, err)
+	}
+	if !claimsAllow(actor, "mail.write") {
+		return mailConfigPayload{}, errMailWriteForbidden
+	}
+	if clearPassword && strings.TrimSpace(payload.Password) != "" {
+		return mailConfigPayload{}, errMailPasswordDecision
+	}
+	if clearPassword {
+		payload.Password = ""
+	} else if strings.TrimSpace(payload.Password) == "" {
 		current, err := readMailSettings(ctx, tx, s.cfg.SMTP, s.cfg.SettingsEncryptionKey)
 		if err != nil {
 			return mailConfigPayload{}, err
+		}
+		if current.Password != "" && !mailer.New(smtpConfigFromPayload(current)).SameAuthenticationTarget(mailer.New(smtpConfigFromPayload(payload))) {
+			return mailConfigPayload{}, errMailPasswordDecision
 		}
 		payload.Password = current.Password
 	}
@@ -80,7 +102,7 @@ func (s *Server) saveMailConfig(ctx context.Context, payload mailConfigPayload, 
 	}
 	if _, err = tx.Exec(ctx, `insert into system_settings(key,value,updated_by,updated_at)
 		values('mail.smtp',$1::jsonb,$2,now()) on conflict(key) do update
-		set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`, raw, actorID); err != nil {
+		set value=excluded.value,updated_by=excluded.updated_by,updated_at=now()`, raw, actor.Subject); err != nil {
 		return mailConfigPayload{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

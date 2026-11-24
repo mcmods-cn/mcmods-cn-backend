@@ -42,6 +42,21 @@ func (m Mailer) smtpHost() string {
 	return host
 }
 
+// SameAuthenticationTarget reports whether both configurations send SMTP
+// authentication to the same endpoint as the same login.
+func (m Mailer) SameAuthenticationTarget(other Mailer) bool {
+	if m.Config.Port != other.Config.Port || m.Config.Username != other.Config.Username {
+		return false
+	}
+	a, b := m.smtpHost(), other.smtpHost()
+	if a == b {
+		return true
+	}
+	// DNS names are ASCII case-insensitive. Keep absolute names and IPv6
+	// zone identifiers distinct from their possible local counterparts.
+	return !strings.ContainsAny(a+b, ":%") && strings.EqualFold(a, b) && strings.IndexFunc(a+b, func(r rune) bool { return r > 127 }) < 0
+}
+
 func (m Mailer) Send(to string, subject string, body string) error {
 	return m.SendEvent(context.Background(), to, subject, body, "")
 }

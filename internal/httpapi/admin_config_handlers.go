@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/mailer"
 	"mcmods-cn-backend/internal/security"
@@ -152,11 +154,15 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateMailConfig(w http.ResponseWriter, r *http.Request) {
-	var payload mailConfigPayload
-	if err := decodeJSON(r, &payload); err != nil {
+	var request struct {
+		mailConfigPayload
+		ClearPassword bool `json:"clearPassword"`
+	}
+	if err := decodeJSON(r, &request); err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
+	payload := request.mailConfigPayload
 	if payload.Port <= 0 {
 		payload.Port = 587
 	}
@@ -164,9 +170,19 @@ func (s *Server) updateMailConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "启用邮件系统需要有效的服务器、端口和发件地址")
 		return
 	}
-	payload, err := s.saveMailConfig(r.Context(), payload, currentClaims(r).Subject)
+	payload, err := s.saveMailConfig(r.Context(), payload, request.ClearPassword, currentClaims(r))
 	if err != nil {
-		if errors.Is(err, errMailSettingsUnavailable) {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows), errors.Is(err, errWriteAccountBanned):
+			writeCurrentWriteActorFailure(w, err)
+			return
+		case errors.Is(err, errMailWriteForbidden):
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		case errors.Is(err, errMailPasswordDecision):
+			writeAPIError(w, http.StatusBadRequest, "MAIL_PASSWORD_DECISION_REQUIRED", errMailPasswordDecision.Error(), 0, nil)
+			return
+		case errors.Is(err, errMailSettingsUnavailable):
 			writeAPIError(w, http.StatusServiceUnavailable, "MAIL_SETTINGS_UNAVAILABLE", "mail settings are temporarily unavailable", 0, nil)
 			return
 		}

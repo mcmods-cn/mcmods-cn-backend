@@ -159,11 +159,38 @@ func TestTEST024MailConfigurationHTTPEncryptionVersionAndConcurrentUpdatesIntegr
 		t.Fatal("aggregate configuration exposed mail credentials")
 	}
 	payload.Enabled = true
-	payload.Host = "127.0.0.1"
 	payload.Password = ""
+	// Updating sender details on the same endpoint retains the omitted secret.
+	payload.From = "other@example.test"
 	f.require(t, f.token, http.MethodPut, path, payload, http.StatusOK)
-	if got := f.active(t, f.peer); got.Config.Password != "owned-mail-password" || !got.Enabled() || got.Config.Host != "127.0.0.1" {
-		t.Fatal("omitted secret and changed configuration must be visible immediately on another instance")
+	decisionVersion := version()
+	for _, change := range []func(*mailConfigPayload){
+		func(p *mailConfigPayload) { p.Host = "new.invalid" },
+		func(p *mailConfigPayload) { p.Port++ },
+		func(p *mailConfigPayload) { p.Username = "other" },
+	} {
+		changed := payload
+		change(&changed)
+		raw := f.require(t, f.token, http.MethodPut, path, changed, http.StatusBadRequest)
+		if !bytes.Contains(raw, []byte("MAIL_PASSWORD_DECISION_REQUIRED")) || version() != decisionVersion {
+			t.Fatal("a new SMTP credential target must require an explicit password decision without changing settings")
+		}
+	}
+	if got := f.active(t, f.peer); got.Config.Password != "owned-mail-password" || got.Config.From != "other@example.test" {
+		t.Fatal("omitted credential did not remain with the original sender account")
+	}
+	payload.Host = "127.0.0.1"
+	clear := map[string]any{"host": payload.Host, "port": payload.Port, "username": payload.Username, "clearPassword": true, "password": "contradictory"}
+	f.require(t, f.token, http.MethodPut, path, clear, http.StatusBadRequest)
+	delete(clear, "password")
+	response = f.require(t, f.token, http.MethodPut, path, clear, http.StatusOK)
+	if !bytes.Contains(response, []byte(`"hasPassword":false`)) || f.active(t, worker).Config.Password != "" {
+		t.Fatal("explicit removal retained a credential")
+	}
+	payload.Password = "replacement-password"
+	f.require(t, f.token, http.MethodPut, path, payload, http.StatusOK)
+	if got := f.active(t, f.peer); got.Config.Password != "replacement-password" || !got.Enabled() || got.Config.Host != "127.0.0.1" {
+		t.Fatal("explicitly replaced credential and changed configuration must be visible immediately on another instance")
 	}
 	beforeFailure := version()
 	if _, err := f.db.Exec(f.ctx, `alter table system_settings add constraint test024_reject_mail check (key<>'mail.smtp' or updated_by<>`+fmt.Sprint(f.actorID)+`) not valid`); err != nil {
@@ -219,6 +246,8 @@ func TestTEST024MailConfigurationHTTPEncryptionVersionAndConcurrentUpdatesIntegr
 			t.Fatal("runtime must use one complete committed configuration, not torn in-memory fields")
 		}
 	}
+	payload.Enabled, payload.Host, payload.Password = false, "localhost", "pre-rotation"
+	f.require(t, f.token, http.MethodPut, path, payload, http.StatusOK)
 	for round := 0; round < 8; round++ {
 		rotated := fmt.Sprintf("owned-rotated-secret-%d", round)
 		start := make(chan struct{})
