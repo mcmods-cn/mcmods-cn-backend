@@ -18,6 +18,7 @@ const server=createServer({cert:await readFile(path.join(work,'leaf.pem')),key:a
  const upstream=request(new URL(origin),{path:req.url,headers,method:req.method},remote=>{
    const h={...remote.headers};delete h.connection;
    res.writeHead(remote.statusCode,h);remote.pipe(res);
+   if(origin===r.apiOrigin && ['/api/v1/auth/login','/api/v1/auth/me'].includes(pathname))console.log('auth request',req.method,pathname,remote.statusCode);
    if(origin===r.internalOSSOrigin)console.log('object request',req.method,remote.statusCode,req.headers['x-oss-copy-source']?'copy':'data');
  });upstream.on('error',()=>{if(!res.headersSent)res.writeHead(502);res.end()});req.pipe(upstream);
 });

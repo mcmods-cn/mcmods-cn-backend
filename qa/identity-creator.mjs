@@ -20,9 +20,19 @@ function response(method,p){return q.waitForResponse(r=>r.request().method()===m
 async function decoded(){await q.waitForFunction(prefix=>[...document.images].some(im=>new URL(im.src||location.href).pathname.startsWith(prefix)&&im.complete&&im.naturalWidth>0),cfg.ossBucketPathPrefix,{timeout:45000});return q.evaluate(prefix=>{const im=[...document.images].find(im=>new URL(im.src||location.href).pathname.startsWith(prefix)&&im.complete&&im.naturalWidth>0);return{src:im.src,width:im.naturalWidth,height:im.naturalHeight}},cfg.ossBucketPathPrefix)}
 const journey=[];
 try{
- await q.goto(origin+'/login',{waitUntil:'domcontentloaded'});await q.locator('form input:not([type=password])').first().fill(credentials.username);
- await q.locator('input[type=password]').fill(credentials.password);
- const login=response('POST','/api/v1/auth/login');await q.locator('form button[type=submit]').click();assert.equal((await login).status(),200);
+ const firstTarget=cfg.profiles[0].editPath;
+ await q.goto(origin+'/login?next='+encodeURIComponent(firstTarget),{waitUntil:'load'});
+ const form=q.locator('main form'), account=form.getByLabel('Account',{exact:true}),password=form.locator('input[type=password]');
+ // Confirm hydration and identify the login inputs through a real form-state transition.
+ await form.getByRole('button',{name:'Email code',exact:true}).click();
+ await form.getByRole('button',{name:'Password login',exact:true}).click();
+ await account.fill(credentials.username);await password.fill(credentials.password);
+ await form.getByText('Password strength:',{exact:false}).waitFor();
+ assert.equal(await account.inputValue(),credentials.username);assert.ok(await form.evaluate(f=>f.checkValidity()));
+ await form.locator('button[type=submit]').click();
+ await q.waitForURL(origin+firstTarget);
+ const me=await q.evaluate(async()=>{const r=await fetch('/api/v1/auth/me',{credentials:'include',cache:'no-store'});return {status:r.status,id:(await r.json()).data?.id}});
+ assert.equal(me.status,200);assert.equal(me.id,credentials.publicId);
  let n=0;
  const initial=[];
  for(const prof of cfg.profiles){await q.goto(origin+prof.editPath,{waitUntil:'domcontentloaded'});const im=await decoded();assert.ok(new URL(im.src).search);initial.push(im);}

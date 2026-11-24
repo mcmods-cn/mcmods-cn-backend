@@ -18,6 +18,10 @@ if p.is_file() and code('browser')!=0:
  lines=p.read_text().splitlines(); r['browserError']=next((re.sub(r'https?://\S+','[local]',l.strip())[:150] for l in lines if any(x in l for x in ['Timeout','Error:','AssertionError'])),'assertion failed')
  r['browserSites']=[l.strip() for l in lines if re.search(r'(identity-[\w-]+|ai_configuration_browser)\.mjs:\d+',l)][:3]
 p=work/'gateway.log'
+if p.is_file():r['authHTTP']=re.findall(r'^auth request (POST|GET) (/api/v1/auth/(?:me|login)) ([0-9]{3})$',p.read_text(),re.M)
 if p.is_file():r['objectProtocolRequests']=re.findall(r'^object request (GET|HEAD|PUT|POST|DELETE) ([0-9]{3}) (copy|data)$',p.read_text(),re.M)
 print('Named case',name,'Go exit',r['goExit'],'browser exit',r['browserExit'])
 (work/'identity-public'/'named-receipt.json').write_text(json.dumps(r,indent=2)+'\n')
+
+if (work/'provider-state'/'request-diagnostics.json').exists():
+ (work/'identity-public'/'request-diagnostics.json').write_bytes((work/'provider-state'/'request-diagnostics.json').read_bytes())
