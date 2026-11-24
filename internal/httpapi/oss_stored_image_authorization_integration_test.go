@@ -111,6 +111,32 @@ func TestStoredOSSImagesDoNotSignUnboundPrivateFilesIntegration(t *testing.T) {
 	assertAccess(ctx, cfg.Endpoint+"/private/evidence.png", false)
 	ownerCtx := context.WithValue(ctx, claimsContextKey, security.Claims{Subject: 99280001})
 	assertAccess(ownerCtx, image, true)
+	t.Run("author and team avatars share a lookup", func(t *testing.T) {
+		const external = "https://images.example.invalid/team.png"
+		authors := make([]modAuthorPayload, 32)
+		for i := range authors {
+			authors[i] = modAuthorPayload{AvatarURL: image, Members: []modAuthorMemberPayload{
+				{AvatarURL: image}, {AvatarURL: external},
+			}}
+		}
+		before := counter.queries.Load()
+		if err := server.resolveModAuthorOSSURLsWithConfig(ownerCtx, cfg, authors); err != nil {
+			t.Fatal(err)
+		}
+		for _, author := range authors {
+			if !strings.Contains(strings.ToLower(author.AvatarURL), "x-oss-signature") ||
+				!strings.Contains(strings.ToLower(author.Members[0].AvatarURL), "x-oss-signature") ||
+				author.Members[1].AvatarURL != external {
+				t.Fatal("avatar resolution changed an authorized or external image")
+			}
+		}
+		count := counter.queries.Load() - before
+		t.Logf("32 authors with 64 team members: %d storage authorization queries", count)
+		if count != 1 {
+			t.Errorf("want one batched storage authorization query, got %d", count)
+		}
+	})
+
 	assertAccess(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: 99280002}), image, false)
 	for _, actorID := range []int64{0, 99280002, 99280001} {
 		tx, err := pool.Begin(ctx)

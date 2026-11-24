@@ -537,12 +537,14 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "failed to generate mod icon URL")
 		return
 	}
+	authors := make([][]modAuthorPayload, len(items))
 	for index := range items {
 		items[index].IconURL = iconURLs[index]
-		if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, items[index].Authors); err != nil {
-			writeError(w, http.StatusBadGateway, "failed to generate mod author avatar URL")
-			return
-		}
+		authors[index] = items[index].Authors
+	}
+	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, authors...); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate mod author avatar URL")
+		return
 	}
 	writeJSON(w, http.StatusOK, modListResponse{Items: items, Total: total})
 }
@@ -580,21 +582,33 @@ func (s *Server) publicModDetail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mod)
 }
 
-func (s *Server) resolveModAuthorOSSURLsWithConfig(ctx context.Context, ossCfg ossConfigPayload, authors []modAuthorPayload) error {
-	for authorIndex := range authors {
-		var err error
-		authors[authorIndex].AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(ctx, ossCfg, authors[authorIndex].AvatarURL)
+func (s *Server) resolveModAuthorOSSURLsWithConfig(ctx context.Context, cfg ossConfigPayload, groups ...[]modAuthorPayload) error {
+	var avatars []*string
+	for _, authors := range groups {
+		for i := range authors {
+			author := &authors[i]
+			avatars = append(avatars, &author.AvatarURL)
+			for j := range author.Members {
+				avatars = append(avatars, &author.Members[j].AvatarURL)
+			}
+		}
+	}
+	// Use the same storage visibility check as project icons. Large teams can
+	// exceed the catalog page size, so cap the number of URL inputs per query.
+	for len(avatars) > 0 {
+		batchSize := min(len(avatars), 256)
+		urls := make([]string, batchSize)
+		for i, avatar := range avatars[:batchSize] {
+			urls[i] = *avatar
+		}
+		resolved, err := s.resolveStoredOSSImageURLsWithConfig(ctx, cfg, urls)
 		if err != nil {
 			return err
 		}
-		for memberIndex := range authors[authorIndex].Members {
-			authors[authorIndex].Members[memberIndex].AvatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(
-				ctx, ossCfg, authors[authorIndex].Members[memberIndex].AvatarURL,
-			)
-			if err != nil {
-				return err
-			}
+		for i, url := range resolved {
+			*avatars[i] = url
 		}
+		avatars = avatars[batchSize:]
 	}
 	return nil
 }
