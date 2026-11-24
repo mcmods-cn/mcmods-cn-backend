@@ -119,4 +119,43 @@ func TestAccountRestrictionsAreSelectedForEveryRequestedActionIntegration(t *tes
 	if !restrictionApplies(globalProfile, now) || globalProfile.RestrictionMode != "read_only" {
 		t.Fatalf("global read-only restriction did not apply: %+v", globalProfile)
 	}
+
+	// A temporary hard restriction and a scheduled one share the same boundary.
+	// No administrator writes or invalidates the cache between these evaluations.
+	var changingID int64
+	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
+		values('timed_rules','timed_rules@example.invalid','test-only',true) returning id`).Scan(&changingID); err != nil {
+		t.Fatal(err)
+	}
+	var transition time.Time
+	if err = pool.QueryRow(ctx, `insert into anti_abuse_restrictions(user_id,mode,source,reason,ends_at)
+		values($1,'temporary_ban','administrator','temporary',clock_timestamp()+interval '5 seconds') returning ends_at`, changingID).Scan(&transition); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `insert into anti_abuse_restrictions(user_id,actions,mode,source,reason,starts_at)
+		values($1,array['comment.create'],'no_comment','administrator','ongoing',now()),
+		      ($1,array['review.submit'],'moderation','administrator','scheduled',$2)`, changingID, transition); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"comment.create", "review.submit"} {
+		before, err := service.account(ctx, changingID, "", "", action)
+		if err != nil || before.RestrictionMode != "temporary_ban" || before.RestrictionModerationEnd.After(time.Now()) {
+			t.Fatalf("initial %s rules=%+v err=%v", action, before, err)
+		}
+		if _, retained := cache.Get(ctx, service.accountCacheKey(changingID, "", "", action)); retained {
+			t.Fatalf("stored time-dependent %s decision", action)
+		}
+	}
+	if _, err := pool.Exec(ctx, "select pg_sleep_until($1)", transition); err != nil {
+		t.Fatal(err)
+	}
+	commentProfile, err = service.account(ctx, changingID, "", "", "comment.create")
+	if err != nil || commentProfile.RestrictionMode != "no_comment" {
+		t.Fatalf("longer restriction after temporary ban: mode=%s err=%v", commentProfile.RestrictionMode, err)
+	}
+	reviewProfile, err = service.account(ctx, changingID, "", "", "review.submit")
+	if err != nil || reviewProfile.RestrictionMode != "" || !reviewProfile.RestrictionModerationEnd.After(time.Now()) {
+		t.Fatalf("scheduled moderation after temporary ban: profile=%+v err=%v", reviewProfile, err)
+	}
+
 }

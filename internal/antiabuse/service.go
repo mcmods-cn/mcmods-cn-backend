@@ -29,7 +29,7 @@ import (
 const settingsKey = "anti_abuse.config"
 
 const (
-	accountCacheKeyPrefix            = "anti-abuse:account:"
+	accountCacheKeyPrefix            = "anti-abuse:account:v2:"
 	botRulesCacheKey                 = "anti-abuse:bot-rules:v2"
 	settingsCacheKey                 = "anti-abuse:settings"
 	successQueueCapacity             = 1024
@@ -1009,14 +1009,15 @@ const accountProfileSQL = `select account.created_at,account.email_verified,acco
 	coalesce(state.trust_level,'normal'),coalesce(state.risk_score,0),coalesce(state.manually_trusted,false),
 	coalesce(state.challenge_required_until,'epoch'),coalesce(state.review_required_until,'epoch'),coalesce(state.restricted_until,'epoch'),
 	coalesce(restriction.hard_mode,''),coalesce(restriction.hard_end,'epoch'),
-	coalesce(restriction.challenge_end,'epoch'),coalesce(restriction.moderation_end,'epoch')
+	coalesce(restriction.challenge_end,'epoch'),coalesce(restriction.moderation_end,'epoch'),
+	coalesce(restriction.time_dependent,false)
 	from users account left join user_experience experience on experience.user_id=account.id
 	left join anti_abuse_user_states state on state.user_id=account.id
 	left join lateral (
 		with matching as (
-			select restriction.mode,restriction.starts_at,coalesce(restriction.ends_at,now()+interval '100 years') effective_end
+			select restriction.mode,restriction.starts_at,restriction.ends_at,coalesce(restriction.ends_at,now()+interval '100 years') effective_end
 			from anti_abuse_restrictions restriction
-			where restriction.lifted_at is null and restriction.starts_at<=now()
+			where restriction.lifted_at is null
 				and (restriction.ends_at is null or restriction.ends_at>now())
 				and (restriction.user_id=account.id or ($2<>'' and restriction.ip_hash=$2) or ($3<>'' and restriction.device_hash=$3))
 				and (restriction.mode in ('read_only','temporary_ban','permanent_ban')
@@ -1024,11 +1025,12 @@ const accountProfileSQL = `select account.created_at,account.email_verified,acco
 		)
 		select
 			(array_agg(mode order by case mode when 'permanent_ban' then 1 when 'temporary_ban' then 2 when 'read_only' then 3 else 4 end,starts_at desc)
-				filter(where mode not in ('challenge','moderation')))[1] hard_mode,
+				filter(where mode not in ('challenge','moderation') and starts_at<=now()))[1] hard_mode,
 			(array_agg(effective_end order by case mode when 'permanent_ban' then 1 when 'temporary_ban' then 2 when 'read_only' then 3 else 4 end,starts_at desc)
-				filter(where mode not in ('challenge','moderation')))[1] hard_end,
-			max(effective_end) filter(where mode='challenge') challenge_end,
-			max(effective_end) filter(where mode='moderation') moderation_end
+				filter(where mode not in ('challenge','moderation') and starts_at<=now()))[1] hard_end,
+			max(effective_end) filter(where mode='challenge' and starts_at<=now()) challenge_end,
+			max(effective_end) filter(where mode='moderation' and starts_at<=now()) moderation_end,
+			bool_or(starts_at>now() or ends_at is not null) time_dependent
 		from matching
 	) restriction on true
 	where account.id=$1`
@@ -1038,16 +1040,19 @@ func (s *Service) account(ctx context.Context, userID int64, ipHash, deviceHash,
 		return accountProfile{}, pgx.ErrNoRows
 	}
 	key := s.accountCacheKey(userID, ipHash, deviceHash, action)
-	raw, err := s.cache.GetOrLoad(ctx, key, func(loadCtx context.Context) ([]byte, error) {
+	raw, err := s.cache.GetOrLoadCacheableTTL(ctx, key, 0, func(loadCtx context.Context) ([]byte, bool, error) {
 		var profile accountProfile
+		var timeDependent bool
 		err := s.db.QueryRow(loadCtx, accountProfileSQL, userID, ipHash, deviceHash, action).Scan(&profile.CreatedAt, &profile.EmailVerified, &profile.Status, &profile.Level,
 			&profile.TrustLevel, &profile.RiskScore, &profile.ManuallyTrusted, &profile.ChallengeRequiredUntil, &profile.ReviewRequiredUntil,
 			&profile.RestrictedUntil, &profile.RestrictionMode, &profile.RestrictionEnd,
-			&profile.RestrictionChallengeEnd, &profile.RestrictionModerationEnd)
+			&profile.RestrictionChallengeEnd, &profile.RestrictionModerationEnd, &timeDependent)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return json.Marshal(profile)
+		raw, err := json.Marshal(profile)
+		// A later request may see a different highest-priority rule without a write.
+		return raw, !timeDependent, err
 	})
 	if err != nil {
 		return accountProfile{}, err

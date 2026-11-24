@@ -145,9 +145,9 @@ func TestAccountRestrictionQueryFiltersBeforeAggregationAndScopesCacheByAction(t
 	definition := strings.ToLower(strings.Join(strings.Fields(accountProfileSQL), " "))
 	for _, required := range []string{
 		"restriction.actions&&array[$4,'*']::text[]",
-		"filter(where mode not in ('challenge','moderation'))",
-		"filter(where mode='challenge')",
-		"filter(where mode='moderation')",
+		"filter(where mode not in ('challenge','moderation') and starts_at<=now())",
+		"filter(where mode='challenge' and starts_at<=now())",
+		"filter(where mode='moderation' and starts_at<=now())",
 	} {
 		if !strings.Contains(definition, required) {
 			t.Fatalf("account restriction query is missing %q", required)
