@@ -238,7 +238,7 @@ func (s *Server) adminProjectEditorApplications(w http.ResponseWriter, r *http.R
 }
 
 func requireCurrentProjectEditorReviewer(w http.ResponseWriter, r *http.Request, tx pgx.Tx) (security.Claims, bool) {
-	claims, ok := requireCurrentReviewActor(w, r, tx)
+	claims, ok := requireCurrentWriteActor(w, r, tx)
 	if !ok {
 		return security.Claims{}, false
 	}
