@@ -144,20 +144,20 @@ func New(ctx context.Context, cfg config.AntiAbuseConfig, db *pgxpool.Pool, cach
 func (s *Service) Enabled() bool { return s != nil && s.cfg.Enabled }
 
 type accountProfile struct {
-	CreatedAt                time.Time `json:"createdAt"`
-	EmailVerified            bool      `json:"emailVerified"`
-	Status                   string    `json:"status"`
-	Level                    int       `json:"level"`
-	TrustLevel               string    `json:"trustLevel"`
-	RiskScore                int       `json:"riskScore"`
-	ManuallyTrusted          bool      `json:"manuallyTrusted"`
-	ChallengeRequiredUntil   time.Time `json:"challengeRequiredUntil"`
-	ReviewRequiredUntil      time.Time `json:"reviewRequiredUntil"`
-	RestrictedUntil          time.Time `json:"restrictedUntil"`
-	RestrictionMode          string    `json:"restrictionMode"`
-	RestrictionEnd           time.Time `json:"restrictionEnd"`
-	RestrictionChallengeEnd  time.Time `json:"restrictionChallengeEnd"`
-	RestrictionModerationEnd time.Time `json:"restrictionModerationEnd"`
+	CreatedAt                time.Time
+	EmailVerified            bool
+	Status                   string
+	Level                    int
+	TrustLevel               string
+	RiskScore                int
+	ManuallyTrusted          bool
+	ChallengeRequiredUntil   time.Time
+	ReviewRequiredUntil      time.Time
+	RestrictedUntil          time.Time
+	RestrictionMode          string
+	RestrictionEnd           time.Time
+	RestrictionChallengeEnd  time.Time
+	RestrictionModerationEnd time.Time
 }
 
 func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, error) {
