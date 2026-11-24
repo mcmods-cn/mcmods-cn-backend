@@ -60,27 +60,12 @@ func TestAuditLiveTP008WorkerTransportFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frontend := os.Getenv("MCMODS_AUDIT_TP008_FRONTEND_CHECKOUT")
-	exporter := os.Getenv("MCMODS_AUDIT_TP008_EXPORTER_CHECKOUT")
-	if !filepath.IsAbs(frontend) || !filepath.IsAbs(exporter) {
-		t.Fatal("explicit fixed frontend/exporter checkouts required")
+	checkouts := auditLiveCheckouts{
+		backend:  backend,
+		frontend: os.Getenv("MCMODS_AUDIT_TP008_FRONTEND_CHECKOUT"),
+		exporter: os.Getenv("MCMODS_AUDIT_TP008_EXPORTER_CHECKOUT"),
 	}
-	revisions := map[string]any{}
-	for name, location := range map[string]string{"mcmods-cn-backend": backend, "mcmods-cn-frontend": frontend, "mcmods_exporter": exporter} {
-		revision := auditJourneyRevision(location)
-		if revision["error"] != nil || revision["dirty"] != false {
-			t.Fatalf("clean identified checkout required for %s", name)
-		}
-		revisions[name] = revision
-	}
-	if pin := os.Getenv("MCMODS_AUDIT_EXPECT_BACKEND_COMMIT"); pin == "" || revisions["mcmods-cn-backend"].(map[string]any)["commit"] != pin {
-		t.Fatal("exact backend pin required")
-	}
-	for name, prefix := range map[string]string{"mcmods-cn-frontend": "e532dec", "mcmods_exporter": "8062148"} {
-		if !strings.HasPrefix(revisions[name].(map[string]any)["commit"].(string), prefix) {
-			t.Fatalf("declared cold tuple mismatch for %s", name)
-		}
-	}
+	revisions := checkouts.pinnedRevisions(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Minute)
 	defer cancel()
 	db, cleanupDB := newAuditTP008OwnedDatabase(t, ctx)

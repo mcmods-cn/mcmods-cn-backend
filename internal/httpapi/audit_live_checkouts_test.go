@@ -46,6 +46,22 @@ func (c auditLiveCheckouts) revisions(t *testing.T) map[string]any {
 	return revisions
 }
 
+func (c auditLiveCheckouts) pinnedRevisions(t *testing.T) map[string]any {
+	t.Helper()
+	revisions := c.revisions(t)
+	for repository, key := range map[string]string{
+		"mcmods-cn-backend":  "MCMODS_AUDIT_EXPECT_BACKEND_COMMIT",
+		"mcmods-cn-frontend": "MCMODS_AUDIT_EXPECT_FRONTEND_COMMIT",
+		"mcmods_exporter":    "MCMODS_AUDIT_EXPECT_EXPORTER_COMMIT",
+	} {
+		expected := os.Getenv(key)
+		if len(expected) != 40 || revisions[repository].(map[string]any)["commit"] != expected {
+			t.Fatalf("%s must match the full commit declared in %s", repository, key)
+		}
+	}
+	return revisions
+}
+
 func auditJourneyRevision(directory string) map[string]any {
 	head, err := exec.Command("git", "-C", directory, "rev-parse", "HEAD").Output()
 	if err != nil {
