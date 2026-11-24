@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -50,4 +51,33 @@ func TestOCT02AutomaticActivityRetentionRunsOnItsSingleLockedConnectionIntegrati
 	if err := pool.QueryRow(f.ctx, `select count(*) from activity_cleanup_runs where source='automatic'`).Scan(&runs); err != nil || runs != 1 {
 		t.Fatalf("automatic retry bypassed interval runs=%d err=%v", runs, err)
 	}
+}
+
+func TestActivityRetentionRespectsRemovedViewOverrideIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "log.read", "log.write")
+	const path = "/api/v1/admin/activity-logs/retention"
+	cfg := defaultActivityRetentionConfig()
+	cfg.Enabled = true
+	delete(cfg.Actions, "view")
+	f.require(t, f.editor, http.MethodPut, path, cfg, http.StatusOK)
+	stored := decodeTEST022Data[struct{ Config activityRetentionConfig }](t, f.require(t, f.editor, http.MethodGet, path, nil, http.StatusOK))
+	if _, restored := stored.Config.Actions["view"]; restored {
+		t.Error("reading the saved policy restored the removed view override")
+	}
+	var eventID int64
+	if err := f.db.QueryRow(f.ctx, `insert into user_activity_events(user_id,action_id,object_type_id,occurred_at)
+		values($1,$2,7,now()-interval '45 days') returning id`, f.userIDs[f.editor], activityActionIDs["view"]).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	NewActivityRetentionWorker(f.db).prune(f.ctx)
+	var present bool
+	if err := f.db.QueryRow(f.ctx, `select exists(select 1 from user_activity_events where id=$1)`, eventID).Scan(&present); err != nil {
+		t.Fatal(err)
+	}
+	if !present {
+		t.Error("automatic retention deleted a view protected by the saved default")
+	}
+	f.require(t, f.editor, http.MethodPost, "/api/v1/admin/activity-logs/cleanup/preview",
+		activityCleanupFilterRequest{Actions: []string{"view"}, To: time.Now().UTC().Format(time.RFC3339)}, http.StatusForbidden)
 }
