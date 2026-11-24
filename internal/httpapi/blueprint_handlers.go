@@ -52,8 +52,6 @@ const blueprintMaterialRevisionSQL = `select distinct on(revision.source_namespa
 	and public_source.review_status='approved'
 	order by revision.source_namespace,coalesce(revision.activated_at,revision.created_at) desc,revision.id desc`
 
-var errBlueprintActivityPersistence = errors.New("blueprint activity intent persistence failed")
-
 func logBlueprintReadFailure(publicID, stage string, err error) {
 	slog.Error("load blueprint data", "module", "blueprint", "public_id", publicID, "stage", stage, "error", err)
 }
@@ -234,29 +232,6 @@ func reserveBlueprintUserJobBudgetTx(ctx context.Context, tx pgx.Tx, createdBy i
 		return errBlueprintUserJobLimit
 	}
 	return nil
-}
-
-func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy int64, operation, targetFormat string, requests ...*http.Request) (string, error) {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-	jobPublicID, err := enqueueBlueprintJobTx(ctx, tx, blueprintID, createdBy, operation, targetFormat)
-	if err != nil {
-		return "", err
-	}
-	// Direct Worker/integration callers have no HTTP activity. Actual requests
-	// attach their existing middleware event to the same job/outbox transaction.
-	if len(requests) > 0 && requests[0] != nil {
-		if err = enqueueRequestActivityTx(requests[0], tx); err != nil {
-			return "", errors.Join(errBlueprintActivityPersistence, err)
-		}
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", err
-	}
-	return jobPublicID, nil
 }
 
 func queueBlueprintRetryTx(ctx context.Context, tx pgx.Tx, blueprintID, actorID int64) (string, error) {
@@ -1024,13 +999,17 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "目前支持转换为 nbt、schem 或 litematic")
 		return
 	}
-	claims := currentClaims(r)
-	var blueprintID int64
-	var existingID *string
-	err := s.db.QueryRow(r.Context(), `select b.id, (select v.public_id from blueprint_variants v
-		where v.blueprint_id=b.id and v.format=$4 and v.status='ready' order by v.original desc,v.created_at,v.public_id limit 1)
-		from blueprints b where b.public_id=$1 and b.status in ('ready','partial')
-		and (b.review_status in ('not_required','approved') or b.owner_id=$2 or $3)`, publicID, claims.Subject, claimsAllow(claims, "admin.*"), format).Scan(&blueprintID, &existingID)
+	ctx := r.Context()
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建转换任务失败")
+		return
+	}
+	defer tx.Rollback(ctx)
+	var blueprintID, ownerID int64
+	var reviewStatus string
+	err = tx.QueryRow(ctx, `select id,owner_id,review_status from blueprints
+		where public_id=$1 and status in ('ready','partial') for no key update`, publicID).Scan(&blueprintID, &ownerID, &reviewStatus)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusConflict, "蓝图尚未准备完成")
 		return
@@ -1040,11 +1019,29 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取蓝图格式失败")
 		return
 	}
-	if existingID != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "variantId": *existingID, "alreadyExists": true})
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
 		return
 	}
-	jobID, err := s.enqueueBlueprintJob(r.Context(), blueprintID, claims.Subject, "convert", format, r)
+	if reviewStatus != "approved" && reviewStatus != "not_required" && ownerID != actor.Subject && !claimsAllow(actor, "admin.*") {
+		writeError(w, http.StatusConflict, "蓝图尚未准备完成")
+		return
+	}
+	// A conversion worker publishes its variant under the same blueprint lock.
+	// Read it in a new statement after the lock wait so the committed variant is visible.
+	var existingID string
+	err = tx.QueryRow(ctx, `select public_id from blueprint_variants where blueprint_id=$1 and format=$2
+		and status='ready' order by original desc,created_at,public_id limit 1`, blueprintID, format).Scan(&existingID)
+	if err == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "variantId": existingID, "alreadyExists": true})
+		return
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		logBlueprintReadFailure(publicID, "conversion", err)
+		writeError(w, http.StatusInternalServerError, "读取蓝图格式失败")
+		return
+	}
+	jobID, err := enqueueBlueprintJobTx(ctx, tx, blueprintID, actor.Subject, "convert", format)
 	if errors.Is(err, errBlueprintUserJobLimit) {
 		writeAPIError(w, http.StatusTooManyRequests, "BLUEPRINT_JOB_CONCURRENCY_LIMIT", "too many blueprint jobs are already active", 60, nil)
 		return
@@ -1057,11 +1054,15 @@ func (s *Server) convertBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusConflict, "BLUEPRINT_CONVERSION_ALREADY_QUEUED", "the requested blueprint conversion is already active", 30, nil)
 		return
 	}
-	if errors.Is(err, errBlueprintActivityPersistence) {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建转换任务失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to persist blueprint activity")
 		return
 	}
-	if err != nil {
+	if err = tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建转换任务失败")
 		return
 	}

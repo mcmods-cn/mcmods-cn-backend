@@ -44,16 +44,17 @@ func TestBlueprintJobsUseOneTransactionalOutboxPath(t *testing.T) {
 		t.Fatal("shared upload transaction helper must enqueue normalization and leave commit to its caller")
 	}
 
-	start = strings.Index(text, "func (s *Server) enqueueBlueprintJob(")
-	end = strings.Index(text, "func (s *Server) userOwnsPendingBlueprintObject(")
+	start = strings.Index(text, "func (s *Server) convertBlueprint(")
+	end = strings.Index(text, "func isBlueprintActiveJobConflict(")
 	if start < 0 || end <= start {
-		t.Fatal("blueprint enqueue wrapper boundary was not found")
+		t.Fatal("blueprint conversion handler not found")
 	}
-	wrapper := text[start:end]
-	queued = strings.Index(wrapper, "enqueueBlueprintJobTx(ctx, tx")
-	committed = strings.LastIndex(wrapper, "tx.Commit(ctx)")
-	if queued < 0 || committed < 0 || queued > committed {
-		t.Fatal("conversion/retry does not use the shared transactional enqueue helper")
+	conversion := text[start:end]
+	queued = strings.Index(conversion, "enqueueBlueprintJobTx(ctx, tx")
+	activity := strings.Index(conversion, "enqueueRequestActivityTx(r, tx)")
+	committed = strings.LastIndex(conversion, "tx.Commit(ctx)")
+	if queued < 0 || activity < queued || committed < activity {
+		t.Fatal("conversion must enqueue its job, outbox and activity before commit")
 	}
 }
 
