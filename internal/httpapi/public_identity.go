@@ -53,13 +53,15 @@ func (s *Server) publicIDForInternal(ctx context.Context, entityType string, int
 	return publicID, nil
 }
 
+var errInvalidRevisionPublicID = errors.New("invalid revision public id")
+
 func resolveRevisionPublicID(ctx context.Context, query revisionQuery, publicID *string) (*int64, error) {
 	if publicID == nil {
 		return nil, nil
 	}
 	value := strings.ToLower(strings.TrimSpace(*publicID))
 	if !validCatalogPublicID(value) {
-		return nil, fmt.Errorf("invalid revision public id")
+		return nil, errInvalidRevisionPublicID
 	}
 	var internalID int64
 	if err := query.QueryRow(ctx, `select id from content_revisions where public_id=$1`, value).Scan(&internalID); err != nil {

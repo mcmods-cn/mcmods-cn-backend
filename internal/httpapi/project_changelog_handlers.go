@@ -107,7 +107,7 @@ func (s *Server) projectChangelogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		s.createProjectChangelog(w, r, target)
+		s.submitProjectChangelog(w, r, target, "", nil)
 		return
 	}
 	locale := normalizeContentLocale(r.URL.Query().Get("locale"))
@@ -161,84 +161,10 @@ func (s *Server) projectChangelogItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"target": target, "item": entry})
 		return
 	}
-	if !target.CanEdit {
-		writeError(w, http.StatusForbidden, "changelog edit permission required")
-		return
-	}
-	var snapshot projectChangelogSnapshot
-	if err = decodeJSON(r, &snapshot); err != nil || normalizeProjectChangelogSnapshot(&snapshot) != nil {
-		writeError(w, http.StatusBadRequest, "invalid changelog")
-		return
-	}
-	if !s.validateProjectChangelogMinecraftVersions(w, r, &snapshot) {
-		return
-	}
-	snapshotRaw, _ := json.Marshal(snapshot)
-	tx, err := s.db.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start changelog update")
-		return
-	}
-	defer tx.Rollback(r.Context())
-	if !validateProjectChangelogCategory(w, r, tx, snapshot.CategoryID, target.RouteID) {
-		return
-	}
-	requestedBase, baseErr := resolveRevisionPublicID(r.Context(), tx, snapshot.BaseRevisionID)
-	if baseErr != nil || !sameRevision(requestedBase, publishedRevisionID) {
-		writeError(w, http.StatusConflict, "changelog changed after this edit was loaded")
-		return
-	}
-	requireReview := loadReviewConfig(r.Context(), tx).ChangelogEdit && !canSkipChangelogReview(claims, target.PublicID)
-	status := "approved"
-	if requireReview {
-		status = "pending"
-	}
-	entryID, err := entryInternalIDTx(r.Context(), tx, publicID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "changelog not found")
-		return
-	}
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "CHANGELOG_LOOKUP_FAILED", "failed to load changelog", 0, nil)
-		return
-	}
-	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		EntityType: projectChangelogAggregate, EntityID: entryID,
-		AggregateType: projectChangelogAggregate, AggregateKey: publicID, BaseRevision: publishedRevisionID,
-		Snapshot: snapshotRaw, Reason: snapshot.Reason, ActorID: claims.Subject, Source: "user", Status: status,
-		Metadata: map[string]any{"targetLabel": target.Name + " - " + snapshot.ProjectVersion, "targetURL": target.CanonicalPath + "?tab=changelog"}, Request: r,
-	})
-	if errors.Is(err, errCatalogEditorConflict) {
-		writeError(w, http.StatusConflict, "changelog changed after this edit was loaded")
-		return
-	}
-	if errors.Is(err, errReviewInProgress) {
-		writeError(w, http.StatusConflict, "changelog already has a pending review")
-		return
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create changelog revision")
-		return
-	}
-	if status == "approved" {
-		if err = applyProjectChangelogSnapshotTx(r.Context(), tx, entryID, target.RouteID, created.RevisionID, claims.Subject, snapshot); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to publish changelog")
-			return
-		}
-	}
-	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionEdit, ObjectTypeID: activity.ObjectChangelog, ObjectPublicID: publicID}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to persist changelog activity")
-		return
-	}
-	if err = tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save changelog")
-		return
-	}
-	skipRequestActivity(r)
-	writeJSON(w, http.StatusOK, map[string]any{"id": publicID, "reviewStatus": status, "changeRequestId": created.ChangeRequestPublicID})
+	s.submitProjectChangelog(w, r, target, publicID, publishedRevisionID)
 }
 
-func (s *Server) createProjectChangelog(w http.ResponseWriter, r *http.Request, target projectChangelogTarget) {
+func (s *Server) submitProjectChangelog(w http.ResponseWriter, r *http.Request, target projectChangelogTarget, publicID string, baseRevisionID *int64) {
 	claims := currentClaims(r)
 	if claims.Subject <= 0 {
 		writeError(w, http.StatusUnauthorized, "authentication required")
@@ -256,55 +182,123 @@ func (s *Server) createProjectChangelog(w http.ResponseWriter, r *http.Request, 
 	if !s.validateProjectChangelogMinecraftVersions(w, r, &snapshot) {
 		return
 	}
-	tx, err := s.db.Begin(r.Context())
+	ctx := r.Context()
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start changelog creation")
+		writeError(w, http.StatusInternalServerError, "failed to start changelog submission")
 		return
 	}
-	defer tx.Rollback(r.Context())
+	defer tx.Rollback(ctx)
+	// Lock the published parent before its changelog aggregate and entry. This
+	// keeps the parent visible through commit and leaves the existing manual
+	// and upstream aggregate -> entry -> source-binding lock order intact.
+	var parentStatus string
+	target.Name, parentStatus, err = changelogProjectState(ctx, tx, target, true)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && parentStatus != "approved") {
+		writeError(w, http.StatusNotFound, "changelog target not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to load changelog target")
+		return
+	}
+	creating := publicID == ""
+	var entryID int64
+	if creating {
+		err = tx.QueryRow(ctx, `insert into project_changelogs(
+			object_route_id,event_at,minecraft_versions,project_version,default_locale,created_by)
+			values($1,$2,$3,$4,$5,$6) returning id,public_id`, target.RouteID, snapshot.EventAt,
+			snapshot.MinecraftVersions, snapshot.ProjectVersion, snapshot.DefaultLocale, claims.Subject).Scan(&entryID, &publicID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create changelog")
+			return
+		}
+	} else {
+		requestedBase, baseErr := resolveRevisionPublicID(ctx, tx, snapshot.BaseRevisionID)
+		if baseErr != nil && !errors.Is(baseErr, pgx.ErrNoRows) && !errors.Is(baseErr, errInvalidRevisionPublicID) {
+			writeError(w, http.StatusServiceUnavailable, "failed to read changelog revision")
+			return
+		}
+		if baseErr != nil || !sameRevision(requestedBase, baseRevisionID) {
+			writeError(w, http.StatusConflict, "changelog changed after this edit was loaded")
+			return
+		}
+		entryID, err = entryInternalIDTx(ctx, tx, publicID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "changelog not found")
+			return
+		}
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "CHANGELOG_LOOKUP_FAILED", "failed to load changelog", 0, nil)
+			return
+		}
+	}
+	raw, _ := json.Marshal(snapshot)
+	params := createContentRevisionParams{
+		EntityType: projectChangelogAggregate, EntityID: entryID, AggregateType: projectChangelogAggregate,
+		AggregateKey: publicID, BaseRevision: baseRevisionID, Snapshot: raw, Reason: snapshot.Reason, Source: "user",
+		Metadata: map[string]any{"targetLabel": target.Name + " - " + snapshot.ProjectVersion, "targetURL": target.CanonicalPath + "?tab=changelog"}, Request: r,
+	}
+	if err = lockContentRevisionTx(ctx, tx, &params); err != nil {
+		switch {
+		case errors.Is(err, errCatalogEditorConflict):
+			writeError(w, http.StatusConflict, "changelog changed after this edit was loaded")
+		case errors.Is(err, errCatalogEditorNotFound):
+			writeError(w, http.StatusNotFound, "changelog not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to lock changelog revision")
+		}
+		return
+	}
 	if !validateProjectChangelogCategory(w, r, tx, snapshot.CategoryID, target.RouteID) {
 		return
 	}
-	var internalID int64
-	var publicID string
-	if err = tx.QueryRow(r.Context(), `insert into project_changelogs(
-		object_route_id,event_at,minecraft_versions,project_version,default_locale,created_by)
-		values($1,$2,$3,$4,$5,$6) returning id,public_id`, target.RouteID, snapshot.EventAt,
-		snapshot.MinecraftVersions, snapshot.ProjectVersion, snapshot.DefaultLocale, claims.Subject).Scan(&internalID, &publicID); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create changelog")
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
 		return
 	}
-	requireReview := loadReviewConfig(r.Context(), tx).ChangelogCreate && !canSkipChangelogReview(claims, target.PublicID)
-	status := "approved"
-	if requireReview {
-		status = "pending"
+	if !canEditProjectReviewTarget(actor, target.EntityType, target.PublicID) {
+		writeError(w, http.StatusForbidden, "changelog edit permission required")
+		return
 	}
-	raw, _ := json.Marshal(snapshot)
-	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		EntityType: projectChangelogAggregate, EntityID: internalID, AggregateType: projectChangelogAggregate,
-		AggregateKey: publicID, Snapshot: raw, Reason: snapshot.Reason, ActorID: claims.Subject, Source: "user", Status: status,
-		Metadata: map[string]any{"targetLabel": target.Name + " - " + snapshot.ProjectVersion, "targetURL": target.CanonicalPath + "?tab=changelog"}, Request: r,
-	})
+	config := loadReviewConfig(ctx, tx)
+	requiresReview := config.ChangelogEdit
+	statusCode := http.StatusOK
+	actionID := activity.ActionEdit
+	if creating {
+		requiresReview = config.ChangelogCreate
+		statusCode = http.StatusCreated
+		actionID = activity.ActionCreate
+	}
+	params.ActorID, params.Status = actor.Subject, "approved"
+	if antiAbuseModerationRequired(r) || (requiresReview && !canSkipChangelogReview(actor, target.PublicID)) {
+		params.Status = "pending"
+	}
+	created, err := insertLockedContentRevisionTx(ctx, tx, params)
+	if errors.Is(err, errReviewInProgress) {
+		writeError(w, http.StatusConflict, "changelog already has a pending review")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create changelog revision")
 		return
 	}
-	if status == "approved" {
-		if err = applyProjectChangelogSnapshotTx(r.Context(), tx, internalID, target.RouteID, created.RevisionID, claims.Subject, snapshot); err != nil {
+	if params.Status == "approved" {
+		if err = applyProjectChangelogSnapshotTx(ctx, tx, entryID, target.RouteID, created.RevisionID, actor.Subject, snapshot); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to publish changelog")
 			return
 		}
 	}
-	if err = activity.EnqueueDurableTx(r.Context(), tx, activity.Event{UserID: claims.Subject, ActionID: activity.ActionCreate, ObjectTypeID: activity.ObjectChangelog, ObjectPublicID: publicID}); err != nil {
+	if err = activity.EnqueueDurableTx(ctx, tx, activity.Event{UserID: actor.Subject, ActionID: actionID, ObjectTypeID: activity.ObjectChangelog, ObjectPublicID: publicID}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to persist changelog activity")
 		return
 	}
-	if err = tx.Commit(r.Context()); err != nil {
+	if err = tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save changelog")
 		return
 	}
 	skipRequestActivity(r)
-	writeJSON(w, http.StatusCreated, map[string]any{"id": publicID, "reviewStatus": status, "changeRequestId": created.ChangeRequestPublicID})
+	writeJSON(w, statusCode, map[string]any{"id": publicID, "reviewStatus": params.Status, "changeRequestId": created.ChangeRequestPublicID})
 }
 
 func (s *Server) projectChangelogHistory(w http.ResponseWriter, r *http.Request) {
@@ -337,8 +331,8 @@ func normalizeProjectChangelogSnapshot(snapshot *projectChangelogSnapshot) error
 	snapshot.DefaultLocale = normalizeContentLocale(snapshot.DefaultLocale)
 	snapshot.CategoryID = strings.ToLower(strings.TrimSpace(snapshot.CategoryID))
 	snapshot.Reason = strings.TrimSpace(snapshot.Reason)
-	if snapshot.EventAt.IsZero() || len(snapshot.ProjectVersion) == 0 || len(snapshot.ProjectVersion) > 120 ||
-		!isEditableContentLocale(snapshot.DefaultLocale) || len(snapshot.Reason) > 500 {
+	if snapshot.EventAt.IsZero() || len(snapshot.ProjectVersion) == 0 || utf8.RuneCountInString(snapshot.ProjectVersion) > 120 ||
+		!isEditableContentLocale(snapshot.DefaultLocale) || utf8.RuneCountInString(snapshot.Reason) > 500 {
 		return errors.New("invalid changelog")
 	}
 	versions, err := normalizeStringList(snapshot.MinecraftVersions, 100)
@@ -351,7 +345,7 @@ func normalizeProjectChangelogSnapshot(snapshot *projectChangelogSnapshot) error
 	for _, value := range snapshot.Localizations {
 		value.Locale = normalizeContentLocale(value.Locale)
 		value.BodyMarkdown = strings.TrimSpace(value.BodyMarkdown)
-		if !isEditableContentLocale(value.Locale) || seen[value.Locale] || len(value.BodyMarkdown) > 200000 {
+		if !isEditableContentLocale(value.Locale) || seen[value.Locale] || utf8.RuneCountInString(value.BodyMarkdown) > 200000 {
 			return errors.New("invalid changelog localization")
 		}
 		if value.BodyMarkdown != "" {
@@ -376,7 +370,7 @@ func normalizeProjectChangelogSnapshot(snapshot *projectChangelogSnapshot) error
 		for _, value := range snapshot.NewCategory.Localizations {
 			value.Locale = normalizeContentLocale(value.Locale)
 			value.Name = strings.TrimSpace(value.Name)
-			if !isEditableContentLocale(value.Locale) || categorySeen[value.Locale] || len(value.Name) > 80 {
+			if !isEditableContentLocale(value.Locale) || categorySeen[value.Locale] || utf8.RuneCountInString(value.Name) > 80 {
 				return errors.New("invalid changelog category localization")
 			}
 			if value.Name != "" {
@@ -417,21 +411,37 @@ func (s *Server) resolveProjectChangelogTarget(ctx context.Context, entityType, 
 	if err != nil {
 		return target, err
 	}
-	switch entityType {
+	var status string
+	target.Name, status, err = changelogProjectState(ctx, s.db, target, false)
+	if err == nil && status != "approved" {
+		return target, pgx.ErrNoRows
+	}
+	if err == nil {
+		target.CanEdit = canEditProjectReviewTarget(claims, entityType, target.PublicID)
+	}
+	return target, err
+}
+
+func changelogProjectState(ctx context.Context, db databaseQuery, target projectChangelogTarget, lock bool) (string, string, error) {
+	var query string
+	args := []any{target.InternalID}
+	switch target.EntityType {
 	case "mod":
-		err = s.db.QueryRow(ctx, `select primary_name from mods where id=$1 and review_status='approved'`, target.InternalID).Scan(&target.Name)
+		query = `select primary_name,review_status from mods where id=$1`
 	case "modpack":
-		err = s.db.QueryRow(ctx, `select primary_name from modpacks where id=$1 and review_status='approved'`, target.InternalID).Scan(&target.Name)
+		query = `select primary_name,review_status from modpacks where id=$1`
 	case "minecraft_server":
-		err = s.db.QueryRow(ctx, `select name from minecraft_servers where id=$1 and review_status='approved'`, target.InternalID).Scan(&target.Name)
+		query = `select name,review_status from minecraft_servers where id=$1`
 	default:
-		err = s.db.QueryRow(ctx, `select primary_name from simple_projects where id=$1 and project_type=$2 and review_status='approved'`, target.InternalID, entityType).Scan(&target.Name)
+		query = `select primary_name,review_status from simple_projects where id=$1 and project_type=$2`
+		args = append(args, target.EntityType)
 	}
-	if err != nil {
-		return target, err
+	if lock {
+		query += " for share"
 	}
-	target.CanEdit = canEditReviewTarget(ctx, s.db, claims, entityType, target.InternalID, target.PublicID)
-	return target, nil
+	var name, status string
+	err := db.QueryRow(ctx, query, args...).Scan(&name, &status)
+	return name, status, err
 }
 
 func normalizeChangelogTargetType(value string) string {

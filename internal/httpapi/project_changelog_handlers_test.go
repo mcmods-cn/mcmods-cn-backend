@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -62,5 +63,32 @@ func TestNormalizeChangelogTargetType(t *testing.T) {
 	}
 	if got := normalizeChangelogTargetType("user"); got != "" {
 		t.Fatalf("unsupported target = %q", got)
+	}
+}
+
+func TestChangelogUsesCharacterLimitsForLocalizedFields(t *testing.T) {
+	for _, field := range []struct {
+		name string
+		max  int
+		set  func(*projectChangelogSnapshot, string)
+	}{
+		{"version", 120, func(s *projectChangelogSnapshot, value string) { s.ProjectVersion = value }},
+		{"reason", 500, func(s *projectChangelogSnapshot, value string) { s.Reason = value }},
+		{"body", 200000, func(s *projectChangelogSnapshot, value string) { s.Localizations[0].BodyMarkdown = value }},
+		{"category", 80, func(s *projectChangelogSnapshot, value string) {
+			s.NewCategory = &projectChangelogNewCategory{
+				DefaultLocale: "zh-CN", Localizations: []projectChangelogCategoryLocalization{{Locale: "zh-CN", Name: value}},
+			}
+		}},
+	} {
+		t.Run(field.name, func(t *testing.T) {
+			for _, length := range []int{field.max, field.max + 1} {
+				s := test017Snapshot("中文")
+				field.set(&s, strings.Repeat("界", length))
+				if err := normalizeProjectChangelogSnapshot(&s); (err == nil) != (length == field.max) {
+					t.Fatalf("%s: %d code points, error=%v", field.name, length, err)
+				}
+			}
+		})
 	}
 }

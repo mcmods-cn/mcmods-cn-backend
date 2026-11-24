@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -89,5 +90,78 @@ func TestProjectChangelogManualPublicationAndSyncShareLockOrderIntegration(t *te
 	assertBUG034ManualOverride(t, ctx, fixture.db, publicID, true)
 	if visible := fixture.detail(t, "", publicID, http.StatusOK); visible.BodyMarkdown != manualBody {
 		t.Fatalf("published changelog body=%q, want the approved edit", visible.BodyMarkdown)
+	}
+}
+
+func TestManualChangelogSubmissionReadsPolicyAfterProjectAndRevisionLocksIntegration(t *testing.T) {
+	f := newTEST017Fixture(t)
+	ctx, cancel := context.WithTimeout(f.ctx, 25*time.Second)
+	defer cancel()
+	f.ctx = ctx
+	base := "/api/v1/changelogs?targetType=mod&targetId=" + f.modCode
+	initial := f.submit(t, f.editor, http.MethodPost, base, test017Snapshot("Original published version"), http.StatusCreated)
+	f.review(t, f.denied, initial, "approved", http.StatusOK)
+	edit := test017Snapshot("A new version requiring independent review")
+	edit.BaseRevisionID = f.detail(t, f.editor, initial.ID, http.StatusOK).PublishedRevisionID
+
+	grantTEST044Permissions(t, ctx, f.db, f.userIDs[f.editor], "project.no-review."+f.modCode)
+	barrier, err := f.db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollbackIntegrationTransaction(barrier)
+	if _, err = barrier.Exec(ctx, "select pg_advisory_xact_lock(hashtext($1))", projectChangelogAggregate+":"+initial.ID); err != nil {
+		t.Fatal(err)
+	}
+	saving := auditCompletionAsyncJSON(f.test013Fixture, f.editor, http.MethodPut, "/api/v1/changelogs/"+initial.ID, edit)
+	auditCompletionAwaitLocks(t, f.test013Fixture, 1)
+	if _, err = f.db.Exec(ctx, `delete from user_permissions using permissions
+		where user_permissions.permission_id=permissions.id and user_id=$1 and permissions.code=$2`, f.userIDs[f.editor], "project.no-review."+f.modCode); err != nil {
+		t.Fatal(err)
+	}
+	if err = barrier.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	saved := <-saving
+	var result struct {
+		Data struct{ ReviewStatus, ChangeRequestID string }
+	}
+	if saved.err != nil || saved.status != http.StatusOK || json.Unmarshal(saved.raw, &result) != nil ||
+		result.Data.ReviewStatus != "pending" || result.Data.ChangeRequestID == "" {
+		t.Fatalf("review-required save: status=%d receipt=%+v err=%v", saved.status, result, saved.err)
+	}
+	if got := f.detail(t, "", initial.ID, http.StatusOK); got.BodyMarkdown != "Original published version" {
+		t.Fatalf("public body changed before review: %q", got.BodyMarkdown)
+	}
+
+	// The administrator can withdraw the parent while a new submission waits.
+	hide, err := f.db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollbackIntegrationTransaction(hide)
+	if _, err = hide.Exec(ctx, `update mods set review_status='pending' where id=$1`, f.modID); err != nil {
+		t.Fatal(err)
+	}
+	creating := auditCompletionAsyncJSON(f.test013Fixture, f.editor, http.MethodPost, base, test017Snapshot("Parent no longer published"))
+	auditCompletionAwaitLocks(t, f.test013Fixture, 1)
+	if err = hide.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rejected := <-creating
+	if rejected.err != nil || rejected.status != http.StatusNotFound {
+		t.Fatalf("hidden parent creation: status=%d err=%v", rejected.status, rejected.err)
+	}
+	var revision, state string
+	if err = f.db.QueryRow(ctx, `select revision.public_id,request.status from change_requests request
+		join content_revisions revision on revision.id=request.proposed_revision_id where request.public_id=$1`, result.Data.ChangeRequestID).Scan(&revision, &state); err != nil || state != "pending" {
+		t.Fatalf("pending review state=%q err=%v", state, err)
+	}
+	proposal := test017Mutation{RevisionID: revision}
+	f.review(t, f.denied, proposal, "approved", http.StatusConflict)
+	f.review(t, f.denied, proposal, "rejected", http.StatusOK)
+	var entries int
+	if err = f.db.QueryRow(ctx, `select count(*) from project_changelogs entry join public_routes project on project.id=entry.object_route_id where project.public_id=$1`, f.modCode).Scan(&entries); err != nil || entries != 1 {
+		t.Fatalf("published + aborted create: entries=%d err=%v", entries, err)
 	}
 }

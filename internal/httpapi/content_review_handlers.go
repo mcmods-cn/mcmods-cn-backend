@@ -90,19 +90,41 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to decode changelog revision")
 			return
 		}
-		var changelogID, targetRouteID int64
-		var publishedRevisionID *int64
-		var targetName, targetURL string
-		if err = tx.QueryRow(r.Context(), `select entry.id,entry.object_route_id,entry.published_revision_id,
-			coalesce(mod.primary_name,modpack.primary_name,project.primary_name,server.name,target.public_id),target.canonical_path
+		var parent projectChangelogTarget
+		err = tx.QueryRow(r.Context(), `select target.id,target.entity_type,target.internal_id,target.canonical_path
 			from project_changelogs entry join public_routes target on target.id=entry.object_route_id
-			left join mods mod on target.entity_type='mod' and mod.id=target.internal_id
-			left join modpacks modpack on target.entity_type='modpack' and modpack.id=target.internal_id
-			left join simple_projects project on target.entity_type=project.project_type and project.id=target.internal_id
-			left join minecraft_servers server on target.entity_type='minecraft_server' and server.id=target.internal_id
-			where entry.public_id=$1 for update of entry`, aggregateKey).
-			Scan(&changelogID, &targetRouteID, &publishedRevisionID, &targetName, &targetURL); err != nil {
+			where entry.public_id=$1`, aggregateKey).Scan(&parent.RouteID, &parent.EntityType, &parent.InternalID, &parent.CanonicalPath)
+		var parentStatus string
+		if err == nil {
+			parent.Name, parentStatus, err = changelogProjectState(r.Context(), tx, parent, true)
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "changelog target not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "failed to load changelog target")
+			return
+		}
+		if request.Status == "approved" && parentStatus != "approved" {
+			writeError(w, http.StatusConflict, "changelog target is no longer published")
+			return
+		}
+		var changelogID int64
+		var publishedRevisionID *int64
+		var entryStatus string
+		err = tx.QueryRow(r.Context(), `select id,published_revision_id,status from project_changelogs
+			where public_id=$1 and object_route_id=$2 for update`, aggregateKey, parent.RouteID).Scan(&changelogID, &publishedRevisionID, &entryStatus)
+		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "changelog not found")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "failed to load changelog")
+			return
+		}
+		if request.Status == "approved" && entryStatus != "active" {
+			writeError(w, http.StatusConflict, "changelog is no longer active")
 			return
 		}
 		if !authorizeAfterLock() {
@@ -120,7 +142,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if request.Status == "approved" {
-			if err = applyProjectChangelogSnapshotTx(r.Context(), tx, changelogID, targetRouteID, revisionID, claims.Subject, snapshot); err != nil {
+			if err = applyProjectChangelogSnapshotTx(r.Context(), tx, changelogID, parent.RouteID, revisionID, claims.Subject, snapshot); err != nil {
 				if errors.Is(err, errInvalidMinecraftVersionCodes) || errors.Is(err, errUnknownMinecraftVersionCodes) {
 					writeError(w, http.StatusConflict, "the Minecraft version catalog changed after this request was submitted")
 					return
@@ -148,8 +170,8 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 			code = "review_rejected"
 		}
 		if err = enqueueTemplatedNotificationTx(r.Context(), tx, "project_changelog.review."+request.Status, submittedBy, claims.Subject, code, map[string]string{
-			"name": targetName + " - " + snapshot.ProjectVersion, "reason": request.Note,
-		}, map[string]any{"changelogId": aggregateKey, "targetLabel": targetName, "url": targetURL + "?tab=changelog"}, ""); err != nil {
+			"name": parent.Name + " - " + snapshot.ProjectVersion, "reason": request.Note,
+		}, map[string]any{"changelogId": aggregateKey, "targetLabel": parent.Name, "url": parent.CanonicalPath + "?tab=changelog"}, ""); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to enqueue changelog review notification")
 			return
 		}

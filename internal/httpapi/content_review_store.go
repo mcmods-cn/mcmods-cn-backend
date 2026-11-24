@@ -231,7 +231,7 @@ func checkContentRevisionBaseTx(ctx context.Context, tx pgx.Tx, params createCon
 		published, err = publishedModContentRevisionTx(ctx, tx, snapshot)
 	case params.AggregateType == projectChangelogAggregate:
 		err = tx.QueryRow(ctx, `select published_revision_id from project_changelogs
-			where public_id=$1 for update`, params.AggregateKey).Scan(&published)
+			where public_id=$1 and status='active' for update`, params.AggregateKey).Scan(&published)
 	default:
 		return nil
 	}

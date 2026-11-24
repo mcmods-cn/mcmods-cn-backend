@@ -134,6 +134,20 @@ func resolveReviewLockTarget(ctx context.Context, query databaseQuery, entityTyp
 	return internalID, canonicalPath, err
 }
 
+// Project IDs passed here have already been resolved against their owning row.
+func canEditProjectReviewTarget(claims security.Claims, entityType, publicID string) bool {
+	if claims.Subject <= 0 {
+		return false
+	}
+	if canReviewAllProjects(claims) {
+		return true
+	}
+	if entityType == "minecraft_server" || entityType == "server" {
+		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "server.review")
+	}
+	return canEditProjectRevision(claims, entityType, publicID)
+}
+
 func canEditReviewTarget(ctx context.Context, query databaseQuery, claims security.Claims, entityType string, internalID int64, publicID string) bool {
 	if claims.Subject <= 0 {
 		return false
@@ -155,23 +169,13 @@ func canEditReviewTarget(ctx context.Context, query databaseQuery, claims securi
 		return visible && resolveCreatorCapabilities(claims, kind, publicID).EditProfile
 	}
 
-	if claimsAllow(claims, "admin.*") || claimsAllow(claims, "content.review") || claimsAllow(claims, "project.review") {
+	if changelogTargetTypes[entityType] || entityType == "server" {
+		return canEditProjectReviewTarget(claims, entityType, publicID)
+	}
+	if canReviewAllProjects(claims) {
 		return true
 	}
 	switch entityType {
-	case "mod":
-		var identity modIdentityRecord
-		if query.QueryRow(ctx, `select id,project_code,slug from mods where id=$1`, internalID).
-			Scan(&identity.ID, &identity.UniqueID, &identity.SiteID) != nil {
-			return false
-		}
-		return canEditMod(claims, identity)
-	case "modpack":
-		return claimsAllow(claims, "project.edit."+publicID)
-	case "plugin", "map", "resource_pack", "shader_pack", "datapack", "addon":
-		return claimsAllow(claims, "project.edit."+publicID)
-	case "minecraft_server", "server":
-		return claimsAllow(claims, "project.edit."+publicID) || claimsAllow(claims, "server.review")
 	case "project_changelog":
 		var targetType, targetPublicID string
 		var targetInternalID int64
