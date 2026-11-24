@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,14 +44,8 @@ func TestCommunityPostExplicitSourceLocalePersistsThroughCreateAndEditIntegratio
 		}
 	}()
 
-	suffix := time.Now().UnixNano()
-	var authorID int64
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,status)
-		values($1,$2,'not-used','active') returning id`, fmt.Sprintf("bug091_author_%d", suffix), fmt.Sprintf("bug091_author_%d@example.test", suffix)).Scan(&authorID); err != nil {
-		t.Fatal(err)
-	}
 	server := &Server{db: pool}
-	claims := security.Claims{Subject: authorID, PermissionRules: []security.PermissionRule{{Code: "admin.*", Allow: true, Priority: 100}}}
+	claims := newCommunityEditTestActor(t, ctx, pool, "bug091")
 
 	ambiguous := invokeBUG091CommunityPostMutation(t, ctx, server, claims, http.MethodPost, "", "", "", "printf setup")
 	if ambiguous.Code != http.StatusBadRequest {

@@ -552,13 +552,6 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		}
 		return
 	}
-	status := "approved"
-	if simpleProjectReviewRequired(loadReviewConfig(r.Context(), s.db), projectType, "edit") && !projectMutationBypassesReview(claims) {
-		status = "pending"
-	}
-	if antiAbuseModerationRequired(r) {
-		status = "pending"
-	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -594,23 +587,16 @@ func (s *Server) createSimpleProjectRevision(w http.ResponseWriter, r *http.Requ
 		baseRevision = &value
 	}
 	raw, _ := json.Marshal(request.Snapshot)
-	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+	created, ok := createManualProjectEdit(w, r, tx, createContentRevisionParams{
 		EntityType: projectType, EntityID: current.ID, AggregateType: simpleProjectAggregate, AggregateKey: current.PublicID,
-		BaseRevision: baseRevision, Snapshot: raw, Reason: strings.TrimSpace(request.ChangeReason), ActorID: claims.Subject,
-		Source: "user", Status: status, Metadata: map[string]any{"projectType": projectType, "siteId": request.Snapshot.SiteID}, Request: r,
+		BaseRevision: baseRevision, Snapshot: raw, Reason: strings.TrimSpace(request.ChangeReason),
+		Source: "user", Metadata: map[string]any{"projectType": projectType, "siteId": request.Snapshot.SiteID}, Request: r,
 	})
-	if err != nil {
-		if errors.Is(err, errProjectRevisionBaseChanged) {
-			writeError(w, http.StatusConflict, errProjectRevisionBaseChanged.Error())
-			return
-		}
-		if errors.Is(err, errReviewInProgress) {
-			writeError(w, http.StatusConflict, errReviewInProgress.Error())
-		} else {
-			writeError(w, http.StatusInternalServerError, "failed to create project revision")
-		}
+	if !ok {
 		return
 	}
+	claims = created.actor
+	status := created.status
 	if status == "approved" {
 		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
 		if err = applySimpleProjectSnapshotTx(r.Context(), tx, current.ID, created.RevisionID, claims.Subject,
@@ -1248,7 +1234,7 @@ func simpleProjectTypeValues() []string {
 }
 
 func canEditSimpleProject(claims security.Claims, item simpleProjectResponse) bool {
-	return claims.Subject > 0 && (claimsAllow(claims, "project.edit."+item.PublicID) || claimsAllow(claims, "admin.*"))
+	return canEditProjectRevision(claims, item.ProjectType, item.PublicID)
 }
 
 func normalizeSimpleProjectType(value string) string {

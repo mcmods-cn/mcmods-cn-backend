@@ -67,15 +67,21 @@ type contentChange struct {
 }
 
 func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createContentRevisionParams) (createdContentRevision, error) {
-	var result createdContentRevision
+	if err := lockContentRevisionTx(ctx, tx, &params); err != nil {
+		return createdContentRevision{}, err
+	}
+	return insertLockedContentRevisionTx(ctx, tx, params)
+}
+
+func lockContentRevisionTx(ctx context.Context, tx pgx.Tx, params *createContentRevisionParams) error {
 	params.AggregateType = strings.TrimSpace(params.AggregateType)
 	params.AggregateKey = strings.TrimSpace(params.AggregateKey)
 	params.EntityType = strings.TrimSpace(params.EntityType)
 	if params.AggregateType == "" || params.AggregateKey == "" || len(params.Snapshot) == 0 {
-		return result, fmt.Errorf("invalid content revision")
+		return fmt.Errorf("invalid content revision")
 	}
 	if (params.EntityID > 0) != (params.EntityType != "") {
-		return result, fmt.Errorf("content revision entity type and id must be provided together")
+		return fmt.Errorf("content revision entity type and id must be provided together")
 	}
 	if params.Source == "" {
 		params.Source = "user"
@@ -90,23 +96,28 @@ func createContentRevisionTx(ctx context.Context, tx pgx.Tx, params createConten
 	case "mod", modpackAggregate, simpleProjectAggregate:
 		target, err := lockProjectRevisionTargetTx(ctx, tx, params.AggregateType, params.EntityID)
 		if err != nil {
-			return result, fmt.Errorf("load project revision base: %w", err)
+			return fmt.Errorf("load project revision base: %w", err)
 		}
 		if target.publicID != params.AggregateKey || target.projectType != params.EntityType ||
 			!sameRevision(params.BaseRevision, target.publishedRevisionID) {
-			return result, errProjectRevisionBaseChanged
+			return errProjectRevisionBaseChanged
 		}
 	}
 
 	if err := lockContentAggregateTx(ctx, tx, params.AggregateType, params.AggregateKey); err != nil {
-		return result, fmt.Errorf("lock content aggregate: %w", err)
+		return fmt.Errorf("lock content aggregate: %w", err)
 	}
 	// The handler's initial read is only an early error check. Recheck the
 	// published pointer after acquiring the aggregate lock, before writing any
 	// revision, audit event or publication. This also protects automatic approval.
-	if err := checkContentRevisionBaseTx(ctx, tx, params); err != nil {
-		return result, err
+	if err := checkContentRevisionBaseTx(ctx, tx, *params); err != nil {
+		return err
 	}
+	return nil
+}
+
+func insertLockedContentRevisionTx(ctx context.Context, tx pgx.Tx, params createContentRevisionParams) (createdContentRevision, error) {
+	var result createdContentRevision
 	var pending bool
 	if err := tx.QueryRow(ctx, `select exists(select 1 from change_requests
 		where aggregate_type=$1 and aggregate_key=$2 and status='pending')`,

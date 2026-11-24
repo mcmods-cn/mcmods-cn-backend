@@ -45,17 +45,22 @@ func resolveCurrentWriteActorTx(ctx context.Context, tx pgx.Tx, claims security.
 
 func requireCurrentWriteActor(w http.ResponseWriter, r *http.Request, tx pgx.Tx) (security.Claims, bool) {
 	claims, err := resolveCurrentWriteActorTx(r.Context(), tx, currentClaims(r))
+	if err == nil {
+		return claims, true
+	}
+	writeCurrentWriteActorFailure(w, err)
+	return security.Claims{}, false
+}
+
+func writeCurrentWriteActorFailure(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		writeError(w, http.StatusUnauthorized, "session is no longer active")
 	case errors.Is(err, errWriteAccountBanned):
 		writeError(w, http.StatusForbidden, "permission denied")
-	case err != nil:
-		writeError(w, http.StatusServiceUnavailable, "permissions are temporarily unavailable")
 	default:
-		return claims, true
+		writeError(w, http.StatusServiceUnavailable, "permissions are temporarily unavailable")
 	}
-	return security.Claims{}, false
 }
 
 func canReviewAllContent(claims security.Claims) bool {

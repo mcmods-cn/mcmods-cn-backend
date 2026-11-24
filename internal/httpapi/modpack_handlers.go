@@ -529,14 +529,6 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		writeError(w, http.StatusBadRequest, "invalid modpack")
 		return
 	}
-	reviewRequired := loadReviewConfig(r.Context(), s.db).ModpackEdit && !claimsAllow(claims, "content.no-review") && !claimsAllow(claims, "admin.*")
-	if antiAbuseModerationRequired(r) {
-		reviewRequired = true
-	}
-	status := "approved"
-	if reviewRequired {
-		status = "pending"
-	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
@@ -572,23 +564,16 @@ func (s *Server) createModpackRevision(w http.ResponseWriter, r *http.Request, s
 		baseRevision = &value
 	}
 	raw, _ := json.Marshal(request.Snapshot)
-	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+	created, ok := createManualProjectEdit(w, r, tx, createContentRevisionParams{
 		EntityType: "modpack", EntityID: current.ID, AggregateType: modpackAggregate, AggregateKey: current.PublicID,
-		BaseRevision: baseRevision, Snapshot: raw, Reason: strings.TrimSpace(request.ChangeReason), ActorID: claims.Subject,
-		Source: "user", Status: status, Metadata: map[string]any{"siteId": request.Snapshot.SiteID}, Request: r,
+		BaseRevision: baseRevision, Snapshot: raw, Reason: strings.TrimSpace(request.ChangeReason),
+		Source: "user", Metadata: map[string]any{"siteId": request.Snapshot.SiteID}, Request: r,
 	})
-	if err != nil {
-		if errors.Is(err, errProjectRevisionBaseChanged) {
-			writeError(w, http.StatusConflict, errProjectRevisionBaseChanged.Error())
-			return
-		}
-		if errors.Is(err, errReviewInProgress) {
-			writeError(w, http.StatusConflict, errReviewInProgress.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to create modpack revision")
+	if !ok {
 		return
 	}
+	claims = created.actor
+	status := created.status
 	if status == "approved" {
 		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
 		if err = applyModpackSnapshotTx(r.Context(), tx, current.ID, created.RevisionID, claims.Subject,
@@ -1155,7 +1140,7 @@ func (s *Server) loadModpackAssociations(ctx context.Context, items []modpackRes
 }
 
 func canEditModpack(claims security.Claims, item modpackResponse) bool {
-	return claims.Subject > 0 && (claimsAllow(claims, "project.edit."+item.PublicID) || claimsAllow(claims, "admin.*"))
+	return canEditProjectRevision(claims, "modpack", item.PublicID)
 }
 
 func availableModpackSiteID(ctx context.Context, query databaseQuery, name string) (string, error) {

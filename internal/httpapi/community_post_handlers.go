@@ -201,7 +201,7 @@ func (s *Server) communityPosts(w http.ResponseWriter, r *http.Request) {
 			}
 			row.Item.CoverURL = access.URL
 		}
-		row.Item.CanEdit = page.ViewerID > 0 && (page.ViewerID == row.AuthorInternalID || claimsAllow(claims, "community.edit") || claimsAllow(claims, "admin.*"))
+		row.Item.CanEdit = canEditCommunityPost(claims, row.AuthorInternalID)
 		row.Item.CanResolve = row.Item.Kind == "discussion" && row.Item.ResolutionStatus == "open" &&
 			row.Item.ReviewStatus == "approved" && page.ViewerID == row.AuthorInternalID
 		items = append(items, row.Item)
@@ -351,6 +351,32 @@ func (s *Server) createCommunityPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"id": publicID, "reviewStatus": status, "revisionId": created.RevisionPublicID, "changeRequestId": created.ChangeRequestPublicID})
 }
 
+func canEditCommunityPost(claims security.Claims, authorID int64) bool {
+	return claims.Subject > 0 && (claims.Subject == authorID || claimsAllow(claims, "community.edit") || claimsAllow(claims, "admin.*"))
+}
+
+func resolveCommunityPostEditorTx(ctx context.Context, tx pgx.Tx, claims security.Claims) (security.Claims, error) {
+	// Links, body and bounty share a repeatable-read snapshot. A row updated
+	// after that snapshot makes FOR SHARE return 40001, so an edit cannot
+	// carry the pre-lock rules or moderation policy into publication.
+	current, err := resolveCurrentWriteActorTx(ctx, tx, claims)
+	if err != nil {
+		return security.Claims{}, err
+	}
+	var versions int
+	err = tx.QueryRow(ctx, `select count(*) from (
+		select name from runtime_versions where name in ('project_acl','rbac','settings')
+		order by name for share
+	) versions`).Scan(&versions)
+	if err != nil {
+		return security.Claims{}, err
+	}
+	if versions != 3 {
+		return security.Claims{}, errors.New("community edit authorization versions are unavailable")
+	}
+	return current, nil
+}
+
 func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, publicID string) {
 	claims := currentClaims(r)
 	var postID, authorID int64
@@ -366,7 +392,7 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 		writeError(w, http.StatusInternalServerError, "failed to load community post")
 		return
 	}
-	if claims.Subject != authorID && !claimsAllow(claims, "community.edit") && !claimsAllow(claims, "admin.*") {
+	if !canEditCommunityPost(claims, authorID) {
 		writeError(w, http.StatusForbidden, "cannot edit this community post")
 		return
 	}
@@ -426,6 +452,20 @@ func (s *Server) updateCommunityPost(w http.ResponseWriter, r *http.Request, pub
 		}
 		logCommunityPostDataFailure("update_base", publicID, err)
 		writeError(w, http.StatusInternalServerError, "failed to validate community post revision")
+		return
+	}
+	claims, err = resolveCommunityPostEditorTx(r.Context(), tx, claims)
+	if err != nil {
+		var serialization *pgconn.PgError
+		if errors.As(err, &serialization) && serialization.Code == "40001" {
+			writeAPIError(w, http.StatusConflict, "COMMUNITY_POST_AUTHORITY_CHANGED", "permissions or review settings changed; retry the edit", 0, nil)
+		} else {
+			writeCurrentWriteActorFailure(w, err)
+		}
+		return
+	}
+	if !canEditCommunityPost(claims, authorID) {
+		writeError(w, http.StatusForbidden, "cannot edit this community post")
 		return
 	}
 	if err = s.resolveCommunityPostSnapshot(r.Context(), tx, claims, postID, &snapshot); err != nil {
@@ -1190,7 +1230,7 @@ func (s *Server) loadCommunityPost(ctx context.Context, publicID string, claims 
 		}
 		item.CoverURL = access.URL
 	}
-	item.CanEdit = claims.Subject > 0 && (claims.Subject == authorInternalID || claimsAllow(claims, "community.edit") || claimsAllow(claims, "admin.*"))
+	item.CanEdit = canEditCommunityPost(claims, authorInternalID)
 	item.CanResolve = item.Kind == "discussion" && item.ResolutionStatus == "open" && item.ReviewStatus == "approved" && claims.Subject == authorInternalID
 	item.Bounty, err = s.loadCommunityPostBounty(ctx, internalID)
 	if err != nil {

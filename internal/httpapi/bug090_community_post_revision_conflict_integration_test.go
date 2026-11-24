@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -43,18 +43,14 @@ func TestCommunityPostAutomaticApprovalRejectsAStaleRevisionIntegration(t *testi
 			t.Errorf("drop BUG-090 ephemeral schema: %v", dropErr)
 		}
 	}()
-	suffix := time.Now().UnixNano()
+	claims := newCommunityEditTestActor(t, ctx, pool, "bug090")
+	authorID := claims.Subject
 	setupTx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var authorID, postID int64
+	var postID int64
 	var publicID string
-	if err = setupTx.QueryRow(ctx, `insert into users(username,email,password_hash,status)
-		values($1,$2,'not-used','active') returning id`, fmt.Sprintf("bug090_author_%d", suffix), fmt.Sprintf("bug090_author_%d@example.test", suffix)).Scan(&authorID); err != nil {
-		setupTx.Rollback(ctx)
-		t.Fatal(err)
-	}
 	initial := communityPostSnapshot{Kind: "tutorial", Category: "general", Title: "BUG-090 initial", SourceLocale: "en-US",
 		BodyMarkdown: "initial body", MinecraftVersions: []string{}, Projects: []communityPostReference{}, Resources: []communityPostReference{}}
 	if err = setupTx.QueryRow(ctx, `insert into community_posts(kind,category,author_id,title,source_locale,body_markdown,review_status)
@@ -91,7 +87,6 @@ func TestCommunityPostAutomaticApprovalRejectsAStaleRevisionIntegration(t *testi
 	if detail.PublishedRevisionID != created.RevisionPublicID {
 		t.Fatalf("detail publishedRevisionId = %q, want %q", detail.PublishedRevisionID, created.RevisionPublicID)
 	}
-	claims := security.Claims{Subject: authorID, PermissionRules: []security.PermissionRule{{Code: "admin.*", Allow: true, Priority: 100}}}
 	first := invokeBUG090CommunityPostUpdate(t, ctx, server, claims, publicID, created.RevisionPublicID, "BUG-090 first editor")
 	if first.Code != http.StatusOK {
 		t.Fatalf("first automatic approval status = %d body=%s", first.Code, first.Body.String())

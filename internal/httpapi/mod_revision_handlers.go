@@ -97,7 +97,6 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ossCfg := s.ossConfigFromSettings(r.Context())
-	reviewConfig := loadReviewConfig(r.Context(), s.db)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to start revision")
@@ -129,11 +128,7 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := "pending"
-	if !reviewConfig.ModEdit || canSkipProjectReview(claims, identity) {
-		status = "approved"
-	}
-	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
+	created, ok := createManualProjectEdit(w, r, tx, createContentRevisionParams{
 		EntityType:    "mod",
 		EntityID:      identity.ID,
 		AggregateType: "mod",
@@ -141,24 +136,15 @@ func (s *Server) submitModRevision(w http.ResponseWriter, r *http.Request) {
 		BaseRevision:  requestedBaseRevisionID,
 		Snapshot:      snapshot,
 		Reason:        request.ChangeReason,
-		ActorID:       claims.Subject,
 		Source:        "user",
-		Status:        status,
 		Metadata:      map[string]any{"modId": identity.ID, "siteId": identity.SiteID},
 		Request:       r,
 	})
-	if err != nil {
-		if errors.Is(err, errProjectRevisionBaseChanged) {
-			writeError(w, http.StatusConflict, errProjectRevisionBaseChanged.Error())
-			return
-		}
-		if errors.Is(err, errReviewInProgress) {
-			writeError(w, http.StatusConflict, errReviewInProgress.Error())
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to create revision")
+	if !ok {
 		return
 	}
+	claims = created.actor
+	status := created.status
 	if status == "approved" {
 		canManageAuthors, canManageTeams := projectRelationshipPermissionsForClaims(claims)
 		if err = applyModSnapshot(r.Context(), tx, identity.ID, created.RevisionID, claims.Subject,
@@ -470,8 +456,7 @@ func (s *Server) modIdentity(ctx context.Context, siteID string) (modIdentityRec
 }
 
 func canEditMod(claims security.Claims, identity modIdentityRecord) bool {
-	return claimsAllow(claims, "project.edit") ||
-		claimsAllow(claims, "project.edit."+identity.UniqueID)
+	return canEditProjectRevision(claims, "mod", identity.UniqueID)
 }
 
 func canSkipProjectReview(claims security.Claims, identity modIdentityRecord) bool {
