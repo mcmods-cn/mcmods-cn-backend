@@ -73,7 +73,7 @@ func TestCreatorTeamRoleMetadataRequiresExactServerRouteAndValidCurrentDTO(t *te
 	request := httptest.NewRequest(http.MethodPut, route, strings.NewReader(valid))
 	request.Header.Set("Content-Type", "application/json")
 	_, content := inspectAntiAbuseBody(request)
-	if content != "Developer" || antiAbuseAction(request) != "review.submit" {
+	if content != "Developer" || antiAbuseAction(request, nil) != "review.submit" {
 		t.Fatal("relationship classification must retain the title and normal risk action")
 	}
 }

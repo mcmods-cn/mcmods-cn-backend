@@ -168,15 +168,6 @@ func (s *Service) Evaluate(ctx context.Context, input Evaluation) (Decision, err
 	if input.Now.IsZero() {
 		input.Now = s.now()
 	}
-	// Comment handlers persist idempotency keys under a database uniqueness
-	// constraint. Only a key already committed by the business handler is a
-	// replay; a key seen merely by this middleware must never bypass a challenge.
-	if strings.HasPrefix(input.Action, "comment.") && strings.TrimSpace(input.IdempotencyKey) != "" && s.db != nil {
-		var committed bool
-		if err := s.db.QueryRow(ctx, `select exists(select 1 from comments where author_id=$1 and idempotency_key=$2)`, input.UserID, strings.TrimSpace(input.IdempotencyKey)).Scan(&committed); err == nil && committed {
-			return decision, nil
-		}
-	}
 	settings, err := s.Settings(ctx)
 	if err != nil {
 		// Fail soft for low-risk authenticated traffic. Rate limiting continues

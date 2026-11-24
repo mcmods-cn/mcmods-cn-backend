@@ -25,7 +25,12 @@ func TestAntiAbuseActionClassification(t *testing.T) {
 	for _, test := range tests {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 		request.Header.Set("Content-Type", "application/json")
-		if got := antiAbuseAction(request); got != test.want {
+		var comment *commentSubmission
+		if strings.HasPrefix(test.path, "/api/v1/comment-targets/") {
+			comment = &commentSubmission{}
+			comment.err = decodeJSON(request, &comment.request)
+		}
+		if got := antiAbuseAction(request, comment); got != test.want {
 			t.Errorf("%s %s classified as %q, want %q", test.method, test.path, got, test.want)
 		}
 	}

@@ -20,6 +20,7 @@ type antiAbuseContextKey string
 const (
 	antiAbuseCrawlerContextKey    antiAbuseContextKey = "anti-abuse-crawler"
 	antiAbuseModerationContextKey antiAbuseContextKey = "anti-abuse-moderation"
+	antiAbuseCommentContextKey    antiAbuseContextKey = "anti-abuse-comment"
 )
 
 type antiAbuseResponseRecorder struct {
@@ -47,14 +48,43 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 		writeAPIError(w, http.StatusForbidden, "account_banned", "当前账户处于封禁状态，只能执行登录、退出和必要的账户安全操作", 0, nil)
 		return
 	}
-	action := antiAbuseAction(r)
-	if action == "" || s.antiAbuse == nil || !s.antiAbuse.Enabled() {
+	if s.antiAbuse == nil || !s.antiAbuse.Enabled() {
 		next.ServeHTTP(w, r)
 		return
 	}
-	body, content := inspectAntiAbuseBody(r)
-	if body != nil {
-		r.Body = io.NopCloser(bytes.NewReader(body))
+	var comment *commentSubmission
+	var body []byte
+	var content, submissionKey string
+	if r.Pattern == createCommentRoute {
+		comment = &commentSubmission{}
+		comment.err = decodeJSON(r, &comment.request)
+		r = r.WithContext(context.WithValue(r.Context(), antiAbuseCommentContextKey, comment))
+		if comment.err == nil {
+			content = truncateRunes(comment.request.Body, 20000)
+			if !comment.request.watchOnly() {
+				submissionKey = comment.request.key(r.Header.Get("Idempotency-Key"))
+			}
+		}
+		if submissionKey != "" && len(submissionKey) <= 128 && s.db != nil {
+			err := s.db.QueryRow(r.Context(), `select exists(select 1 from comments where author_id=$1 and idempotency_key=$2)`,
+				claims.Subject, submissionKey).Scan(&comment.replayOnly)
+			if err == nil && comment.replayOnly {
+				// The handler still checks current target access, scope and the row under its lock.
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+	}
+	action := antiAbuseAction(r, comment)
+	if action == "" {
+		next.ServeHTTP(w, r)
+		return
+	}
+	if comment == nil {
+		body, content = inspectAntiAbuseBody(r)
+		if body != nil {
+			r.Body = io.NopCloser(bytes.NewReader(body))
+		}
 	}
 	contentClass := antiabuse.ContentClassBody
 	if creatorTeamRoleMetadataRequest(r, body) {
@@ -66,7 +96,7 @@ func (s *Server) serveProtectedMutation(w http.ResponseWriter, r *http.Request, 
 		Action: action, RateScope: antiAbuseRateScope(r), RateLimitPercent: antiAbuseRateLimitPercent(claims, action),
 		ObjectType: antiAbuseObjectType(r), ObjectKey: antiAbuseObjectKey(r), Content: content, ContentClass: contentClass,
 		FormToken: r.Header.Get("X-Anti-Abuse-Form"), Honeypot: r.Header.Get("X-Anti-Abuse-Trap"),
-		ChallengeProof: r.Header.Get("X-Anti-Abuse-Challenge"), IdempotencyKey: r.Header.Get("Idempotency-Key"), Administrator: claimsAllow(claims, "admin.*"),
+		ChallengeProof: r.Header.Get("X-Anti-Abuse-Challenge"), IdempotencyKey: submissionKey, Administrator: claimsAllow(claims, "admin.*"),
 		CrawlerClass: crawlerClassFromRequest(r), Now: time.Now(),
 	}
 	decision, err := s.antiAbuse.Evaluate(r.Context(), input)
@@ -146,7 +176,7 @@ func antiAbuseModerationRequired(r *http.Request) bool {
 	return value
 }
 
-func antiAbuseAction(r *http.Request) string {
+func antiAbuseAction(r *http.Request, comment *commentSubmission) string {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return ""
 	}
@@ -158,7 +188,7 @@ func antiAbuseAction(r *http.Request) string {
 	}
 	switch {
 	case strings.Contains(requestPath, "/comment-targets/") && strings.HasSuffix(requestPath, "/comments"):
-		if stringBodyField(r, "parentId") != "" {
+		if comment != nil && comment.err == nil && strings.TrimSpace(comment.request.ParentID) != "" {
 			return "comment.reply"
 		}
 		return "comment.create"
@@ -358,23 +388,6 @@ func collectContentStrings(value any, key string, result *[]string) {
 			}
 		}
 	}
-}
-
-func stringBodyField(r *http.Request, field string) string {
-	if r.Body == nil {
-		return ""
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxJSONRequestBodyBytes+1))
-	if err != nil {
-		return ""
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	var values map[string]any
-	if json.Unmarshal(body, &values) != nil {
-		return ""
-	}
-	value, _ := values[field].(string)
-	return strings.TrimSpace(value)
 }
 
 func antiAbuseObjectType(r *http.Request) string {

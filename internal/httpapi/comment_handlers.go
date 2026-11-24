@@ -112,6 +112,25 @@ type createCommentRequest struct {
 	AttachmentFileIDs []string `json:"attachmentFileIds,omitempty"`
 }
 
+const createCommentRoute = "POST /api/v1/comment-targets/{targetType}/{targetKey}/comments"
+
+type commentSubmission struct {
+	request    createCommentRequest
+	err        error
+	replayOnly bool
+}
+
+func (request createCommentRequest) key(header string) string {
+	if key := strings.TrimSpace(request.IdempotencyKey); key != "" {
+		return key
+	}
+	return strings.TrimSpace(header)
+}
+
+func (request createCommentRequest) watchOnly() bool {
+	return strings.TrimSpace(request.ParentID) != "" && isPureCY(request.Body)
+}
+
 type updateCommentRequest struct {
 	Body          string    `json:"body"`
 	BaseUpdatedAt time.Time `json:"baseUpdatedAt"`
@@ -353,16 +372,19 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	var request createCommentRequest
-	if decodeJSON(r, &request) != nil {
+	submission, _ := r.Context().Value(antiAbuseCommentContextKey).(*commentSubmission)
+	if submission != nil {
+		request, err = submission.request, submission.err
+	} else {
+		err = decodeJSON(r, &request)
+	}
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
 	request.Body = strings.TrimSpace(request.Body)
 	request.ParentID = strings.ToLower(strings.TrimSpace(request.ParentID))
-	request.IdempotencyKey = strings.TrimSpace(request.IdempotencyKey)
-	if request.IdempotencyKey == "" {
-		request.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
-	}
+	request.IdempotencyKey = request.key(r.Header.Get("Idempotency-Key"))
 	if request.IdempotencyKey == "" {
 		request.IdempotencyKey = fmt.Sprintf("comment-%d-%d", claims.Subject, time.Now().UnixNano())
 	}
@@ -387,7 +409,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 	if antiAbuseModerationRequired(r) {
 		request.Status = "pending"
 	}
-	if request.ParentID != "" && isPureCY(request.Body) {
+	if request.watchOnly() {
 		// “CY” is a private watch command rather than a public comment action.
 		if !claimsAllow(claims, "comment.watch") {
 			writeError(w, http.StatusForbidden, "无权插眼评论")
@@ -460,6 +482,10 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to load idempotent comment result")
+		return
+	}
+	if submission != nil && submission.replayOnly {
+		writeAPIError(w, http.StatusConflict, "COMMENT_REPLAY_UNAVAILABLE", "原评论记录已变更，请刷新后重试", 0, nil)
 		return
 	}
 	inserted, err := insertCommentTree(r.Context(), tx, target, claims.Subject, request)

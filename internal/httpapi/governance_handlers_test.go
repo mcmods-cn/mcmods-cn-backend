@@ -82,11 +82,11 @@ func TestNormalizeReportRouteType(t *testing.T) {
 
 func TestUnifiedReportsUseAntiAbuseReportPolicy(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/reports", nil)
-	if action := antiAbuseAction(request); action != "report.create" {
+	if action := antiAbuseAction(request, nil); action != "report.create" {
 		t.Fatalf("anti-abuse action=%q, want report.create", action)
 	}
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/reports/evidence/uploads", nil)
-	if action := antiAbuseAction(request); action != "report.create" {
+	if action := antiAbuseAction(request, nil); action != "report.create" {
 		t.Fatalf("evidence anti-abuse action=%q, want report.create", action)
 	}
 }

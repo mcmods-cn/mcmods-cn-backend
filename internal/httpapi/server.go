@@ -356,7 +356,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/projects/{projectType}/{projectId}/editor-applications", s.requirePermission("project.editor.apply", s.projectEditorApplications))
 	s.mux.HandleFunc("GET /api/v1/comment-targets/{targetType}/{targetKey}/comments", s.optionalAuth(s.commentsForTarget))
 	s.mux.HandleFunc("GET /api/v1/comment-targets/{targetType}/{targetKey}/comments/floors/{floor}", s.optionalAuth(s.commentFloor))
-	s.mux.HandleFunc("POST /api/v1/comment-targets/{targetType}/{targetKey}/comments", s.requireAuth(s.commentsForTarget))
+	s.mux.HandleFunc(createCommentRoute, s.requireAuth(s.commentsForTarget))
 	s.mux.HandleFunc("GET /api/v1/comments/{commentId}/replies", s.optionalAuth(s.commentReplies))
 	s.mux.HandleFunc("GET /api/v1/comments/{commentId}/thread", s.optionalAuth(s.commentThread))
 	s.mux.HandleFunc("GET /api/v1/comments/{commentId}/attachments/{fileId}/download", s.optionalAuth(s.downloadCommentAttachment))
