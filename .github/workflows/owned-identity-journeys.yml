@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [creator]
+        case: [fid]
     services:
       postgres:
         image: postgres:18.6

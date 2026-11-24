@@ -37,8 +37,14 @@ try{
   for(const token of [undefined,privateAuth.otherToken]){const{context:c,page:q}=await user(token);const r=await q.goto(imageUrl);assert.equal(r.status(),404);denied.push(r.status());await c.close()}
   Object.assign(evidence,{ownerTextureStatus:200,anonymousAndOther:denied,decodedPNG:[64,64],pngSHA256:digest,imageModes:modes,renderer:'software WebGL and 2D canvas',privateCacheControl:headers['cache-control']});
  }else if(kind==='fid'){
-  const{page,context}=await user(privateAuth.senderToken);await page.goto(origin+'/user?section=economy',{waitUntil:'domcontentloaded',timeout:90000});
-  const mode=page.getByLabel('Recipient identifier',{exact:true}),who=page.getByLabel('Recipient',{exact:true}),amount=page.getByLabel('Amount',{exact:true}),currency=page.getByLabel('Currency',{exact:true}),submit=page.getByRole('button',{name:'Confirm transfer',exact:true});
+  const{page,context}=await user(privateAuth.senderToken);
+  const balances=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/v1/users/me/economy'&&r.request().method()==='GET');
+  await page.goto(origin+'/user?section=economy',{waitUntil:'domcontentloaded',timeout:90000});
+  const mode=page.getByLabel('Recipient identifier',{exact:true}),who=page.getByLabel('Recipient',{exact:true}),amount=page.getByLabel('Amount',{exact:true}),submit=page.getByRole('button',{name:'Confirm transfer',exact:true});
+  const overview=await balances;assert.equal(overview.status(),200);
+  const current=(await overview.json()).data.balances.find(balance=>balance.code===env.currency);assert.equal(current?.balance,1000);
+  const currency=submit.locator('xpath=ancestor::form').locator('label').filter({has:page.getByText('Currency',{exact:true})}).locator('select');
+  await currency.locator('option[value="'+env.currency+'"]').waitFor({state:'attached'});
   await mode.waitFor({timeout:50000});assert.equal(await mode.inputValue(),'identifier');await who.fill(env.recipientPublicId);await amount.fill(String(env.amount));await currency.selectOption(env.currency);
   const writes=[];page.on('request',r=>{if(r.method()==='POST'&&new URL(r.url()).pathname==='/api/v1/users/me/economy/transfer')writes.push(r.postDataJSON())});
   async function execute(status){const p=page.waitForResponse(r=>r.request().method()==='POST'&&new URL(r.url()).pathname==='/api/v1/users/me/economy/transfer');await submit.click();const r=await p;assert.equal(r.status(),status);return r.json()}
