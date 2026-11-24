@@ -69,6 +69,20 @@ func TestRatingEligibilityChangesDuringVoteIntegration(t *testing.T) {
 			`select 1`)
 		assertRating(t, true, 1, 3)
 	})
+	t.Run("global calibration overlaps a vote", func(t *testing.T) {
+		if _, err := pool.Exec(ctx, `update users set security_score=80 where id=71`); err != nil {
+			t.Fatal(err)
+		}
+		runPopularityLockOrder(t, ctx, pool,
+			`update content_ratings set overall_score=2 where id=73`,
+			`select rebuild_content_rating_global_stats('mod')`,
+			`select 1`)
+		var n, score int
+		if err := pool.QueryRow(ctx, `select rating_count,rating_sum from content_rating_global_stats where entity_type='mod'`).
+			Scan(&n, &score); err != nil || n != 1 || score != 2 {
+			t.Fatalf("after concurrent calibration count=%d score=%d: %v", n, score, err)
+		}
+	})
 	t.Run("remove a rated project", func(t *testing.T) {
 		if _, err := pool.Exec(ctx, `update users set security_score=80 where id=71;
 			insert into content_rating_scores(rating_id,dimension_code,score) values(73,'quality',4);

@@ -460,6 +460,9 @@ on conflict(entity_type) do update set rating_count=excluded.rating_count,rating
 func contentRatingGlobalRebuildFunctionStatement() string {
 	return `create or replace function rebuild_content_rating_global_stats(target_type text) returns void as $$
 	begin
+		-- Incremental writes finish on this same row. Take a fresh statement
+		-- snapshot after the lock wait before replacing its count and sum.
+		perform 1 from content_rating_global_stats where entity_type=target_type for update;
 	` + contentRatingGlobalRebuildSQL + `;
 	end;
 	$$ language plpgsql`
