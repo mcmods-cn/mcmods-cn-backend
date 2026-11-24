@@ -39,7 +39,7 @@ func TestFavoriteExportReportAndWorkerFailuresAreObservableIntegration(t *testin
 	if _, err = pool.Exec(ctx, `
 		create temp table favorite_collections(id bigint primary key,public_id text not null);
 		create temp table public_routes(id bigint primary key,public_id text not null);
-		create temp table oss_files(id bigint primary key);
+		create temp table oss_files(id bigint primary key,status text not null default 'active');
 		create temp table favorite_modpack_export_tasks(
 			id bigserial primary key,public_id text not null unique,owner_user_id bigint not null,collection_id bigint,
 			collection_public_id_snapshot text not null,
@@ -69,7 +69,7 @@ func TestFavoriteExportReportAndWorkerFailuresAreObservableIntegration(t *testin
 		values('arch01801',7,1,'arch018c1','ARCH-018 pack','1.0.0','1.20.1','forge','47.4.10','pending','queued',1,1,1);
 		insert into favorite_modpack_export_items(task_id,source_project_type,source_project_name_snapshot,result_type,
 			selected_file_name,file_size,dependency_of)
-		values(1,'mod','Corrupt report item','exported','example.jar','1','"corrupt"'::jsonb)
+		values(1,'mod','Corrupt report item','exported','example.jar','1','[]'::jsonb)
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,15 @@ func TestFavoriteExportReportAndWorkerFailuresAreObservableIntegration(t *testin
 	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: 7}))
 	response := httptest.NewRecorder()
 	server.favoriteModpackExportDetail(response, request)
-	if response.Code != http.StatusInternalServerError {
+	if response.Code != http.StatusOK {
+		t.Fatalf("healthy report status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if _, err = pool.Exec(ctx, `update favorite_modpack_export_items set dependency_of='"corrupt"'::jsonb`); err != nil {
+		t.Fatal(err)
+	}
+	response = httptest.NewRecorder()
+	server.favoriteModpackExportDetail(response, request)
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), "failed to decode export report") {
 		t.Fatalf("corrupt dependency report status = %d, body=%s", response.Code, response.Body.String())
 	}
 
