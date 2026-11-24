@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -8,7 +9,7 @@ import (
 
 func TestAuditDGR001TranslationResultsRecheckCurrentSourceFullHTTPIntegration(t *testing.T) {
 	f := newTEST013Fixture(t)
-	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "content.translate")
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "content.translate", "notification.translate")
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "content.translate")
 	if _, err := f.db.Exec(f.ctx, `insert into content_subjects(subject_type,subject_id,default_locale) values('mod',$1,'en-US') on conflict do nothing`, f.modID); err != nil {
 		t.Fatal(err)
@@ -50,6 +51,30 @@ func TestAuditDGR001TranslationResultsRecheckCurrentSourceFullHTTPIntegration(t 
 		t.Fatal(err)
 	}
 	f.require(t, f.editor, http.MethodGet, path, nil, 200)
+	const marker = "synthetic worker diagnostic"
+	if _, err := f.db.Exec(f.ctx, `insert into ai_tasks(task_uid,task_type,provider,model,status,payload,created_by)
+		values('audit-notification-visible',$1,'fixture','fixture','failed','{}',$2)`, aiTaskNotificationTranslation, f.userIDs[f.editor]); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []string{"content", "community", "notifications"} {
+		task := map[string]string{"content": "audit-catalog-visible", "community": "audit-community-visible", "notifications": "audit-notification-visible"}[scope]
+		if _, err := f.db.Exec(f.ctx, `update ai_tasks set status='failed',error=$2 where task_uid=$1`, task, marker); err != nil {
+			t.Fatal(err)
+		}
+		raw := f.require(t, f.editor, http.MethodGet, "/api/v1/"+scope+"/translations/"+task, nil, http.StatusOK)
+		var result struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}
+		result = decodeTEST022Data[struct {
+			Status string `json:"status"`
+			Error  string `json:"error"`
+		}](t, raw)
+		if result.Status != "failed" || result.Error == "" || bytes.Contains(raw, []byte(marker)) {
+			t.Errorf("%s did not return a safe, actionable failed result: %s", scope, raw)
+		}
+	}
+
 }
 
 func TestAuditREM001HiddenEditorApplicationTargetsFullHTTPIntegration(t *testing.T) {

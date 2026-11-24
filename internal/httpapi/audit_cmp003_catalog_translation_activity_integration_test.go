@@ -229,3 +229,20 @@ func TestAuditCMP003CatalogTranslationReuseCannotCreateExtraTaskRewardHTTPPostgr
 	}
 	t.Log("actual catalogHTTP one task + two reuse202 + typedcache200; real middleware completion/consumer drain/restart; oneCreate/Mod,25XP+3coin once, second real-task reward remains locked; existing policy unchanged")
 }
+
+func TestCatalogTranslationEnqueueReportsStorageFailureWithoutDatabaseDetails(t *testing.T) {
+	x := newAuditCatalogTranslationFixture(t)
+	f := x.f
+	const fault = "synthetic_catalog_outbox_failure"
+	if _, err := f.db.Exec(f.ctx, `alter table nats_outbox add constraint synthetic_catalog_outbox_failure
+		check (event_type<>'ai.content_translation.requested') not valid`); err != nil {
+		t.Fatal(err)
+	}
+	result := x.request(t, map[string]string{"targetLocale": "fr-FR", "sourceLocale": "en-US"})
+	if result.status != http.StatusServiceUnavailable || bytes.Contains(result.raw, []byte(fault)) || !bytes.Contains(result.raw, []byte("Could not queue the translation")) {
+		t.Errorf("catalog enqueue HTTP %d: %s", result.status, result.raw)
+	}
+	if f.number(t, `select count(*) from ai_tasks`) != 0 {
+		t.Fatal("failed outbox write left an AI task")
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,6 +117,9 @@ func TestCommunityTranslationQueuedMeansDurableOutboxAcceptanceIntegration(t *te
 	rejected := invokeBUG092CommunityTranslation(t, ctx, server, claims, publicID, "fr-FR")
 	if rejected.Code != http.StatusServiceUnavailable {
 		t.Fatalf("outbox failure status = %d body=%s, want 503", rejected.Code, rejected.Body.String())
+	}
+	if strings.Contains(rejected.Body.String(), "BUG-092 forced outbox failure") || !strings.Contains(rejected.Body.String(), "Could not queue the translation") {
+		t.Errorf("unexpected public enqueue failure: %s", rejected.Body.String())
 	}
 	var taskCount, eventCount int
 	if err = pool.QueryRow(ctx, `select
