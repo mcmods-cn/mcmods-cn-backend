@@ -35,7 +35,7 @@ func TestBlueprintCatalogKeysetCursorTraversesEverySortBeyondSixtyIntegration(t 
 	defer pool.Close()
 	if _, err = pool.Exec(ctx, `
 		create temporary table users (
-			id bigint primary key, username text not null, avatar_url text not null default ''
+			id bigint primary key, public_id text not null unique, username text not null, avatar_url text not null default ''
 		);
 		create temporary table blueprints (
 			id bigint primary key, public_id text not null, title text not null,
@@ -59,7 +59,7 @@ func TestBlueprintCatalogKeysetCursorTraversesEverySortBeyondSixtyIntegration(t 
 			favorite_count bigint, bayesian_rating numeric(6,4), rating_count bigint,
 			view_count bigint, comment_count bigint
 		);
-		insert into users values(1,'blueprint-owner','');
+		insert into users values(1,'owner0123','blueprint-owner','');
 		insert into blueprints(id,public_id,title,description_markdown,owner_id,created_at,updated_at)
 		select value,'b'||lpad(value::text,8,'0'),
 			case when value%2=0 then 'Castle ' else 'Tower ' end||lpad(value::text,3,'0'),
@@ -90,6 +90,9 @@ func TestBlueprintCatalogKeysetCursorTraversesEverySortBeyondSixtyIntegration(t 
 					}
 					page := loadBlueprintIntegrationPage(t, server, path)
 					for _, item := range page.Items {
+						if item.Uploader.ID != "owner0123" {
+							t.Fatalf("public uploader ID for %s = %q", item.ID, item.Uploader.ID)
+						}
 						if _, duplicate := seen[item.ID]; duplicate {
 							t.Fatalf("page %d repeated %s", pageNumber, item.ID)
 						}
@@ -125,7 +128,10 @@ func TestBlueprintCatalogKeysetCursorTraversesEverySortBeyondSixtyIntegration(t 
 
 type blueprintIntegrationPage struct {
 	Items []struct {
-		ID string `json:"id"`
+		ID       string `json:"id"`
+		Uploader struct {
+			ID string `json:"id"`
+		} `json:"uploader"`
 	} `json:"items"`
 	HasMore    bool   `json:"hasMore"`
 	NextCursor string `json:"nextCursor"`
