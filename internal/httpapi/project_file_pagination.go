@@ -417,14 +417,21 @@ func validateModrinthProjectVersionBatch(versions []modrinthProjectVersion, ids 
 	return nil
 }
 
+func canonicalProjectFileDigest(value string, length int) string {
+	value = strings.TrimSpace(value)
+	if !validHexDigest(value, length) {
+		return ""
+	}
+	return strings.ToLower(value)
+}
+
 func modrinthVersionProjectFiles(version modrinthProjectVersion, providerProjectID string) []providerProjectFile {
 	publishedAt, _ := time.Parse(time.RFC3339, version.DatePublished)
 	result := make([]providerProjectFile, 0, len(version.Files))
 	for index, file := range version.Files {
-		id := strings.ToLower(strings.TrimSpace(file.Hashes["sha1"]))
-		if id == "" {
-			id = strings.ToLower(strings.TrimSpace(file.Hashes["sha512"]))
-		}
+		sha1 := canonicalProjectFileDigest(file.Hashes["sha1"], 40)
+		sha512 := canonicalProjectFileDigest(file.Hashes["sha512"], 128)
+		id := firstNonEmpty(sha1, sha512)
 		if id == "" || !validProviderDownloadURL(file.URL) {
 			continue
 		}
@@ -440,7 +447,7 @@ func modrinthVersionProjectFiles(version modrinthProjectVersion, providerProject
 			VersionName: version.VersionNumber, ReleaseChannel: normalizeReleaseChannel(version.VersionType),
 			GameVersions: uniqueTrimmed(version.GameVersions, 100), Loaders: normalizeLoaders(version.Loaders),
 			PublishedAt: publishedAt, SizeBytes: file.Size, DownloadCount: version.Downloads,
-			SHA1: file.Hashes["sha1"], SHA512: file.Hashes["sha512"], DirectURL: file.URL,
+			SHA1: sha1, SHA512: sha512, DirectURL: file.URL,
 			ProviderProjectID: firstNonEmpty(version.ProjectID, providerProjectID), ProviderVersionID: version.ID,
 			ClientEnvironment: "required", ServerEnvironment: "required", Primary: file.Primary,
 		})
