@@ -971,6 +971,9 @@ func processExportRecipeJSONFiles[T any](ctx context.Context, files map[string]*
 				var value T
 				if err == nil {
 					value, err = decode(raw)
+					if err != nil {
+						err = catalogImportFileHint(err, "the JEI collection schema", name)
+					}
 				}
 				select {
 				case results <- result{name: name, value: value, err: err}:

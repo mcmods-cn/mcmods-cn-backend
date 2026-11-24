@@ -92,7 +92,7 @@ func prepareExportLocaleBundles(
 	translation preparedExportTranslation,
 ) ([]modExportLocaleBundleMedia, []byte, error) {
 	if !exportLocaleBundleFits(translation.Values, maxExportLocaleBundleSize) {
-		return nil, nil, fmt.Errorf("%s translations exceed the uncompressed JSON limit of %d MiB (%d bytes). Reduce this locale's dictionary and upload a new export", translation.Locale, maxExportLocaleBundleSize>>20, maxExportLocaleBundleSize)
+		return nil, nil, catalogImportInputMessage(fmt.Sprintf("%s translations exceed the uncompressed JSON limit of %d MiB (%d bytes). Reduce this locale's dictionary and upload a new export", translation.Locale, maxExportLocaleBundleSize>>20, maxExportLocaleBundleSize))
 	}
 	var compressed bytes.Buffer
 	writer, err := gzip.NewWriterLevel(&compressed, gzip.BestCompression)

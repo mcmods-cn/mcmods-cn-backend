@@ -738,7 +738,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		return nil
 	}
 	if objectKey == "" {
-		return errors.New("export archive is unavailable")
+		return catalogImportInputMessage("export archive is unavailable")
 	}
 	client, cfg, err := s.ossClient(ctx)
 	if err != nil {
@@ -768,27 +768,33 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		return closeErr
 	}
 	if hex.EncodeToString(hasher.Sum(nil)) != expectedHash {
-		return errors.New("export archive SHA-256 mismatch")
+		return catalogImportInputMessage("export archive SHA-256 mismatch")
 	}
 	if err = markCatalogImportPackageContentVerified(ctx, s.db, packageID, sourceFileID, expectedHash); err != nil {
 		return err
 	}
 	info, err := os.Stat(temporaryPath)
-	if err != nil || info.Size() > maxOSSUploadBytes {
-		return errors.New("export archive exceeds size limit")
+	if err != nil {
+		return err
+	}
+	if info.Size() > maxOSSUploadBytes {
+		return catalogImportInputMessage("export archive exceeds size limit")
 	}
 	reader, err := zip.OpenReader(temporaryPath)
 	if err != nil {
-		return fmt.Errorf("open export archive: %w", err)
+		if !errors.Is(err, zip.ErrFormat) {
+			return err
+		}
+		return withCatalogImportHint(err, "Check that the uploaded file is a complete ZIP archive.")
 	}
 	defer reader.Close()
 	files, err := validateExportZIP(reader.File)
 	if err != nil {
-		return err
+		return withCatalogImportHint(err, "Check the ZIP member paths, entry counts, sizes and compression limits.")
 	}
 	manifestFile := files["manifest.json"]
 	if manifestFile == nil {
-		return errors.New("manifest.json is missing")
+		return catalogImportInputMessage("manifest.json is missing")
 	}
 	manifestRaw, err := readExportZIPFile(manifestFile, 4<<20)
 	if err != nil {
@@ -796,7 +802,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	var manifest modExportManifest
 	if err = json.Unmarshal(manifestRaw, &manifest); err != nil {
-		return fmt.Errorf("decode manifest: %w", err)
+		return withCatalogImportHint(err, "Check the JSON in manifest.json.")
 	}
 	if err = validateModExportManifest(manifest); err != nil {
 		return err
@@ -810,11 +816,11 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 		return err
 	}
 	if !targetVersionCompatible {
-		return errors.New("export package Minecraft version or loader does not match the selected data version")
+		return catalogImportInputMessage("export package Minecraft version or loader does not match the selected data version")
 	}
 	capabilitiesFile := files[modExportCapabilitiesPath]
 	if capabilitiesFile == nil {
-		return fmt.Errorf("%s is missing", modExportCapabilitiesPath)
+		return catalogImportInputMessage(modExportCapabilitiesPath + " is missing")
 	}
 	capabilitiesRaw, err := readExportZIPFile(capabilitiesFile, 4<<20)
 	if err != nil {
@@ -822,7 +828,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	capabilities, err := decodeModExportCapabilities(capabilitiesRaw, manifest)
 	if err != nil {
-		return err
+		return withCatalogImportHint(err, "Check the schema, environment and capability declarations in "+modExportCapabilitiesPath+".")
 	}
 	partial := manifest.ErrorCount > 0
 	translationValuesSkipped := 0
@@ -853,7 +859,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	namespaces := normalizeExportNamespaces(manifest.Configuration.Namespaces)
 	if len(namespaces) == 0 {
-		return errors.New("manifest contains no valid namespace")
+		return catalogImportInputMessage("manifest contains no valid namespace")
 	}
 	paused, err := s.pauseCatalogImportForMODIDConfirmation(ctx, jobID, runToken, modID, expectedHash, importNamespaceCounts(namespaces))
 	if err != nil {
@@ -867,7 +873,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	categoryFile := files["recipes/jei/categories.json"]
 	if categoryFile == nil {
-		return fmt.Errorf("export package is missing recipes/jei/categories.json")
+		return catalogImportInputMessage("export package is missing recipes/jei/categories.json")
 	}
 	categoryData, readErr := readExportZIPFile(categoryFile, maxExportJSONSize)
 	if readErr != nil {
@@ -882,7 +888,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	recipeScope, scopeErr := newExportRecipeImportScope(revisions, categoryData)
 	if scopeErr != nil {
-		return scopeErr
+		return withCatalogImportHint(scopeErr, "Check recipe ownership, IDs and template declarations in recipes/jei/categories.json.")
 	}
 	metadata := catalogImportMetadata{
 		SchemaVersion: manifest.SchemaVersion, ExporterVersion: manifest.ExporterVersion,
@@ -976,14 +982,14 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	}
 	baseRecipeFile := files["recipes/recipes.json"]
 	if baseRecipeFile == nil {
-		return fmt.Errorf("export package is missing recipes/recipes.json")
+		return catalogImportInputMessage("export package is missing recipes/recipes.json")
 	}
 	baseRecipeData, readErr := readExportZIPFile(baseRecipeFile, maxExportJSONSize)
 	if readErr != nil {
 		return fmt.Errorf("read recipes/recipes.json: %w", readErr)
 	}
 	if err = validateExportBaseRecipeDocument(baseRecipeData); err != nil {
-		return err
+		return withCatalogImportHint(err, "Check the recipe schema and counts in recipes/recipes.json.")
 	}
 	if err = s.runCatalogImportStagingTransaction(ctx, jobID, runToken, func(tx pgx.Tx) error {
 		return recipeScope.importTypes(ctx, tx, packageID)
@@ -996,7 +1002,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if err = processExportRecipeJSONFiles(ctx, files, "recipes/jei/templates/", decodeExportJEITemplateCollection,
 		func(name string, document exportJEITemplateCollection) error {
 			if queueErr := recipeScope.queueTemplates(writeBatch, name, document); queueErr != nil {
-				return queueErr
+				return catalogImportFileHint(queueErr, "the JEI template collection", name)
 			}
 			if writeBatch.shouldFlush() {
 				return flushWriteBatch()
@@ -1025,7 +1031,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 	if err = processExportRecipeJSONFiles(ctx, files, "recipes/jei/recipes/", decodeExportJEIRecipeCollection,
 		func(name string, document exportJEIRecipeCollection) error {
 			if queueErr := recipeScope.queueRecipes(writeBatch, resourceResolver, packageID, name, document); queueErr != nil {
-				return queueErr
+				return catalogImportFileHint(queueErr, "the JEI recipe slots and candidates", name)
 			}
 			if writeBatch.shouldFlush() {
 				return flushWriteBatch()
@@ -1058,7 +1064,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			case isExportTranslationFile(loaded.Name):
 				translation, prepareErr := prepareExportTranslation(loaded.Name, loaded.Data)
 				if prepareErr != nil {
-					return prepareErr
+					return catalogImportFileHint(prepareErr, "the locale and translation dictionary", loaded.Name)
 				}
 				batchSkippedTranslations += translation.Total - len(translation.Values)
 				if _, editable := supportedEditableContentLocales[translation.Locale]; editable {
@@ -1081,7 +1087,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			case isExportRegistryFile(loaded.Name):
 				rows, prepareErr := prepareExportRegistryResources(resourceResolver, revisions, loaded.Name, loaded.Data)
 				if prepareErr != nil {
-					return prepareErr
+					return catalogImportFileHint(prepareErr, "the registry entries and namespaces", loaded.Name)
 				}
 				if len(rows) > 0 {
 					preparedNormalized = append(preparedNormalized, preparedExportNormalizedFile{catalogRows: rows})
@@ -1089,7 +1095,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			case loaded.Name == "tags/tags.json":
 				rows, memberCount, prepareErr := decodeExportTags(revisions, loaded.Data)
 				if prepareErr != nil {
-					return prepareErr
+					return withCatalogImportHint(prepareErr, "Check the tag schema and member count in tags/tags.json.")
 				}
 				if len(rows) > 0 {
 					preparedNormalized = append(preparedNormalized, preparedExportNormalizedFile{
@@ -1150,10 +1156,10 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			extension := strings.ToLower(path.Ext(name))
 			if extension == ".json" && exportDocumentKind(name) != "" {
 				if int64(len(data)) > maxExportJSONSize {
-					return fmt.Errorf("JSON asset too large: %s", name)
+					return catalogImportInputMessage(fmt.Sprintf("JSON asset exceeds %d bytes (path SHA-256 %s).", maxExportJSONSize, sha256Hex([]byte(name))))
 				}
 				if err = queueExportDocumentEntries(writeBatch, resourceResolver, revisions, name, data); err != nil {
-					return err
+					return catalogImportFileHint(err, "the catalog data and namespaces", name)
 				}
 				if exportPurposeRetainsText(assetPlan[name]) {
 					data, err = projectExportAsset(name, data, assetPlan[name])
@@ -1182,7 +1188,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 			case ".png":
 				data, err = minimizeExportPNG(data)
 				if err != nil {
-					return fmt.Errorf("minimize PNG path_sha256=%s: %w", sha256Hex([]byte(name)), err)
+					return catalogImportFileHint(err, "the PNG image data", name)
 				}
 				var media modExportPNGMedia
 				if media, err = inspectExportPNG(ctx, cfg, revisionID, uniqueID, name, data, resourceResolver); err != nil {
@@ -1198,7 +1204,7 @@ func (s *Server) importMCModsExportJob(ctx context.Context, jobID string) (resul
 				}
 			case ".json", ".obj", ".mtl", ".snbt", ".mcmeta":
 				if int64(len(data)) > maxExportJSONSize && extension == ".json" {
-					return fmt.Errorf("JSON asset too large: %s", name)
+					return catalogImportInputMessage(fmt.Sprintf("JSON asset exceeds %d bytes (path SHA-256 %s).", maxExportJSONSize, sha256Hex([]byte(name))))
 				}
 				if exportPurposeRetainsText(assetPlan[name]) {
 					data, err = projectExportAsset(name, data, assetPlan[name])

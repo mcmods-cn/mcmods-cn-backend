@@ -35,7 +35,7 @@ func exportAssetRegistrationError(purpose exportAssetPurpose, name string) error
 	// Paths and field names are untrusted and may themselves contain private
 	// values. A digest lets the owner match its local archive without persisting
 	// arbitrary exception text or input data in job diagnostics.
-	return fmt.Errorf("unregistered_export_asset: purpose=%s path_sha256=%s; register a typed projection for this asset/extension before importing; see docs/import-asset-registry.md", purpose, sha256Hex([]byte(name)))
+	return catalogImportInputMessage(fmt.Sprintf("unregistered_export_asset: purpose=%s path_sha256=%s; register a typed projection for this asset/extension before importing; see docs/import-asset-registry.md", purpose, sha256Hex([]byte(name))))
 }
 
 func buildExportAssetPlan(files map[string]*zip.File) (exportAssetPlan, error) {

@@ -324,7 +324,7 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 		return nil
 	}
 	if objectKey == "" {
-		return errors.New("catalog import source file is unavailable")
+		return catalogImportInputMessage("catalog import source file is unavailable")
 	}
 	client, cfg, err := s.ossClient(ctx)
 	if err != nil {
@@ -346,7 +346,7 @@ func (s *Server) importEmbeddedIconCatalogJob(ctx context.Context, jobID, import
 	}
 	namespaces := embeddedIconCatalogNamespaces(entries)
 	if len(namespaces) == 0 {
-		return errors.New("catalog contains no importable resources")
+		return catalogImportInputMessage("catalog contains no importable resources")
 	}
 	paused, err := s.pauseCatalogImportForMODIDConfirmation(ctx, jobID, runToken, modID, expectedHash, embeddedImportNamespaceCounts(entries))
 	if err != nil {
@@ -538,10 +538,10 @@ func downloadEmbeddedIconCatalog(ctx context.Context, client *aliyunoss.Client, 
 		return nil, err
 	}
 	if written > embeddedIconImportMaxBytes {
-		return nil, errors.New("catalog import exceeds size limit")
+		return nil, catalogImportInputMessage("catalog import exceeds size limit")
 	}
 	if hex.EncodeToString(hasher.Sum(nil)) != expectedHash {
-		return nil, errors.New("catalog import SHA-256 mismatch")
+		return nil, catalogImportInputMessage("catalog import SHA-256 mismatch")
 	}
 	return buffer.Bytes(), nil
 }
@@ -553,12 +553,12 @@ func decodeEmbeddedIconCatalogForSource(raw []byte, source string) ([]embeddedIc
 	}
 	raw = bytes.TrimSpace(bytes.TrimPrefix(raw, []byte{0xef, 0xbb, 0xbf}))
 	if len(raw) == 0 {
-		return nil, errors.New("catalog import is empty")
+		return nil, catalogImportInputMessage("catalog import is empty")
 	}
 	entries := make([]embeddedIconCatalogEntry, 0)
 	if raw[0] == '[' {
 		if err := json.Unmarshal(raw, &entries); err != nil {
-			return nil, fmt.Errorf("decode catalog JSON array: %w", err)
+			return nil, withCatalogImportHint(fmt.Errorf("decode catalog JSON array: %w", err), "Check the JSON catalog array.")
 		}
 	} else {
 		for lineIndex, line := range bytes.Split(raw, []byte{'\n'}) {
@@ -568,16 +568,16 @@ func decodeEmbeddedIconCatalogForSource(raw []byte, source string) ([]embeddedIc
 			}
 			var entry embeddedIconCatalogEntry
 			if err := json.Unmarshal(line, &entry); err != nil {
-				return nil, fmt.Errorf("decode catalog JSON line %d: %w", lineIndex+1, err)
+				return nil, withCatalogImportHint(fmt.Errorf("decode catalog JSON line %d: %w", lineIndex+1, err), fmt.Sprintf("Check the catalog JSON on line %d.", lineIndex+1))
 			}
 			entries = append(entries, entry)
 		}
 	}
 	if len(entries) == 0 {
-		return nil, errors.New("catalog import contains no entries")
+		return nil, catalogImportInputMessage("catalog import contains no entries")
 	}
 	if len(entries) > maxExportFileCount {
-		return nil, errors.New("catalog import contains too many entries")
+		return nil, catalogImportInputMessage("catalog import contains too many entries")
 	}
 	seen := make(map[string]int, len(entries))
 	validated := make([]embeddedIconCatalogEntry, 0, len(entries))
@@ -592,13 +592,13 @@ func decodeEmbeddedIconCatalogForSource(raw []byte, source string) ([]embeddedIc
 			normalizeIconRendererCatalogEntry(entry)
 		}
 		if !embeddedIconResourceIDPattern.MatchString(entry.RegisterName) {
-			return nil, fmt.Errorf("entry %d has invalid registerName %q", index+1, entry.RegisterName)
+			return nil, withCatalogImportHint(fmt.Errorf("entry %d has invalid registerName %q", index+1, entry.RegisterName), fmt.Sprintf("entry %d has invalid registerName", index+1))
 		}
 		if entry.Type != "item" && entry.Type != "block" && entry.Type != "entity" {
-			return nil, fmt.Errorf("entry %d has unsupported type %q", index+1, entry.Type)
+			return nil, withCatalogImportHint(fmt.Errorf("entry %d has unsupported type %q", index+1, entry.Type), fmt.Sprintf("entry %d has unsupported type", index+1))
 		}
 		if entry.Type == "entity" && source != irrImportSource && source != iconRendererImportSource {
-			return nil, fmt.Errorf("entry %d has unsupported type %q", index+1, entry.Type)
+			return nil, withCatalogImportHint(fmt.Errorf("entry %d has unsupported type %q", index+1, entry.Type), fmt.Sprintf("entry %d has unsupported type", index+1))
 		}
 		key := entry.Type + "\x00" + entry.RegisterName
 		if existingIndex, duplicate := seen[key]; duplicate {
@@ -606,12 +606,12 @@ func decodeEmbeddedIconCatalogForSource(raw []byte, source string) ([]embeddedIc
 				validated[existingIndex].IRRVariants = append(validated[existingIndex].IRRVariants, irrCatalogVariant(*entry))
 				continue
 			}
-			return nil, fmt.Errorf("entry %d duplicates %s", index+1, entry.RegisterName)
+			return nil, withCatalogImportHint(fmt.Errorf("entry %d duplicates %s", index+1, entry.RegisterName), fmt.Sprintf("entry %d duplicates an earlier resource", index+1))
 		}
 		seen[key] = len(validated)
 		if strings.TrimSpace(entry.SmallIcon) == "" && strings.TrimSpace(entry.LargeIcon) == "" &&
 			(entry.Type != "entity" || source != irrImportSource) {
-			return nil, fmt.Errorf("entry %d has no icon", index+1)
+			return nil, catalogImportInputMessage(fmt.Sprintf("entry %d has no icon", index+1))
 		}
 		if source == irrImportSource {
 			entry.IRRVariants = []embeddedIconIRRVariant{irrCatalogVariant(*entry)}
@@ -731,7 +731,7 @@ func buildEmbeddedIconImport(ctx context.Context, cfg ossConfigPayload, uniqueID
 		small, smallErr := decodeEmbeddedIconPNG(entry.SmallIcon)
 		large, largeErr := decodeEmbeddedIconPNG(entry.LargeIcon)
 		if smallErr != nil && largeErr != nil {
-			return embeddedIconImportBuild{}, fmt.Errorf("decode icons: small=%v, large=%v", smallErr, largeErr)
+			return embeddedIconImportBuild{}, catalogImportFileHint(fmt.Errorf("decode icons: small=%v, large=%v", smallErr, largeErr), "the icon for the catalog resource", entry.RegisterName)
 		}
 		for _, size := range []int{32, 128, 256} {
 			sourceImage := large

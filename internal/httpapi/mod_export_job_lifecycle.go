@@ -82,10 +82,39 @@ func (s *Server) updateModExportJob(ctx context.Context, jobID, runToken, status
 	return nil
 }
 
+// Only caller-actionable, application-owned messages may enter user records.
+// Archive values and wrapped causes stay available to the worker.
+type catalogImportInputError struct {
+	message string
+	cause   error
+}
+
+func (failure catalogImportInputError) Error() string {
+	if failure.cause != nil {
+		return failure.cause.Error()
+	}
+	return failure.message
+}
+
+func (failure catalogImportInputError) Unwrap() error { return failure.cause }
+
+func catalogImportInputMessage(message string) error {
+	return catalogImportInputError{message: message}
+}
+
+func withCatalogImportHint(cause error, hint string) error {
+	return catalogImportInputError{message: hint, cause: cause}
+}
+
+func catalogImportFileHint(cause error, purpose, name string) error {
+	return withCatalogImportHint(cause, fmt.Sprintf("Check %s in the export package (path SHA-256 %s).", purpose, sha256Hex([]byte(name))))
+}
+
 // Infrastructure errors can contain the storage endpoint, a local staging path
 // or backend details. Keep the original error for the worker; persist only
 // the user-facing message in the job, history and notification.
 func catalogImportFailureMessage(err error) string {
+	var input catalogImportInputError
 	var operation *aliyunoss.OperationError
 	var service *aliyunoss.ServiceError
 	var client *aliyunoss.ClientError
@@ -94,6 +123,8 @@ func catalogImportFailureMessage(err error) string {
 	var database *pgconn.PgError
 	var connection *pgconn.ConnectError
 	switch {
+	case errors.As(err, &input):
+		return input.message
 	case errors.As(err, &operation), errors.As(err, &service), errors.As(err, &client), errors.As(err, &transport):
 		return "Object storage is unavailable. Retry the import or contact an administrator with the job ID."
 	case errors.As(err, &file):
@@ -101,7 +132,7 @@ func catalogImportFailureMessage(err error) string {
 	case errors.As(err, &database), errors.As(err, &connection):
 		return "The import worker could not save its data. Contact an administrator with the job ID."
 	default:
-		return err.Error()
+		return "The import failed. Contact an administrator with the job ID."
 	}
 }
 

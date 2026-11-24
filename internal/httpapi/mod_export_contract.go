@@ -3,7 +3,6 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -34,22 +33,22 @@ type modExportCapabilityDocument struct {
 
 func validateModExportManifest(manifest modExportManifest) error {
 	if manifest.SchemaVersion != modExportSchemaVersion {
-		return errors.New("unsupported_schema")
+		return catalogImportInputMessage("unsupported_schema")
 	}
 	if manifest.Status != "complete" {
-		return fmt.Errorf("manifest status is %s", manifest.Status)
+		return withCatalogImportHint(fmt.Errorf("manifest status is %s", manifest.Status), "Use a completed export package.")
 	}
 	if !strings.EqualFold(strings.TrimSpace(manifest.PackageFormat), modExportExpectedPackage) {
-		return fmt.Errorf("unsupported package format: %s", manifest.PackageFormat)
+		return withCatalogImportHint(fmt.Errorf("unsupported package format: %s", manifest.PackageFormat), "Use an exporter ZIP package.")
 	}
 	if manifest.Configuration.AllNamespaces {
-		return errors.New("this website import targets one project: export explicit namespace(s) for that project instead of all_namespaces=true")
+		return catalogImportInputMessage("this website import targets one project: export explicit namespace(s) for that project instead of all_namespaces=true")
 	}
 	if strings.TrimSpace(manifest.MinecraftVersion) == "" || strings.TrimSpace(manifest.ExporterVersion) == "" || strings.TrimSpace(manifest.Loader) == "" || len(manifest.Configuration.Namespaces) == 0 {
-		return errors.New("manifest required fields are missing")
+		return catalogImportInputMessage("manifest required fields are missing")
 	}
 	if len(normalizeExportNamespaces(manifest.Configuration.Namespaces)) == 0 {
-		return errors.New("manifest contains no valid namespace")
+		return catalogImportInputMessage("manifest contains no valid namespace")
 	}
 	return nil
 }
@@ -66,7 +65,7 @@ func decodeModExportCapabilities(raw []byte, manifest modExportManifest) ([]modE
 		return nil, fmt.Errorf("capability format contract %q does not match manifest", document.FormatContract)
 	}
 	if document.MinecraftVersion != manifest.MinecraftVersion || !strings.EqualFold(strings.TrimSpace(document.Loader), strings.TrimSpace(manifest.Loader)) {
-		return nil, errors.New("capability environment does not match manifest")
+		return nil, catalogImportInputMessage("capability environment does not match manifest")
 	}
 
 	result := make([]modExportCapability, 0, len(document.Capabilities))
