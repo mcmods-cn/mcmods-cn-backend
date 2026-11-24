@@ -2,26 +2,33 @@ package httpapi
 
 import (
 	"context"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Request mutations may declare permission names in their business transaction;
-// startup route registration uses the same statement without changing grants.
-func registerDeclaredPermissionWithQueryer(ctx context.Context, query interface {
+type permissionDeclarationStore interface {
+	databaseQuery
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}, permission string) error {
-	permission = normalizeCode(permission)
-	if permission == "" {
+}
+
+// A conflict-only INSERT would still fire the statement-level RBAC generation
+// trigger. A warm startup only reads the registered names. A shop mutation
+// passes its own transaction, so creation of new names follows the item commit.
+func registerDeclaredPermissions(ctx context.Context, db permissionDeclarationStore, codes []string) error {
+	codes = normalizeCodes(codes)
+	if len(codes) == 0 {
 		return nil
 	}
-	module := permission
-	if index := strings.Index(permission, "."); index > 0 {
-		module = permission[:index]
+	var missing []string
+	if err := db.QueryRow(ctx, `select array(select c.code from unnest($1::text[]) as c(code)
+		where not exists(select 1 from permissions p where p.code=c.code) order by c.code)`, codes).Scan(&missing); err != nil {
+		return err
 	}
-	_, err := query.Exec(ctx, `insert into permissions (code, module, name, description)
- values ($1, $2, $1, 'Permission declared by application code')
- on conflict (code) do nothing`, permission, module)
+	if len(missing) == 0 {
+		return nil
+	}
+	_, err := db.Exec(ctx, `insert into permissions(code,module,name,description)
+		select code,split_part(code,'.',1),code,'Permission declared by application code'
+		from unnest($1::text[]) as c(code) order by code on conflict(code) do nothing`, missing)
 	return err
 }
