@@ -79,16 +79,11 @@ type createProjectFileRequest struct {
 }
 
 func (s *Server) projectFiles(w http.ResponseWriter, r *http.Request) {
-	project, err := s.projectFileContext(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, http.StatusNotFound, "project not found")
+	project, ok := s.requestProjectFileContext(w, r, http.StatusBadRequest)
+	if !ok {
 		return
 	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	canUpload := s.canUploadProjectFile(r.Context(), currentClaims(r).Subject, project.ProjectID)
+	canUpload := claimsAllow(currentClaims(r), project.uploadPermission())
 	if project.ReviewStatus != "approved" && !canUpload {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
@@ -155,17 +150,16 @@ func (s *Server) projectFiles(w http.ResponseWriter, r *http.Request) {
 		"hasMore": page.HasMore, "nextCursor": page.NextCursor,
 		"versions": versions, "loaders": loaders,
 		"providers": providers, "warnings": warnings, "canUpload": canUpload,
-		"uploadPermission": "project.download.upload." + project.ProjectID,
+		"uploadPermission": project.uploadPermission(),
 	})
 }
 
 func (s *Server) projectFile(w http.ResponseWriter, r *http.Request) {
-	project, err := s.projectFileContext(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "project not found")
+	project, ok := s.requestProjectFileContext(w, r, http.StatusNotFound)
+	if !ok {
 		return
 	}
-	if !s.canUploadProjectFile(r.Context(), currentClaims(r).Subject, project.ProjectID) {
+	if !claimsAllow(currentClaims(r), project.uploadPermission()) {
 		writeError(w, http.StatusForbidden, "project file upload permission is required")
 		return
 	}
@@ -192,6 +186,9 @@ func (s *Server) projectFile(w http.ResponseWriter, r *http.Request) {
 	approved, statusErr := projectFileTargetIsApprovedTx(r.Context(), tx, project.ProjectType, project.ProjectInternalID)
 	if statusErr != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load project publication status")
+		return
+	}
+	if !project.requireCurrentUploader(w, r, tx) {
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `update project_files set status='deleted',updated_at=now() where public_id=$1`, publicID); err != nil {
@@ -295,6 +292,9 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 		writeError(w, http.StatusInternalServerError, "failed to load project publication status")
 		return
 	}
+	if !project.requireCurrentUploader(w, r, tx) {
+		return
+	}
 	if request.DisplayName == "" {
 		request.DisplayName = fileName
 	}
@@ -303,14 +303,17 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	if publicationStatus == "active" {
 		publicationGeneration = 1
 	}
-	var publicID string
+	file := projectFileItem{Source: "internal", DownloadCountSource: "mcmods", ScanStatus: scanStatus}
 	err = tx.QueryRow(r.Context(), `insert into project_files(
 		project_type,project_internal_id,oss_file_id,display_name,version_name,release_channel,game_versions,loaders,
 		file_name,content_type,size_bytes,sha256,uploaded_by,status,publication_generation)
-		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) returning public_id`,
+		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		returning public_id,display_name,file_name,version_name,release_channel,game_versions,loaders,created_at,size_bytes,download_count,sha256`,
 		project.ProjectType, project.ProjectInternalID, fileID, request.DisplayName, request.VersionName,
 		request.ReleaseChannel, request.GameVersions, request.Loaders, fileName, contentType, sizeBytes, sha256,
-		currentClaims(r).Subject, publicationStatus, publicationGeneration).Scan(&publicID)
+		currentClaims(r).Subject, publicationStatus, publicationGeneration).
+		Scan(&file.ID, &file.DisplayName, &file.FileName, &file.VersionName, &file.ReleaseChannel, &file.GameVersions,
+			&file.Loaders, &file.PublishedAt, &file.SizeBytes, &file.DownloadCount, &file.SHA256)
 	if err != nil {
 		if isUniqueViolation(err) {
 			writeError(w, http.StatusConflict, "this uploaded file is already attached to the project")
@@ -321,13 +324,13 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 	}
 	metadata, _ := json.Marshal(map[string]any{"projectType": project.ProjectType, "projectId": project.ProjectID, "ossFileId": request.OSSFileID})
 	if _, err = tx.Exec(r.Context(), `insert into audit_events(aggregate_type,aggregate_key,actor_id,action,ip,user_agent,metadata)
-		values('project_file',$1,$2,'create',$3,$4,$5::jsonb)`, publicID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata); err != nil {
+		values('project_file',$1,$2,'create',$3,$4,$5::jsonb)`, file.ID, currentClaims(r).Subject, s.requestClientLocation(r).IP, r.UserAgent(), metadata); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to persist project file creation audit")
 		return
 	}
 	if approved && publicationStatus == "active" {
 		if err = enqueueProjectFileUpdateEventTx(r.Context(), tx, project, currentClaims(r).Subject,
-			"download_added", publicID, publicationGeneration); err != nil {
+			"download_added", file.ID, publicationGeneration); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to enqueue project update")
 			return
 		}
@@ -340,11 +343,7 @@ func (s *Server) createProjectFile(w http.ResponseWriter, r *http.Request, proje
 		writeError(w, http.StatusInternalServerError, "failed to commit project file creation")
 		return
 	}
-	file, err := s.internalProjectFileByPublicID(r.Context(), project, publicID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to read created project file")
-		return
-	}
+	file.DownloadPath = projectFileDownloadPath(project, file.Source, file.ID)
 	writeJSON(w, http.StatusCreated, file)
 }
 
@@ -498,12 +497,11 @@ func (s *Server) completeProjectFileUpload(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) authorizeProjectFileUpload(w http.ResponseWriter, r *http.Request) (projectFileContext, bool) {
-	project, err := s.projectFileContext(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
-	if err != nil {
-		writeError(w, http.StatusNotFound, "project not found")
+	project, ok := s.requestProjectFileContext(w, r, http.StatusNotFound)
+	if !ok {
 		return projectFileContext{}, false
 	}
-	if !s.canUploadProjectFile(r.Context(), currentClaims(r).Subject, project.ProjectID) {
+	if !claimsAllow(currentClaims(r), project.uploadPermission()) {
 		writeError(w, http.StatusForbidden, "project file upload permission is required")
 		return projectFileContext{}, false
 	}
@@ -511,8 +509,11 @@ func (s *Server) authorizeProjectFileUpload(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
-	project, err := s.projectFileContext(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
-	if err != nil || project.ReviewStatus != "approved" {
+	project, ok := s.requestProjectFileContext(w, r, http.StatusNotFound)
+	if !ok {
+		return
+	}
+	if project.ReviewStatus != "approved" {
 		writeError(w, http.StatusNotFound, "project not found")
 		return
 	}
@@ -529,7 +530,7 @@ func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
 		}
 		defer tx.Rollback(r.Context())
 		var objectKey, fileName string
-		err = tx.QueryRow(r.Context(), `select oss.object_key,project_file.file_name
+		err := tx.QueryRow(r.Context(), `select oss.object_key,project_file.file_name
 			from project_files project_file join oss_files oss
 				on oss.id=project_file.oss_file_id and oss.status='active' and oss.scan_status in ('clean','trusted_generated')
 			where project_file.public_id=$1 and project_file.project_type=$2 and project_file.project_internal_id=$3 and project_file.status='active' for share of oss`,
@@ -643,11 +644,28 @@ func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"url": downloadURL, "filename": selected.FileName})
 }
 
+var errInvalidProjectFileReference = errors.New("invalid project reference")
+
+func (s *Server) requestProjectFileContext(w http.ResponseWriter, r *http.Request, invalidStatus int) (projectFileContext, bool) {
+	project, err := s.projectFileContext(r.Context(), r.PathValue("projectType"), r.PathValue("projectId"))
+	switch {
+	case err == nil:
+		return project, true
+	case errors.Is(err, errInvalidProjectFileReference) && invalidStatus == http.StatusBadRequest:
+		writeError(w, invalidStatus, errInvalidProjectFileReference.Error())
+	case errors.Is(err, pgx.ErrNoRows), errors.Is(err, errInvalidProjectFileReference):
+		writeError(w, http.StatusNotFound, "project not found")
+	default:
+		writeError(w, http.StatusServiceUnavailable, "project downloads are temporarily unavailable")
+	}
+	return projectFileContext{}, false
+}
+
 func (s *Server) projectFileContext(ctx context.Context, rawType, rawID string) (projectFileContext, error) {
 	projectType := normalizeProjectFileType(rawType)
 	projectID := strings.ToLower(strings.TrimSpace(rawID))
 	if projectType == "" || len(projectID) != 9 {
-		return projectFileContext{}, errors.New("invalid project reference")
+		return projectFileContext{}, errInvalidProjectFileReference
 	}
 	result := projectFileContext{ProjectType: projectType, ProjectID: projectID}
 	var err error
@@ -666,7 +684,7 @@ func (s *Server) projectFileContext(ctx context.Context, rawType, rawID string) 
 			Scan(&result.ProjectInternalID, &result.SiteID, &result.ReviewStatus,
 				&result.ModrinthProjectID, &result.CurseForgeProjectID)
 	default:
-		return projectFileContext{}, errors.New("project type is not connected to downloads yet")
+		return projectFileContext{}, errInvalidProjectFileReference
 	}
 	return result, err
 }
@@ -705,27 +723,20 @@ func projectFileExtensionAllowed(projectType, extension string) bool {
 	}
 }
 
-func (s *Server) canUploadProjectFile(ctx context.Context, userID int64, projectID string) bool {
-	return userID > 0 && s.userHasPermission(ctx, userID, "project.download.upload."+projectID)
+func (project projectFileContext) uploadPermission() string {
+	return "project.download.upload." + project.ProjectID
 }
 
-func (s *Server) internalProjectFileByPublicID(ctx context.Context, project projectFileContext, publicID string) (projectFileItem, error) {
-	var item projectFileItem
-	err := s.db.QueryRow(ctx, `select project_file.id,project_file.public_id,project_file.display_name,project_file.file_name,
-		project_file.version_name,project_file.release_channel,project_file.game_versions,project_file.loaders,
-		project_file.created_at,project_file.size_bytes,project_file.download_count,project_file.sha256,oss.scan_status
-		from project_files project_file join oss_files oss on oss.id=project_file.oss_file_id and oss.status='active'
-		where project_file.public_id=$1 and project_file.project_type=$2 and project_file.project_internal_id=$3
-			and project_file.status in ('processing','active')`, strings.ToLower(strings.TrimSpace(publicID)), project.ProjectType, project.ProjectInternalID).
-		Scan(&item.internalID, &item.ID, &item.DisplayName, &item.FileName, &item.VersionName, &item.ReleaseChannel,
-			&item.GameVersions, &item.Loaders, &item.PublishedAt, &item.SizeBytes, &item.DownloadCount, &item.SHA256, &item.ScanStatus)
-	if err != nil {
-		return projectFileItem{}, err
+func (project projectFileContext) requireCurrentUploader(w http.ResponseWriter, r *http.Request, tx pgx.Tx) bool {
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return false
 	}
-	item.Source = "internal"
-	item.DownloadCountSource = "mcmods"
-	item.DownloadPath = projectFileDownloadPath(project, item.Source, item.ID)
-	return item, nil
+	if !claimsAllow(actor, project.uploadPermission()) {
+		writeError(w, http.StatusForbidden, "project file upload permission is required")
+		return false
+	}
+	return true
 }
 
 func providerFileItem(project projectFileContext, file providerProjectFile) projectFileItem {

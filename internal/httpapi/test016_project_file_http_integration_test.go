@@ -260,6 +260,20 @@ func (f test016FileFixture) attach(t *testing.T, token, base, ossID string) stri
 	if err := json.Unmarshal(raw, &response); err != nil || response.Data.ID == "" {
 		t.Fatalf("file lacks ID: %v %s", err, raw)
 	}
+	var name, digest, scan string
+	var size int64
+	if err := f.db.QueryRow(f.ctx, `select original_name,sha256,scan_status,size_bytes from oss_files where public_id=$1`, ossID).
+		Scan(&name, &digest, &scan, &size); err != nil {
+		t.Fatal(err)
+	}
+	file, want := response.Data, test016Metadata(ossID)
+	if file.DisplayName != want.DisplayName || file.VersionName != want.VersionName || file.ReleaseChannel != want.ReleaseChannel ||
+		!reflect.DeepEqual(file.GameVersions, want.GameVersions) || !reflect.DeepEqual(file.Loaders, want.Loaders) ||
+		file.FileName != name || file.SizeBytes != size || file.SHA256 != digest || file.ScanStatus != scan ||
+		file.PublishedAt.IsZero() || file.DownloadCount != 0 || file.DownloadCountSource != "mcmods" ||
+		file.Source != "internal" || file.DownloadPath != base+"/internal/"+file.ID+"/download" {
+		t.Fatalf("publication receipt differs from the submitted metadata or stored artifact: %#v", file)
+	}
 	return response.Data.ID
 }
 

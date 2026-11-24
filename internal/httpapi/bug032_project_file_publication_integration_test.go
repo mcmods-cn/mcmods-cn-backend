@@ -63,7 +63,10 @@ func TestBUG032ProjectFilePublicationFollowsScanLifecycleIntegration(t *testing.
 		ProjectType: "mod", ProjectID: projectID, ProjectInternalID: projectInternalID,
 		SiteID: "bug032-project", ReviewStatus: "approved",
 	}
-	server := &Server{db: pool}
+	server := &Server{db: pool, cfg: config.Config{JWTSecret: "bug032-test-only-session-secret"}}
+	for _, id := range userIDs {
+		grantTEST044Permissions(t, ctx, pool, id, project.uploadPermission())
+	}
 
 	pendingOSSID, pendingOSSPublicID := insertBUG032OSSFile(t, ctx, pool, project, userIDs[0], "pending.jar")
 	pendingFileID := invokeBUG032ProjectFileCreate(t, ctx, server, project, userIDs[0], pendingOSSPublicID, "Pending release")
@@ -158,9 +161,13 @@ func invokeBUG032ProjectFileCreate(t *testing.T, ctx context.Context, server *Se
 	t.Helper()
 	body := fmt.Sprintf(`{"ossFileId":%q,"displayName":%q,"versionName":"1.0.0","releaseChannel":"release","gameVersions":["1.21.1"],"loaders":["fabric"]}`, ossPublicID, displayName)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/mod/b032m0001/files", bytes.NewBufferString(body))
-	request = request.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: actorID}))
+	request = request.WithContext(ctx)
+	token := mintTEST048Token(t, ctx, server.db, server.cfg, actorID)
+	request.Header.Set("Authorization", "Bearer "+token)
 	response := httptest.NewRecorder()
-	server.createProjectFile(response, request, project)
+	server.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		server.createProjectFile(w, r, project)
+	})(response, request)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("create project file status=%d body=%s", response.Code, response.Body.String())
 	}

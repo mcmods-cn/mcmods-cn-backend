@@ -110,3 +110,36 @@ func TestPublicMediaReadFailureIsReported(t *testing.T) {
 		})
 	}
 }
+
+func TestProjectFileReadsReportUnavailableStorage(t *testing.T) {
+	pool, err := pgxpool.New(t.Context(), "postgres://unused@127.0.0.1:1/unused")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool.Close()
+	s := &Server{db: pool}
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		invalid int
+	}{
+		{"list", s.projectFiles, http.StatusBadRequest},
+		{"remove", s.projectFile, http.StatusNotFound},
+		{"upload", s.createProjectFileUpload, http.StatusNotFound},
+		{"complete", s.completeProjectFileUpload, http.StatusNotFound},
+		{"download", s.downloadProjectFile, http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/", nil)
+			request.SetPathValue("projectType", "mod")
+			for id, want := range map[string]int{"short": tc.invalid, "test00001": http.StatusServiceUnavailable} {
+				request.SetPathValue("projectId", id)
+				response := httptest.NewRecorder()
+				tc.handler(response, request)
+				if response.Code != want {
+					t.Errorf("project %q got %d, want %d", id, response.Code, want)
+				}
+			}
+		})
+	}
+}
