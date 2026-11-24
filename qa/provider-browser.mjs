@@ -19,7 +19,7 @@ const app = new URL('http://127.0.0.1:3991');
 const gateway = http.createServer((req, res) => {
   const target = req.url.startsWith('/api/') ? upstream : app;
   const proxied = http.request({hostname:target.hostname, port:target.port, path:req.url,
-    method:req.method,headers:{...req.headers,host:target.host}}, reply => {
+    method:req.method,headers:{...req.headers,host:target===app?site.host:target.host,'x-forwarded-host':site.host,'x-forwarded-proto':site.protocol.slice(0,-1)}}, reply => {
     res.writeHead(reply.statusCode,reply.headers);
     reply.pipe(res);
   });
@@ -29,7 +29,7 @@ const gateway = http.createServer((req, res) => {
 await new Promise((done,reject)=>{gateway.on('error',reject);gateway.listen(Number(site.port),site.hostname,done);});
 const names={ plugin:'plugins',map:'maps',resource_pack:'resource-packs',shader_pack:'shaders',datapack:'datapacks',addon:'addons' };
 const httpFacts=[];
-const summary={fixture:process.env.CASE, frontend:process.env.FPIN,backend:process.env.BPIN,accepted:[],browserScreens:[],httpFacts};
+const summary={fixture:process.env.CASE, frontend:process.env.FPIN,backend:process.env.BPIN,accepted:[],browserScreens:[],httpFacts, browserTraffic:[], pageErrors:[]};
 const persist=()=>writeFile(join(out,'acceptance.json'),JSON.stringify(summary,null,2)+'\n');
 async function call(url, token, method='GET', body=undefined, allowed=[200]){
   const response=await fetch(upstream.origin+url,{method,headers:{...(token?{Authorization:'Bearer '+token}:{}),...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined,redirect:'error'});
@@ -54,15 +54,24 @@ try {
     await ctx.addCookies([{name:'mcmods-ui-locale',value:'en-US',url:site.origin},{name:'mcmods_session',value:token,url:site.origin,httpOnly:true,sameSite:'Lax'}]);
     const page=await ctx.newPage(); page.setDefaultTimeout(25000);
     try {
+      page.on('response',res=>{
+        const path=new URL(res.url()).pathname;
+        if(summary.browserTraffic.length<80 && (path.startsWith('/api/') || res.status()>=400 || res.request().isNavigationRequest()))
+          summary.browserTraffic.push({path, method:res.request().method(),status:res.status()});
+      });
+      page.on('pageerror',err=>summary.pageErrors.push(err.name));
+      const identity=await ctx.request.get(site.origin+'/api/v1/auth/me');
+      assert.equal(identity.status(),200,'issued actor cookie did not resolve in the real HTTP API');
       let imported, jobId;
       if(sample.adapterSamplePath){
         const original=await readFile(sample.adapterSamplePath);
         assert.equal(createHash('sha256').update(original).digest('hex'),sample.adapterSampleSha256);
         imported=JSON.parse(original);
       } else {
-        const response=page.waitForResponse(r=>new URL(r.url()).pathname===prefix && r.request().method()==='POST',{timeout:90000});
-        await page.goto(site.origin+route+'?method='+provider+'&url='+encodeURIComponent(sourceURL),{waitUntil:'domcontentloaded',timeout:90000});
-        const accepted=await response;
+        const [accepted]=await Promise.all([
+          page.waitForResponse(r=>new URL(r.url()).pathname===prefix && r.request().method()==='POST',{timeout:90000}),
+          page.goto(site.origin+route+'?method='+provider+'&url='+encodeURIComponent(sourceURL),{waitUntil:'domcontentloaded',timeout:90000}),
+        ]);
         const queued=await accepted.json();
         assert.equal(accepted.status(),202,queued.code??queued.error);
         jobId=queued.data.id;
@@ -88,7 +97,7 @@ try {
       await input.fill('review-'+sampleId.replace(/^tp008-/,'').slice(0,49));
       if(i===0)await page.screenshot({path:join(out,'restored-editor.png')});
       const saved=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/v1/content-projects/'+kind&&r.request().method()==='POST');
-      await page.getByRole('button',{name:'Save',exact:true}).click();
+      await page.locator('header').getByRole('button',{name:'Save',exact:true}).click();
       const created=await saved;
       const result=await created.json();
       assert.equal(created.status(),201,result.code??result.error);
@@ -104,6 +113,10 @@ try {
       summary.accepted.push({kind,provider,sampleId,source:sample.adapterSamplePath?'controlled provider and draft':'HTTP job and JetStream Worker',jobId:jobId??null,siteId:project.siteId,approvedRevision:project.submissionRevisionId});
       console.log('Accepted', sampleId);
       await persist();
+    } catch (err) {
+      summary.lastPage=await page.evaluate(()=>({path:location.pathname,title:document.title.slice(0,100),headings:[...document.querySelectorAll('h1,[role=alert]')].map(el=>el.textContent.slice(0,100)),formCount:document.forms.length,scripts:document.scripts.length})).catch(()=>({}));
+      console.error(JSON.stringify({lastPage:summary.lastPage,traffic:summary.browserTraffic,errors:summary.pageErrors}).slice(0,5000));
+      throw err;
     } finally {await ctx.close();}
     i++;
     if(i<runtime.supportedCombinations.length)await delay(61500);
