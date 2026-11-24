@@ -88,14 +88,15 @@ mcmods/project/blueprints/<blueprint-public-id>/
 mcmods/project/skins/<skin-public-id>/files/text/<skin-public-id>/
 ```
 
-经过校验的 Minecraft 皮肤和披风纹理使用内容寻址的共享区：
+经过校验的 Minecraft 皮肤和披风纹理保存在共享区。新建对象的键为：
 
 ```text
-mcmods/project/skins/_shared/files/releases/textures/<sha256>.png
+mcmods/project/skins/_shared/files/releases/textures/<sha256>-<无连字符的 UUID>.png
 ```
 
-这是有意保留的内部例外。Yggdrasil 纹理协议使用内容哈希，相同纹理只保存一份可以避免重复
-存储，并保证纹理 URL 与内容不可变。`skin_assets` 仍以各自的 9 位公开 ID 区分皮肤资料。
+Yggdrasil 通过内容哈希提供稳定的纹理 URL。服务复用同一哈希的活动对象。删除最后一个引用后，
+重新上传相同纹理会分配新的文件记录和对象键，让旧对象的清理任务只作用于旧键。
+皮肤资料各自保留 9 位公开 ID。 [纹理存储](../internal/httpapi/skin_texture.go) · [生命周期回归](../internal/httpapi/test039_skin_http_lifecycle_integration_test.go)
 
 ## 用户文件
 
