@@ -72,15 +72,11 @@ func (s *Server) initiateOSSMultipartUpload(
 		return ticket, errors.New("initiate OSS multipart upload: OSS returned an empty upload ID")
 	}
 	uploadID := *result.UploadId
-	abort := func() {
-		_, _ = client.AbortMultipartUpload(context.Background(), &aliyunoss.AbortMultipartUploadRequest{
-			Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey), UploadId: aliyunoss.Ptr(uploadID),
-		})
-	}
 	ticket, err = presignExistingOSSMultipartUpload(ctx, client, cfg, objectKey, uploadID, sizeBytes, expires)
 	if err != nil {
-		abort()
-		return ticket, err
+		// The provider has accepted this upload, even though no capability
+		// was issued. Give its owner the ID for cancellation or durable retry.
+		return ossMultipartUploadTicket{UploadID: uploadID}, err
 	}
 	return ticket, nil
 }
@@ -186,6 +182,10 @@ func abortOSSMultipartUpload(ctx context.Context, client *aliyunoss.Client, cfg 
 	if !validOSSMultipartUploadID(uploadID) {
 		return errors.New("invalid OSS multipart upload ID")
 	}
+	return abortProviderMultipart(ctx, client, cfg, objectKey, uploadID)
+}
+
+func abortProviderMultipart(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey, uploadID string) error {
 	_, err := client.AbortMultipartUpload(ctx, &aliyunoss.AbortMultipartUploadRequest{
 		Bucket: aliyunoss.Ptr(cfg.Bucket), Key: aliyunoss.Ptr(objectKey), UploadId: aliyunoss.Ptr(uploadID),
 	})

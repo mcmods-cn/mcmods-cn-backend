@@ -37,6 +37,9 @@ func (s *Server) issueOSSUploadTicket(w http.ResponseWriter, r *http.Request, cl
 	if shouldUseOSSMultipart(req.SizeBytes) {
 		multipart, err := s.initiateOSSMultipartUpload(r.Context(), client, cfg, objectKey, contentType, req.SHA256, req.SizeBytes, expires)
 		if err != nil {
+			if multipart.UploadID != "" {
+				s.cleanupUnissuedOSSMultipart(r, cfg, req, objectKey, multipart.UploadID, expiresAt, client)
+			}
 			s.insertOSSUploadLog(r.Context(), nil, currentClaims(r).Subject, objectKey, req.OriginalName, req.SizeBytes, s.requestClientLocation(r).IP, r.UserAgent(), "failed", err.Error())
 			writeError(w, http.StatusBadGateway, "生成 OSS 分片上传请求失败")
 			return
@@ -120,7 +123,8 @@ func (s *Server) persistOSSUploadTicket(r *http.Request, cfg ossConfigPayload, r
 
 func (s *Server) cleanupUnissuedOSSMultipart(r *http.Request, cfg ossConfigPayload, req ossDirectUploadRequest, objectKey, uploadID string, expiresAt time.Time, client *aliyunoss.Client) {
 	abortCtx, stopAbort := context.WithTimeout(context.Background(), 10*time.Second)
-	abortErr := abortOSSMultipartUpload(abortCtx, client, cfg, objectKey, uploadID)
+	// The SDK supplied this ID directly when it created the unissued upload.
+	abortErr := abortProviderMultipart(abortCtx, client, cfg, objectKey, uploadID)
 	stopAbort()
 	if abortErr == nil {
 		return
