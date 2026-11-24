@@ -27,14 +27,20 @@ func TestOCT02UnavailableReviewPolicyNeverDisablesModerationIntegration(t *testi
 	if got := loadReviewConfig(ctx, db); !reflect.DeepEqual(got, defaultReviewConfig()) {
 		t.Fatal("a genuinely absent policy changed normal product defaults")
 	}
+	checkModerationRequired := func(config reviewConfig) {
+		t.Helper()
+		fields := reflect.ValueOf(config)
+		for i := 0; i < fields.NumField(); i++ {
+			if !fields.Field(i).Bool() {
+				t.Errorf("unreadable review policy did not require moderation for %s", fields.Type().Field(i).Name)
+			}
+		}
+	}
 	for _, raw := range []string{`{"blueprintCreate":false,"aiTranslation":"broken"}`, `null`, `[]`} {
 		if _, err := db.Exec(ctx, `insert into system_settings(key,value) values($1,$2::jsonb) on conflict(key) do update set value=excluded.value`, reviewConfigSettingKey, raw); err != nil {
 			t.Fatal(err)
 		}
-		got := loadReviewConfig(ctx, db)
-		if !got.BlueprintCreate || !got.AITranslation || !got.ModContentSectionCreate {
-			t.Errorf("malformed stored policy disabled moderation: %s", raw)
-		}
+		checkModerationRequired(loadReviewConfig(ctx, db))
 		w := httptest.NewRecorder()
 		(&Server{db: db}).getReviewConfig(w, httptest.NewRequest(http.MethodGet, "/api/v1/admin/review-config", nil).WithContext(ctx))
 		if w.Code != http.StatusServiceUnavailable {
@@ -44,10 +50,7 @@ func TestOCT02UnavailableReviewPolicyNeverDisablesModerationIntegration(t *testi
 	if _, err := db.Exec(ctx, `alter table system_settings drop column value`); err != nil {
 		t.Fatal(err)
 	}
-	got := loadReviewConfig(ctx, db)
-	if !got.BlueprintCreate || !got.AITranslation || !got.ModContentSectionCreate {
-		t.Fatal("actual PostgreSQL read failure disabled moderation")
-	}
+	checkModerationRequired(loadReviewConfig(ctx, db))
 }
 
 func TestOCT02DuplicateNotificationTemplateKeysDoNotSilentlyOverwriteIntegration(t *testing.T) {
