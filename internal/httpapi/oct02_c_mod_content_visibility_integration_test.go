@@ -250,35 +250,64 @@ func TestOCT02CResourceReferenceResolutionOmitsUnpublishedOtherProjectsIntegrati
 }
 
 func TestOCT02CExportJobDoesNotAcknowledgeMalformedCommittedReadIntegration(t *testing.T) {
-	f := newTEST013Fixture(t)
-	version := f.version(t, f.editor, "test013-mod", "Import acknowledgement")
-	var fileID string
-	if err := f.db.QueryRow(f.ctx, `insert into oss_files(object_key,bucket,endpoint,original_name,content_type,size_bytes,sha256,uploader_id,status,scan_status,source,category)
-		values('oct02-c-job.zip','synthetic','https://storage.invalid','export.zip','application/zip',16,$1,$2,'active','clean','mcmods_exporter',$3)
-		returning public_id`, strings.Repeat("d", 64), f.userIDs[f.editor], ossModImportCategory(f.modCode, "mcmods-exporter", "packages")).Scan(&fileID); err != nil {
-		t.Fatal(err)
-	}
-	// This test's isolated DB injects an unreadable response shape after a
-	// successful task creation; it performs no archive fetch or object upload.
-	if _, err := f.db.Exec(f.ctx, `create function oct02_c_break_job_read() returns trigger language plpgsql as $$
-		begin new.error_detail='[]'::jsonb; return new; end $$;
-		create trigger oct02_c_break_job_read before insert on catalog_import_jobs
-		for each row execute function oct02_c_break_job_read()`); err != nil {
-		t.Fatal(err)
-	}
-	request := createModExportJobRequest{OSSFileID: fileID, TargetVersionPublicID: version.PublicID}
-	f.require(t, f.editor, http.MethodPost, "/api/v1/mods/test013-mod/export-imports", request, http.StatusInternalServerError)
-	var count int
-	if err := f.db.QueryRow(f.ctx, `select count(*) from catalog_import_jobs where mod_id=$1`, f.modID).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("committed import was lost: count=%d err=%v", count, err)
-	}
-	if _, err := f.db.Exec(f.ctx, `drop trigger oct02_c_break_job_read on catalog_import_jobs;
-		drop function oct02_c_break_job_read(); update catalog_import_jobs set error_detail='{}'::jsonb`); err != nil {
-		t.Fatal(err)
-	}
-	f.require(t, f.editor, http.MethodPost, "/api/v1/mods/test013-mod/export-imports", request, http.StatusAccepted)
-	if err := f.db.QueryRow(f.ctx, `select count(*) from catalog_import_jobs where mod_id=$1`, f.modID).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("retry duplicated committed import: count=%d err=%v", count, err)
+	for _, tc := range []struct{ route, name, source, category string }{
+		{"export-imports", "export.zip", "mcmods_exporter", "packages"},
+		{"catalog-imports", "icons.json", iconRendererImportSource, "catalog"},
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			f := newTEST013Fixture(t)
+			version := f.version(t, f.editor, "test013-mod", "Import acknowledgement")
+			sourcePath := tc.source
+			if tc.source == "mcmods_exporter" {
+				sourcePath = "mcmods-exporter"
+			}
+			var fileID string
+			if err := f.db.QueryRow(f.ctx, `insert into oss_files(object_key,bucket,endpoint,original_name,content_type,size_bytes,sha256,uploader_id,status,scan_status,source,category)
+				values($1,'synthetic','https://storage.invalid',$1,'application/octet-stream',16,$2,$3,'active','clean',$4,$5)
+				returning public_id`, tc.name, strings.Repeat("d", 64), f.userIDs[f.editor], tc.source, ossModImportCategory(f.modCode, sourcePath, tc.category)).Scan(&fileID); err != nil {
+				t.Fatal(err)
+			}
+			// The task is committed, but its status cannot be decoded for the HTTP response.
+			if _, err := f.db.Exec(f.ctx, `create function oct02_c_break_job_read() returns trigger language plpgsql as $$
+				begin new.error_detail='[]'::jsonb; return new; end $$;
+				create trigger oct02_c_break_job_read before insert on catalog_import_jobs
+				for each row execute function oct02_c_break_job_read()`); err != nil {
+				t.Fatal(err)
+			}
+			request := map[string]any{"ossFileId": fileID, "targetVersionPublicId": version.PublicID}
+			if tc.source != "mcmods_exporter" {
+				request["source"] = tc.source
+			}
+			route := "/api/v1/mods/test013-mod/" + tc.route
+			raw := f.require(t, f.editor, http.MethodPost, route, request, http.StatusInternalServerError)
+			var problem struct {
+				Code    string
+				Details struct{ JobID string }
+			}
+			if err := json.Unmarshal(raw, &problem); err != nil {
+				t.Fatal(err)
+			}
+			var jobID string
+			if err := f.db.QueryRow(f.ctx, `select id from catalog_import_jobs where mod_id=$1`, f.modID).Scan(&jobID); err != nil {
+				t.Fatal(err)
+			}
+			if problem.Code != "import_job_accepted_status_unavailable" || problem.Details.JobID != jobID {
+				t.Errorf("missing receipt for committed import: code=%q jobId=%q, want %q", problem.Code, problem.Details.JobID, jobID)
+			}
+			if _, err := f.db.Exec(f.ctx, `drop trigger oct02_c_break_job_read on catalog_import_jobs;
+				drop function oct02_c_break_job_read(); update catalog_import_jobs set error_detail='{}'::jsonb`); err != nil {
+				t.Fatal(err)
+			}
+			raw = f.require(t, f.editor, http.MethodPost, route, request, http.StatusAccepted)
+			retry := decodeTEST022Data[modExportJobResponse](t, raw)
+			var jobs, intents int
+			if err := f.db.QueryRow(f.ctx, `select (select count(*) from catalog_import_jobs where mod_id=$1),(select count(*) from nats_outbox where aggregate_type='mod_export_job' and aggregate_id=$2)`, f.modID, jobID).Scan(&jobs, &intents); err != nil {
+				t.Fatal(err)
+			}
+			if retry.ID != jobID || !retry.Deduplicated || jobs != 1 || intents != 1 {
+				t.Fatalf("retry id=%q deduplicated=%v jobs=%d dispatch intents=%d", retry.ID, retry.Deduplicated, jobs, intents)
+			}
+		})
 	}
 }
 

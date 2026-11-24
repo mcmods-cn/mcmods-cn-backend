@@ -430,9 +430,14 @@ func (s *Server) createModExportJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "提交导入任务失败")
 		return
 	}
-	response, err := s.modExportJobByID(r.Context(), jobID, identity.ID)
+	s.writeCommittedCatalogImportJob(w, r, jobID, identity.ID, deduplicated)
+}
+
+func (s *Server) writeCommittedCatalogImportJob(w http.ResponseWriter, r *http.Request, jobID string, modID int64, deduplicated bool) {
+	response, err := s.modExportJobByID(r.Context(), jobID, modID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取导入任务失败")
+		writeAPIError(w, http.StatusInternalServerError, "import_job_accepted_status_unavailable",
+			"导入任务已受理，暂时无法读取状态。请稍后查看任务进度。", 0, map[string]string{"jobId": jobID})
 		return
 	}
 	response.Deduplicated = deduplicated

@@ -24,8 +24,6 @@ import (
 	aliyunoss "github.com/aliyun/alibabacloud-oss-go-sdk-v2/oss"
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
-
-	"mcmods-cn-backend/internal/activity"
 )
 
 const (
@@ -231,7 +229,7 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusInternalServerError, "failed to queue catalog import")
 			return
 		}
-		if err = insertEmbeddedIconImportActivityTx(r.Context(), tx, claims.Subject, request.TargetVersionPublicID); err != nil {
+		if err = insertModExportImportActivityTx(r.Context(), tx, claims.Subject, request.TargetVersionPublicID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record catalog import activity")
 			return
 		}
@@ -247,9 +245,7 @@ func (s *Server) createEmbeddedIconImportJob(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to commit catalog import job")
 		return
 	}
-	response, _ := s.modExportJobByID(r.Context(), jobID, identity.ID)
-	response.Deduplicated = deduplicated
-	writeJSON(w, http.StatusAccepted, response)
+	s.writeCommittedCatalogImportJob(w, r, jobID, identity.ID, deduplicated)
 }
 
 func (s *Server) importModExportJob(ctx context.Context, jobID string) error {
@@ -905,14 +901,4 @@ func normalizeEmbeddedIconStrings(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-func insertEmbeddedIconImportActivityTx(ctx context.Context, tx pgx.Tx, actorID int64, versionPublicID string) error {
-	_, err := tx.Exec(ctx, `insert into user_activity_events(user_id,action_id,object_type_id,object_route_id,occurred_at)
-		select nullif($1::bigint,0),$2,$3,route.id,$5
-		from mod_content_versions version
-		join public_routes route on route.entity_type='mod' and route.internal_id=version.mod_id
-		where version.public_id=$4`, actorID, activity.ActionUpload, activity.ObjectMod,
-		versionPublicID, time.Now().UTC())
-	return err
 }
