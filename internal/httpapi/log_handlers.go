@@ -396,6 +396,9 @@ func loadLogRetentionConfig(ctx context.Context, queryer logRetentionConfigQuery
 	if err != nil {
 		return logRetentionConfig{}, fmt.Errorf("read logs.retention: %w", err)
 	}
+	if _, err = decodeStoredJSONObject(raw, "logs.retention"); err != nil {
+		return logRetentionConfig{}, err
+	}
 	if err = json.Unmarshal(raw, &payload); err != nil {
 		return logRetentionConfig{}, fmt.Errorf("decode logs.retention: %w", err)
 	}

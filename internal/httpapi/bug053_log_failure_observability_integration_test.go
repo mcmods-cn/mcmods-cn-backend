@@ -111,22 +111,28 @@ func TestBUG053LogReadsAndCleanupFailuresAreNotSuccessfulEmptyResultsIntegration
 		t.Errorf("failed table rows = %d/%v, want 1", permissionRows, err)
 	}
 
-	if _, err = db.Exec(ctx, `update system_settings set value='[]'::jsonb where key='logs.retention';
-		insert into app_logs(category,created_at) values('api_access',now()-interval '10 days')`); err != nil {
+	if _, err = db.Exec(ctx, `insert into app_logs(category,created_at) values('api_access',now()-interval '2 years')`); err != nil {
 		t.Fatal(err)
 	}
-	configResponse := httptest.NewRecorder()
-	server.getLogConfig(configResponse, httptest.NewRequest(http.MethodGet, "/api/v1/admin/logs/config", nil))
-	if configResponse.Code != http.StatusInternalServerError || !strings.Contains(configResponse.Body.String(), "LOG_RETENTION_CONFIG_READ_FAILED") {
-		t.Fatalf("corrupt retention config read returned %d: %s", configResponse.Code, configResponse.Body.String())
-	}
-	invalidCleanupResponse := httptest.NewRecorder()
-	server.runLogCleanup(invalidCleanupResponse, httptest.NewRequest(http.MethodPost, "/api/v1/admin/logs/cleanup", nil))
-	if invalidCleanupResponse.Code != http.StatusInternalServerError || !strings.Contains(invalidCleanupResponse.Body.String(), "LOG_RETENTION_CONFIG_READ_FAILED") {
-		t.Fatalf("cleanup with corrupt retention config returned %d: %s", invalidCleanupResponse.Code, invalidCleanupResponse.Body.String())
-	}
-	var retainedAfterConfigFailure int
-	if err = db.QueryRow(ctx, `select count(*) from app_logs where category='api_access'`).Scan(&retainedAfterConfigFailure); err != nil || retainedAfterConfigFailure != 1 {
-		t.Fatalf("corrupt config cleanup changed logs: rows=%d err=%v", retainedAfterConfigFailure, err)
+	for _, malformed := range []string{"[]", "null"} {
+		t.Run(malformed, func(t *testing.T) {
+			if _, err := db.Exec(ctx, `update system_settings set value=$1::jsonb where key='logs.retention'`, malformed); err != nil {
+				t.Fatal(err)
+			}
+			configResponse := httptest.NewRecorder()
+			server.getLogConfig(configResponse, httptest.NewRequest(http.MethodGet, "/api/v1/admin/logs/config", nil))
+			if configResponse.Code != http.StatusInternalServerError || !strings.Contains(configResponse.Body.String(), "LOG_RETENTION_CONFIG_READ_FAILED") {
+				t.Fatalf("corrupt retention config read returned %d: %s", configResponse.Code, configResponse.Body.String())
+			}
+			invalidCleanupResponse := httptest.NewRecorder()
+			server.runLogCleanup(invalidCleanupResponse, httptest.NewRequest(http.MethodPost, "/api/v1/admin/logs/cleanup", nil))
+			if invalidCleanupResponse.Code != http.StatusInternalServerError || !strings.Contains(invalidCleanupResponse.Body.String(), "LOG_RETENTION_CONFIG_READ_FAILED") {
+				t.Fatalf("cleanup with corrupt retention config returned %d: %s", invalidCleanupResponse.Code, invalidCleanupResponse.Body.String())
+			}
+			var retainedAfterConfigFailure int
+			if err = db.QueryRow(ctx, `select count(*) from app_logs where category='api_access'`).Scan(&retainedAfterConfigFailure); err != nil || retainedAfterConfigFailure != 1 {
+				t.Fatalf("corrupt config cleanup changed logs: rows=%d err=%v", retainedAfterConfigFailure, err)
+			}
+		})
 	}
 }
