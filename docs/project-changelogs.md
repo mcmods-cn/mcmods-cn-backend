@@ -23,7 +23,7 @@
 
 ## 上游同步与人工编辑
 
-绑定 Modrinth 或 GitHub 来源，以及读取公开文件、版本和发行日志时，服务使用匿名供应商请求。Modrinth 支持已批准、归档和不进入目录的公开项目；可展示的版本状态为 `listed`、`archived` 和 `unlisted`。GitHub 只同步非草稿发行，包括已发布的预发行版。CurseForge 的 API 仍要求已配置供应商密钥。[Modrinth v2 数据定义](https://github.com/modrinth/code/blob/1cb7a7425fabc6e99c43f7c9fd23422db3293756/apps/labrinth/src/models/v2/projects.rs) · [GitHub 发行列表](https://docs.github.com/en/rest/releases/releases#list-releases)
+绑定 Modrinth 或 GitHub 来源，以及读取公开文件、版本和发行日志时，服务使用匿名供应商请求。当前 Modrinth v2 以 `approved` 和 `unlisted` 表示可公开访问的项目，本站也接受旧来源的 `archived` 项目状态。本站可展示的版本状态为 `listed`、`archived` 和 `unlisted`。GitHub 只同步非草稿发行，包括已发布的预发行版。CurseForge 的 API 仍要求已配置供应商密钥。[Modrinth v2 数据定义](https://github.com/modrinth/code/blob/1cb7a7425fabc6e99c43f7c9fd23422db3293756/apps/labrinth/src/models/v2/projects.rs) · [GitHub 发行列表](https://docs.github.com/en/rest/releases/releases#list-releases)
 
 手工创建和编辑共用提交流程。事务先共享锁定已发布的父项目，再锁定日志修订与条目。获得这些锁后重新核对当前会话、项目编辑权和免审权，再登记修订、活动和发布事件。审核通过也要求父项目仍已发布、条目仍活动。隐藏项目的待审日志可以驳回。分类名称上限为 80 个 Unicode 码点，版本名称 120 个，原因 500 个，每种语言正文 200,000 个。
 
