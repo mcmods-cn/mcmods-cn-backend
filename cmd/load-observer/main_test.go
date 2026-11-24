@@ -14,12 +14,9 @@ import (
 )
 
 type fakeObserverPool struct {
-	pingErr  error
 	queryErr error
 	closed   bool
 }
-
-func (pool *fakeObserverPool) Ping(context.Context) error { return pool.pingErr }
 
 func (pool *fakeObserverPool) QueryRow(context.Context, string, ...any) pgx.Row {
 	return fakeObserverRow{err: pool.queryErr}
@@ -50,7 +47,7 @@ func TestLoadObserverPropagatesDatabaseSamplingEncodingAndOutputFailures(t *test
 				}
 				return ""
 			},
-			openPool: func(context.Context, string) (observerPool, error) { return pool, nil },
+			openPool: func(context.Context) (observerPool, error) { return pool, nil },
 			marshal:  jsonMarshalIndent,
 			writeFile: func(string, []byte, os.FileMode) error {
 				return nil
@@ -64,8 +61,10 @@ func TestLoadObserverPropagatesDatabaseSamplingEncodingAndOutputFailures(t *test
 		}
 	}
 
-	pingFailure := newRuntime(&fakeObserverPool{pingErr: errors.New("database unavailable")})
-	if err := runLoadObserver(context.Background(), pingFailure); err == nil || !strings.Contains(err.Error(), "database unavailable") {
+	connectionFailure := newRuntime(nil)
+	unavailable := errors.New("database unavailable")
+	connectionFailure.openPool = func(context.Context) (observerPool, error) { return nil, unavailable }
+	if err := runLoadObserver(context.Background(), connectionFailure); !errors.Is(err, unavailable) {
 		t.Fatalf("database failure = %v", err)
 	}
 
@@ -112,7 +111,7 @@ func TestLoadObserverWritesSuccessfulReportAndClosesPool(t *testing.T) {
 			}
 			return ""
 		},
-		openPool: func(context.Context, string) (observerPool, error) { return pool, nil },
+		openPool: func(context.Context) (observerPool, error) { return pool, nil },
 		marshal:  jsonMarshalIndent,
 		writeFile: func(string, []byte, os.FileMode) error {
 			return nil
@@ -133,6 +132,22 @@ func TestLoadObserverWritesSuccessfulReportAndClosesPool(t *testing.T) {
 	for _, expected := range []string{`"samples": 4`, `"maxConnections": 4`, `"maxLockWaiters": 1`} {
 		if !strings.Contains(stdout.String(), expected) {
 			t.Fatalf("report %s does not contain %s", stdout.String(), expected)
+		}
+	}
+}
+
+func TestLoadObserverDoesNotIncludeDatabaseCredentialsInConfigurationErrors(t *testing.T) {
+	t.Setenv("MCMODS_SKIP_DOTENV", "true")
+	const user = "synthetic-observer-user"
+	const password = "synthetic-observer-secret"
+	t.Setenv("DATABASE_URL", "postgres://"+user+":"+password+"@127.0.0.1:invalid/fixture")
+	err := runLoadObserver(context.Background(), defaultObserverRuntime())
+	if err == nil || !strings.Contains(err.Error(), "parse database configuration") {
+		t.Fatal("expected a classified configuration failure")
+	}
+	for _, private := range []string{user, password, "postgres://"} {
+		if strings.Contains(err.Error(), private) {
+			t.Fatal("observer reported database connection data")
 		}
 	}
 }

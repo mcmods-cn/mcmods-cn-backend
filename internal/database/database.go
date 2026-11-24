@@ -24,6 +24,11 @@ func ConnectActivity(ctx context.Context, cfg config.Config) (*pgxpool.Pool, err
 	return connectPool(ctx, cfg.DB, cfg.Activity.DBMinConns, cfg.Activity.DBMaxConns, "mcmods-cn-activity")
 }
 
+// ConnectLoadObserver keeps the sequential sampler to one connection, included in its counts.
+func ConnectLoadObserver(ctx context.Context, cfg config.Config) (*pgxpool.Pool, error) {
+	return connectPool(ctx, cfg.DB, 0, 1, "mcmods-load-observer")
+}
+
 func connectPool(ctx context.Context, dbConfig config.DBConfig, minConns, maxConns int32, applicationName string) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(dbConfig.ConnString())
 	if err != nil {

@@ -1,6 +1,6 @@
 # PostgreSQL load observer
 
-`cmd/load-observer` samples the current database's rows in `pg_stat_activity` every 250 ms and emits one JSON report. It is read-only and does not reset, migrate, or seed the database.
+`cmd/load-observer` samples the current database's rows in `pg_stat_activity` every 250 ms and emits one JSON report. The counts include its single `mcmods-load-observer` session. Connection failures report the stage without printing the connection string. It is read-only and does not reset, migrate, or seed the database.
 
 ## Connection configuration
 
@@ -12,7 +12,7 @@ The command uses the same configuration loader as the API:
 ## Observer settings
 
 - `MCMODS_OBSERVER_SECONDS`: sampling duration from 1 through 3600 seconds; omitted, invalid, zero, or out-of-range values use 60 seconds.
-- `MCMODS_OBSERVER_OUTPUT`: optional report file. The command writes it with mode `0600`; the parent directory must already exist.
+- `MCMODS_OBSERVER_OUTPUT`: optional report file. The command creates a new file with mode `0600`. When reusing an existing file, its permissions are preserved. The parent directory must already exist.
 
 PowerShell example:
 

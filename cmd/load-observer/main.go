@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
+	"mcmods-cn-backend/internal/database"
 )
 
 type report struct {
@@ -28,14 +28,13 @@ type report struct {
 }
 
 type observerPool interface {
-	Ping(context.Context) error
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Close()
 }
 
 type observerRuntime struct {
 	getenv    func(string) string
-	openPool  func(context.Context, string) (observerPool, error)
+	openPool  func(context.Context) (observerPool, error)
 	marshal   func(any, string, string) ([]byte, error)
 	writeFile func(string, []byte, os.FileMode) error
 	stdout    io.Writer
@@ -52,8 +51,8 @@ func main() {
 func defaultObserverRuntime() observerRuntime {
 	return observerRuntime{
 		getenv: os.Getenv,
-		openPool: func(ctx context.Context, connectionString string) (observerPool, error) {
-			return pgxpool.New(ctx, connectionString)
+		openPool: func(ctx context.Context) (observerPool, error) {
+			return database.ConnectLoadObserver(ctx, config.Load())
 		},
 		marshal:   jsonMarshalIndent,
 		writeFile: os.WriteFile,
@@ -85,14 +84,11 @@ func runLoadObserver(parent context.Context, runtime observerRuntime) error {
 	}
 	ctx, cancel := context.WithTimeout(parent, time.Duration(durationSeconds+10)*time.Second)
 	defer cancel()
-	pool, err := runtime.openPool(ctx, config.Load().DB.ConnString())
+	pool, err := runtime.openPool(ctx)
 	if err != nil {
-		return fmt.Errorf("create load observer database pool: %w", err)
+		return fmt.Errorf("open load observer database connection: %w", err)
 	}
 	defer pool.Close()
-	if err = pool.Ping(ctx); err != nil {
-		return fmt.Errorf("connect load observer database: %w", err)
-	}
 
 	startedAt := runtime.now()
 	result := report{StartedAt: startedAt.UTC(), DurationSeconds: durationSeconds}
