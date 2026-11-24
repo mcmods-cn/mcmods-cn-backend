@@ -131,12 +131,8 @@ func (s *Server) updateOSSFileScanStatus(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "无法读取 OSS 文件")
 		return
 	}
-	actor, ok := requireCurrentWriteActor(w, r, tx)
+	actor, ok := requireCurrentWritePermission(w, r, tx, "oss.write")
 	if !ok {
-		return
-	}
-	if !claimsAllow(actor, "oss.write") {
-		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
 	if previousFileStatus == "deleted" {
