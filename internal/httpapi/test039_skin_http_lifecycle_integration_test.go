@@ -640,10 +640,13 @@ func TestTEST039ActualPGTextureLineageReadFailureIsObservableAndRecoversFullHTTP
 	// The launcher protocol's existing internal-failure contract is structured 503.
 	f.require(t, "", http.MethodGet, asset.TextureURL, nil, 503)
 	f.conditionalTexture(t, asset.TextureURL, asset.TextureHash, 503)
+	detail := "/api/v1/skins/" + asset.PublicID
+	f.require(t, "", http.MethodGet, detail, nil, http.StatusInternalServerError)
 	if _, err := f.db.Exec(f.ctx, "alter table skin_texture_blobs rename column test039_actual_size to size_bytes"); err != nil {
 		t.Fatal(err)
 	}
 	assertTEST039TextureBytes(t, f.require(t, "", http.MethodGet, asset.TextureURL, nil, 200), asset.TextureHash)
 	f.conditionalTexture(t, asset.TextureURL, asset.TextureHash, 304)
+	f.require(t, "", http.MethodGet, detail, nil, http.StatusOK)
 	f.unchanged(t, before)
 }

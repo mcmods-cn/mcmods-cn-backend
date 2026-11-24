@@ -550,6 +550,10 @@ func (s *Server) getSkinDetail(w http.ResponseWriter, r *http.Request, publicID 
 	w.Header().Set("Cache-Control", "private, no-store")
 	claims := currentClaims(r)
 	record, err := skinAssetByPublicID(r.Context(), s.db, publicID, claims.Subject)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusInternalServerError, "failed to load skin asset")
+		return
+	}
 	if err != nil || !canReadSkinAsset(record, claims) {
 		writeError(w, http.StatusNotFound, "skin asset was not found")
 		return
