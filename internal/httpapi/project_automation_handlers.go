@@ -204,13 +204,25 @@ func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		response, err := loadProjectAutomation(r.Context(), tx, target)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "读取自动更新配置失败")
+			return
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, 500, "提交自动更新配置失败")
 			return
 		}
 		s.writeAppLog(r.Context(), "admin_operation", "info", "project.auto_update.configure", target.PublicID, currentClaims(r).Subject, r, 200, 0, nil)
+		writeJSON(w, http.StatusOK, response)
+		return
 	}
-	s.writeProjectAutomation(w, r, target)
+	response, err := loadProjectAutomation(r.Context(), s.db, target)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取自动更新配置失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) recordProjectAutomationLicenseDecision(ctx context.Context, tx pgx.Tx, actor security.Claims, target projectAutomationTarget, externalIDs map[string]string, old, next projectAutomationSetting) error {
@@ -256,21 +268,19 @@ func autoUpdateNextRun(interval string, now time.Time) *time.Time {
 	return &next
 }
 
-func (s *Server) writeProjectAutomation(w http.ResponseWriter, r *http.Request, target projectAutomationTarget) {
-	sources, err := s.querySimpleRows(r, `select source_type,external_project_id,external_project_url,verified_at from project_external_sources where project_route_id=$1 order by source_type`, target.RouteID)
+func loadProjectAutomation(ctx context.Context, query simpleRowQueryer, target projectAutomationTarget) (map[string]any, error) {
+	sources, err := querySimpleRowsWithContext(ctx, query, `select source_type,external_project_id,external_project_url,verified_at from project_external_sources where project_route_id=$1 order by source_type`, target.RouteID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取自动更新来源失败")
-		return
+		return nil, err
 	}
 	sources = renameProjectAutomationFields(sources, map[string]string{
 		"source_type": "sourceType", "external_project_id": "externalProjectId",
 		"external_project_url": "externalProjectUrl", "verified_at": "verifiedAt",
 	})
-	settings, err := s.querySimpleRows(r, `select update_kind,coalesce(source_type,'') as source_type,interval_code,enabled,next_run_at,last_run_at,last_status,last_error_code,last_error,
+	settings, err := querySimpleRowsWithContext(ctx, query, `select update_kind,coalesce(source_type,'') as source_type,interval_code,enabled,next_run_at,last_run_at,last_status,last_error_code,last_error,
 		license_override,license_override_reason,license_override_source,updated_at from project_auto_update_settings where project_route_id=$1 order by update_kind`, target.RouteID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取自动更新配置失败")
-		return
+		return nil, err
 	}
 	settings = renameProjectAutomationFields(settings, map[string]string{
 		"update_kind": "updateKind", "source_type": "sourceType", "interval_code": "interval",
@@ -280,7 +290,7 @@ func (s *Server) writeProjectAutomation(w http.ResponseWriter, r *http.Request, 
 		"updated_at": "updatedAt",
 	})
 	settings = completeProjectAutomationSettings(settings, sources)
-	writeJSON(w, 200, map[string]any{"project": map[string]any{"id": target.PublicID, "type": target.ProjectType, "url": target.CanonicalURL}, "sources": sources, "settings": settings})
+	return map[string]any{"project": map[string]any{"id": target.PublicID, "type": target.ProjectType, "url": target.CanonicalURL}, "sources": sources, "settings": settings}, nil
 }
 
 func renameProjectAutomationFields(rows []map[string]any, names map[string]string) []map[string]any {

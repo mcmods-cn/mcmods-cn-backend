@@ -99,7 +99,7 @@ func TestProjectAutomationSchedulerAndListsExposeDatabaseFailuresIntegration(t *
 	if _, err = pool.Exec(ctx, `alter table arch013_broken_settings rename to project_auto_update_settings`); err != nil {
 		t.Fatal(err)
 	}
-	if items, queryErr := server.querySimpleRowsWithContext(ctx, `select * from arch013_missing_table`); queryErr == nil || items != nil {
+	if items, queryErr := querySimpleRowsWithContext(ctx, server.db, `select * from arch013_missing_table`); queryErr == nil || items != nil {
 		t.Fatalf("simple row query failure=(%v,%v), want nil/error", items, queryErr)
 	}
 

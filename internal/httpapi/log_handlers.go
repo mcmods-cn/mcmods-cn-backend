@@ -324,11 +324,15 @@ func (s *Server) writeAppLog(ctx context.Context, category string, level string,
 }
 
 func (s *Server) querySimpleRows(r *http.Request, sql string, args ...any) ([]map[string]any, error) {
-	return s.querySimpleRowsWithContext(r.Context(), sql, args...)
+	return querySimpleRowsWithContext(r.Context(), s.db, sql, args...)
 }
 
-func (s *Server) querySimpleRowsWithContext(ctx context.Context, sql string, args ...any) ([]map[string]any, error) {
-	rows, err := s.db.Query(ctx, sql, args...)
+type simpleRowQueryer interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func querySimpleRowsWithContext(ctx context.Context, query simpleRowQueryer, sql string, args ...any) ([]map[string]any, error) {
+	rows, err := query.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}

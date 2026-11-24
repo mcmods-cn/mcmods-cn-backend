@@ -167,7 +167,7 @@ func TestProjectAutomationReadResponseContainsNoMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := goFunctionBody(t, string(raw), "writeProjectAutomation")
+	body := goFunctionBody(t, string(raw), "loadProjectAutomation")
 	for _, forbidden := range []string{"s.db.Begin", "tx.Exec", "insert into project_auto_update_settings", "configured_by"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("GET response path still contains mutation boundary %q", forbidden)
