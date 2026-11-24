@@ -37,7 +37,7 @@ func TestUnreadDeltaKeepsGlobalInvalidationWithRealRedis(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := cache.redis.Del(ctx, cache.prefix+"unread:user:9", cache.prefix+"unread:global-epoch").Err(); err != nil {
+		if err := cache.redis.Del(ctx, cache.prefix+"unread:user:9", cache.prefix+"unread:user:42", cache.prefix+"unread:global-epoch").Err(); err != nil {
 			t.Error(err)
 		}
 		if err := cache.Close(); err != nil {
@@ -50,6 +50,7 @@ func TestUnreadDeltaKeepsGlobalInvalidationWithRealRedis(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertUnreadDeltaKeepsGlobalInvalidation(t, cache)
+	assertUnreadSummaryFollowsPeerUpdates(t, cache)
 }
 
 func assertUnreadDeltaKeepsGlobalInvalidation(t *testing.T, cache *Cache) {
@@ -85,4 +86,36 @@ func assertUnreadDeltaKeepsGlobalInvalidation(t *testing.T, cache *Cache) {
 	if err != nil || got != expected || loads != 1 {
 		t.Fatalf("current-version delta unread=%+v want=%+v loads=%d err=%v", got, expected, loads, err)
 	}
+}
+
+func TestUnreadSummaryFollowsPeerUpdatesAndInvalidations(t *testing.T) {
+	reader, _ := redisStateTestCache(t)
+	assertUnreadSummaryFollowsPeerUpdates(t, reader)
+}
+
+func assertUnreadSummaryFollowsPeerUpdates(t *testing.T, reader *Cache) {
+	t.Helper()
+	writer := New(reader.Config())
+	t.Cleanup(func() { _ = writer.Close() })
+	ctx := t.Context()
+	truth := UnreadSummary{Notifications: 2, Messages: 1}
+	loads := 0
+	load := func(context.Context) (UnreadSummary, error) {
+		loads++
+		return truth, nil
+	}
+	check := func(wantLoads int) {
+		t.Helper()
+		got, err := reader.LoadUnread(ctx, 42, load)
+		if err != nil || got != truth || loads != wantLoads {
+			t.Fatalf("summary=%+v want=%+v loads=%d want=%d err=%v", got, truth, loads, wantLoads, err)
+		}
+	}
+	check(1)
+	truth.Messages++
+	writer.AdjustUnread(ctx, 42, "messages", 1)
+	check(1)
+	truth.Notifications = 0
+	writer.InvalidateUnread(ctx, 42)
+	check(2)
 }

@@ -247,21 +247,22 @@ func (c *Cache) LoadUnread(ctx context.Context, userID int64, loader func(contex
 	if c == nil || userID <= 0 {
 		return loader(ctx)
 	}
-	epoch := c.currentUnreadEpoch(ctx)
-	now := time.Now()
-	c.mu.Lock()
-	if entry, ok := c.unread[userID]; ok && now.Before(entry.expiresAt) && entry.epoch == epoch {
-		c.mu.Unlock()
-		c.metrics.hits.Add(1)
-		return UnreadSummary{Notifications: entry.notifications, Messages: entry.messages}, nil
-	}
-	c.mu.Unlock()
-	key, valid := c.redisKey("unread:user:" + strconv.FormatInt(userID, 10))
-	if c.redis != nil && c.cfg.UnreadCounterEnabled && valid {
+	var epoch int64
+	shared := c.redis != nil && c.cfg.UnreadCounterEnabled
+	if shared {
+		key, _ := c.redisKey("unread:user:" + strconv.FormatInt(userID, 10))
 		started := time.Now()
-		fields, err := c.redis.HGetAll(ctx, key).Result()
+		pipe := c.redis.Pipeline()
+		version := pipe.Get(ctx, c.prefix+"unread:global-epoch")
+		hash := pipe.HGetAll(ctx, key)
+		_, err := pipe.Exec(ctx)
 		c.recordRedisResult(started, err)
-		if err == nil && len(fields) > 0 {
+		var versionErr error
+		epoch, versionErr = version.Int64()
+		// A missing epoch represents zero until the first broadcast.
+		shared = hash.Err() == nil && (versionErr == nil || errors.Is(versionErr, redis.Nil))
+		if shared {
+			fields := hash.Val()
 			storedEpoch, epochErr := strconv.ParseInt(fields["epoch"], 10, 64)
 			notifications, notificationErr := strconv.ParseInt(fields["notifications"], 10, 64)
 			messages, messageErr := strconv.ParseInt(fields["messages"], 10, 64)
@@ -272,9 +273,19 @@ func (c *Cache) LoadUnread(ctx context.Context, userID int64, loader func(contex
 				c.metrics.hits.Add(1)
 				return value, nil
 			}
-		}
-		if err == nil && len(fields) == 0 {
 			c.metrics.redisMisses.Add(1)
+		}
+	}
+	// Only use the replica's copy during local operation or a Redis outage.
+	// A missing shared hash may be another writer's explicit invalidation.
+	if !shared {
+		c.mu.Lock()
+		epoch = c.unreadEpoch
+		entry, ok := c.unread[userID]
+		c.mu.Unlock()
+		if ok && time.Now().Before(entry.expiresAt) && entry.epoch == epoch {
+			c.metrics.hits.Add(1)
+			return UnreadSummary{Notifications: entry.notifications, Messages: entry.messages}, nil
 		}
 	}
 	c.metrics.misses.Add(1)
@@ -466,9 +477,6 @@ func (c *Cache) currentUnreadEpoch(ctx context.Context) int64 {
 				return value
 			}
 			if errors.Is(err, redis.Nil) {
-				started = time.Now()
-				setErr := c.redis.SetNX(ctx, key, 0, 0).Err()
-				c.recordRedisResult(started, setErr)
 				return 0
 			}
 		}
@@ -484,7 +492,7 @@ func (c *Cache) storeLocalUnread(userID int64, value UnreadSummary, epoch int64,
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.unread) >= maxLocalEntries {
+	if _, exists := c.unread[userID]; !exists && len(c.unread) >= maxLocalEntries {
 		now := time.Now()
 		for id, entry := range c.unread {
 			if now.After(entry.expiresAt) {

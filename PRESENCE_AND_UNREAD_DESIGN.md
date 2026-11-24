@@ -15,7 +15,7 @@
 
 `GET /api/v1/me/unread-summary` 是通知和私信共用的未读摘要入口，返回 `notifications`、`messages` 和 `total`。[现有客户端约定](COMPATIBILITY_BOUNDARIES.md)
 
-1. 读取进程缓存和 Redis Hash。
+1. 启用共享未读计数时，在一次 Redis pipeline 中读取全局 epoch 和用户 Hash。读取共享摘要可以观察其他实例提交的增量和删除。单实例本地模式和 Redis 故障可使用有效的进程缓存。
 2. 缺失/epoch 不同则用一个 SQL（两个标量子查询）读取 PostgreSQL事实。
 3. 重建 Hash 并设置 TTL。
 4. 新消息和通知事务提交后按计数类别增加。单条已读按实际受影响的行数递减，Lua 保底为零，全部已读更新对应计数。增量只作用于同一 epoch 的缓存。
