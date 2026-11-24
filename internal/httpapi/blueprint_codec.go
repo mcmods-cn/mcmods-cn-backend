@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -104,13 +105,13 @@ func finalizeBlueprint(document blueprintDocument, name, format string) blueprin
 	if document.SourceFormat == "" {
 		document.SourceFormat = format
 	}
-	blocks := make([]blueprintBlock, 0, len(document.Blocks))
-	for _, block := range document.Blocks {
-		if block.State.ID != "" && block.State.ID != "minecraft:air" && block.State.ID != "air" {
-			blocks = append(blocks, block)
-		}
+	// Both decoders transfer ownership of their block slice here.
+	document.Blocks = slices.DeleteFunc(document.Blocks, func(block blueprintBlock) bool {
+		return block.State.ID == "" || block.State.ID == "minecraft:air" || block.State.ID == "air"
+	})
+	if document.Blocks == nil {
+		document.Blocks = []blueprintBlock{}
 	}
-	document.Blocks = blocks
 	return document
 }
 
@@ -302,7 +303,8 @@ func decodeSpongePalette(raw map[string]any) ([]blueprintBlockState, error) {
 	palette := make([]blueprintBlockState, len(raw))
 	occupied := make([]bool, len(raw))
 	for state, value := range raw {
-		if strings.TrimSpace(parseBlockState(state).ID) == "" {
+		parsedState := parseBlockState(state)
+		if strings.TrimSpace(parsedState.ID) == "" {
 			return nil, errors.New("schematic palette contains an empty block state")
 		}
 		index, ok := spongePaletteIndex(value)
@@ -313,7 +315,7 @@ func decodeSpongePalette(raw map[string]any) ([]blueprintBlockState, error) {
 			return nil, errors.New("schematic palette contains a duplicate index")
 		}
 		occupied[index] = true
-		palette[index] = parseBlockState(state)
+		palette[index] = parsedState
 	}
 	for _, exists := range occupied {
 		if !exists {
@@ -808,7 +810,8 @@ func formatBlockState(state blueprintBlockState) string {
 
 func decodeVarInts(data []byte, expected int) ([]int, error) {
 	result := make([]int, 0, expected)
-	for offset := 0; offset < len(data) && len(result) < expected; {
+	offset := 0
+	for offset < len(data) && len(result) < expected {
 		value, shift := 0, 0
 		for {
 			if offset >= len(data) || shift > 35 {
@@ -826,6 +829,9 @@ func decodeVarInts(data []byte, expected int) ([]int, error) {
 	}
 	if len(result) < expected {
 		return nil, fmt.Errorf("schematic block data contains %d entries; expected %d", len(result), expected)
+	}
+	if offset != len(data) {
+		return nil, errors.New("schematic block data has entries beyond its declared dimensions")
 	}
 	return result, nil
 }
