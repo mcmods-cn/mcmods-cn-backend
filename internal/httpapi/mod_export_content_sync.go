@@ -49,6 +49,21 @@ func publishCatalogRevisionsTx(ctx context.Context, tx pgx.Tx, revisionIDs []str
 	if len(revisionIDs) == 0 || tag.RowsAffected() != int64(len(revisionIDs)) {
 		return fmt.Errorf("expected %d publishable revisions, found %d", len(revisionIDs), tag.RowsAffected())
 	}
+	// Applicable versions are public even when another observation of the same
+	// recipe is being reviewed. Extend them once, for published observations,
+	// including index entries whose exporter could not capture a layout.
+	if _, err := tx.Exec(ctx, `insert into recipe_version_bindings(recipe_id,version_code,created_by,source)
+		select distinct snapshot.recipe_id,btrim(version_code),revision.submitted_by,'import'
+		from recipe_import_snapshots snapshot
+		join catalog_import_revisions revision on revision.id=snapshot.revision_id
+		join mod_content_versions content_version on content_version.id=revision.target_version_id
+		cross join lateral unnest(case when cardinality(content_version.minecraft_versions)>0
+			then content_version.minecraft_versions else array[revision.minecraft_version] end) version_code
+		where snapshot.revision_id=any($1::text[]) and btrim(version_code)<>''
+		order by snapshot.recipe_id,btrim(version_code)
+		on conflict(recipe_id,version_code) do nothing`, revisionIDs); err != nil {
+		return fmt.Errorf("publish recipe version bindings: %w", err)
+	}
 	for _, revisionID := range revisionIDs {
 		if err := promoteImportedRecipeTemplatesTx(ctx, tx, revisionID); err != nil {
 			return fmt.Errorf("promote imported recipe templates: %w", err)

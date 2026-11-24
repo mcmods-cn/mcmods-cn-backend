@@ -340,7 +340,7 @@ func (s *Server) modExportRecipesForObject(ctx context.Context, revisionID strin
 	rows, err := s.db.Query(ctx, `with preferred as (
 		select minecraft_version,loader from catalog_import_revisions where id=$1
 	), ranked as (
-		select binding.recipe_snapshot_id,bool_or(slot.role='output') produces,
+		select binding.recipe_snapshot_id,bool_or(slot.role in ('output','byproduct')) produces,
 			bool_or(slot.role in ('input','catalyst')) uses,
 			row_number() over(partition by snapshot.recipe_id order by (snapshot.revision_id=$1) desc,
 			(revision.minecraft_version=preferred.minecraft_version) desc,
