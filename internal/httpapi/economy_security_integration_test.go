@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -238,5 +239,92 @@ func TestActiveRewardTasksKeepTheirCurrenciesAvailableIntegration(t *testing.T) 
 	var enabled bool
 	if err := f.db.QueryRow(f.ctx, `select status='active' from task_definitions where public_id=$1`, strings.TrimPrefix(taskPath, tasks+"/")).Scan(&enabled); err != nil || enabled {
 		t.Fatalf("rejected enable changed task: enabled=%v err=%v", enabled, err)
+	}
+}
+
+func TestCheckinAllowsSameAccountLedgerReferencesWhileWaitingForItsBalanceIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	user := f.userIDs[f.editor]
+	grantTEST044Permissions(t, f.ctx, f.db, user, "economy.checkin")
+	var currency int64
+	if err := f.db.QueryRow(f.ctx, `select id from currencies where code='gold_nugget'`).Scan(&currency); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `insert into user_currency_balances(user_id,currency_id,balance) values($1,$2,10)`, user, currency); err != nil {
+		t.Fatal(err)
+	}
+	credit, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer credit.Rollback(f.ctx)
+	balance, err := lockCurrencyBalanceTx(f.ctx, credit, user, currency)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequestWithContext(f.ctx, http.MethodPost, f.origin.URL+"/api/v1/users/me/economy/checkin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+f.editor)
+	type outcome struct {
+		status int
+		err    error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := f.origin.Client().Do(req)
+		if err != nil {
+			done <- outcome{err: err}
+			return
+		}
+		defer res.Body.Close()
+		_, err = io.Copy(io.Discard, res.Body)
+		done <- outcome{status: res.StatusCode, err: err}
+	}()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		var waiting bool
+		err = f.db.QueryRow(f.ctx, `select exists(select 1 from pg_stat_activity where datname=current_database()
+			and $1=any(pg_blocking_pids(pid)) and query ilike '%user_currency_balances%')`, credit.Conn().PgConn().PID()).Scan(&waiting)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case result := <-done:
+			t.Fatalf("check-in ended before reaching the held balance: %+v", result)
+		case <-f.ctx.Done():
+			t.Fatal(f.ctx.Err())
+		case <-poll.C:
+		}
+	}
+	// The ledger foreign key uses this same row lock. Probe without creating a
+	// deadlock so the failure does not depend on PostgreSQL's victim selection.
+	var id int64
+	if err = credit.QueryRow(f.ctx, `select id from users where id=$1 for key share nowait`, user).Scan(&id); err != nil || id != user {
+		t.Fatalf("account cannot accept a ledger reference during check-in: %v", err)
+	}
+	if _, err = applyLockedCurrencyBalanceChangeTx(f.ctx, credit, user, currency, balance, 5, "content_download_reward", nil, "mod", f.modCode, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = credit.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.err != nil || result.status != http.StatusOK {
+			t.Fatalf("check-in outcome %+v", result)
+		}
+	case <-f.ctx.Done():
+		t.Fatal(f.ctx.Err())
+	}
+	var final, rows int64
+	if err = f.db.QueryRow(f.ctx, `select balance,(select count(*) from currency_transactions where user_id=$1 and currency_id=$2)
+		from user_currency_balances where user_id=$1 and currency_id=$2`, user, currency).Scan(&final, &rows); err != nil || final != 16 || rows != 2 {
+		t.Fatalf("balance=%d transactions=%d err=%v", final, rows, err)
 	}
 }
