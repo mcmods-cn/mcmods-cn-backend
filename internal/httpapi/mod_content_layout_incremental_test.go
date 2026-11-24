@@ -150,3 +150,18 @@ func TestTwentyThousandResourceLayoutUsesOneBoundedPageAndIncrementalMerge(t *te
 	t.Logf("estimated legacy20k=%d bytes; summary500=%d bytes; incremental merge=%s",
 		legacyTwentyThousandEstimate, len(pagePayload), time.Since(started))
 }
+
+func TestDefaultAdvancementLayoutWithinSupportedCoordinateRange(t *testing.T) {
+	seen := make(map[[2]float64]bool, maxModContentResources)
+	for i := 0; i < maxModContentResources; i++ {
+		x, y := defaultAdvancementLayoutPosition(i)
+		if i < 5005 && (x != float64(i%5) || y != float64(i/5)) {
+			t.Fatalf("default at %d changed to %v,%v", i, x, y)
+		}
+		point := [2]float64{x, y}
+		if x < 0 || y < 0 || x > maxModContentLayoutCoordinate || y > maxModContentLayoutCoordinate || seen[point] {
+			t.Fatalf("bad default at %d: %v", i, point)
+		}
+		seen[point] = true
+	}
+}

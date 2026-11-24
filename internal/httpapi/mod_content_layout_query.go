@@ -175,9 +175,9 @@ func (s *Server) writeModContentLayoutQuery(
 		resource.kind_code,coalesce(parent_entity.public_id,''),
 		coalesce(nullif(effective.data->>'layoutGroupId',''),'advancement:'||placement.public_id),
 		case when jsonb_typeof(effective.data#>'{display,x}')='number' then (effective.data#>>'{display,x}')::double precision
-		 else (placement.ordinal%5)::double precision end,
+		 end,
 		case when jsonb_typeof(effective.data#>'{display,y}')='number' then (effective.data#>>'{display,y}')::double precision
-		 else floor(placement.ordinal/5.0)::double precision end,
+		 end,
 		left(coalesce(effective.data#>>'{display,frame}',''),32),placement.sort_path,placement.resource_id
 	from page placement
 	join game_resources resource on resource.entity_id=placement.resource_id
@@ -216,7 +216,7 @@ func (s *Server) writeModContentLayoutQuery(
 	for rows.Next() {
 		var item modContentLayoutQueryItem
 		var kindCode, parentResourcePublicID, groupID, frame string
-		var x, y float64
+		var x, y *float64
 		var sortPath []int64
 		var resourceID int64
 		if err = rows.Scan(&item.ResourcePublicID, &item.SectionPublicID, &item.Ordinal, &item.SimilarGroupID, &item.Label,
@@ -226,8 +226,15 @@ func (s *Server) writeModContentLayoutQuery(
 		}
 		item.VersionPublicID = versionPublicID
 		if kindCode == "minecraft.advancement" {
+			defaultX, defaultY := defaultAdvancementLayoutPosition(item.Ordinal)
+			if x != nil {
+				defaultX = *x
+			}
+			if y != nil {
+				defaultY = *y
+			}
 			item.Advancement = &modContentLayoutAdvancementSummary{
-				ParentResourcePublicID: parentResourcePublicID, GroupID: groupID, X: x, Y: y, Frame: frame,
+				ParentResourcePublicID: parentResourcePublicID, GroupID: groupID, X: defaultX, Y: defaultY, Frame: frame,
 			}
 		}
 		item.cursor = modContentSectionPageCursor{Version: modContentSectionCursorVersion, Scope: cursorScope,

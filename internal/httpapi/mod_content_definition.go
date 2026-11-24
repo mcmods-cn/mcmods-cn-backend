@@ -15,6 +15,7 @@ import (
 
 const modContentDefinitionSchemaVersion = 1
 const maxModContentJSONFieldBytes = 256 << 10
+const maxModContentListEntries = 2048
 
 type modContentTemplateRows interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
@@ -321,7 +322,7 @@ func normalizeModContentFieldValue(field modContentEntryTypeField, value any) (a
 				ok = true
 			}
 		}
-		if !ok || len(items) > 2048 {
+		if !ok || len(items) > maxModContentListEntries {
 			return nil, false, errCatalogEditorInvalid
 		}
 		result := make([]string, 0, len(items))
@@ -387,7 +388,7 @@ func canonicalizeCatalogResourceRows(ctx context.Context, tx pgx.Tx, rows []cata
 		if entryTypeCode != inferredEntryTypeCode {
 			log.Printf("resource document %s matched configured type %s instead of default inference %s", row.CanonicalID, entryTypeCode, inferredEntryTypeCode)
 		}
-		if groupID := advancementGroups[strings.ToLower(strings.TrimSpace(row.CanonicalID))]; groupID != "" {
+		if groupID := advancementGroups[strings.ToLower(strings.TrimSpace(row.CanonicalID))]; strings.EqualFold(row.KindCode, "minecraft.advancement") && groupID != "" {
 			canonical["layoutGroupId"] = groupID
 		}
 		encoded, _ := json.Marshal(canonical)

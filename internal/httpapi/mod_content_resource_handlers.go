@@ -990,7 +990,7 @@ func firstDefinitionStringList(definition map[string]any, paths ...[]string) []s
 		values, ok := current.([]any)
 		if !ok {
 			if strings, valid := current.([]string); valid {
-				return uniqueTrimmed(strings, 500)
+				return uniqueTrimmed(strings, maxModContentListEntries)
 			}
 			continue
 		}
@@ -1000,7 +1000,7 @@ func firstDefinitionStringList(definition map[string]any, paths ...[]string) []s
 				result = append(result, text)
 			}
 		}
-		return uniqueTrimmed(result, 500)
+		return uniqueTrimmed(result, maxModContentListEntries)
 	}
 	return nil
 }

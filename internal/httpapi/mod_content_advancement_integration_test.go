@@ -63,3 +63,110 @@ func TestCreateAndArrangeAdvancementIntegration(t *testing.T) {
 		t.Fatalf("public advancement disagrees with reviewed version/placement/revision: %s", public)
 	}
 }
+
+func TestMixedResourceLayoutRetainsAdvancementParentIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	const project = "/api/v1/mods/test013-mod"
+	const parentID = "test013:root"
+	version := f.version(t, f.editor, "test013-mod", "mixed layout")
+	template := f.submit(t, f.editor, http.MethodPost, project+"/content-templates", modContentTemplateEdit{
+		Code: "mixed", DefaultLocale: "en-US", DefaultDisplayMode: "compact",
+		Definition: testModContentTemplateWithField([]string{"minecraft.advancement", "minecraft.item"}, modContentEntryTypeField{
+			Code: "parentId", Type: "text", Names: map[string]string{"en-US": "Parent"}, Paths: [][]string{{"parentId"}},
+		}),
+		Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "Advancements and items"}},
+	}, http.StatusCreated)
+	f.review(t, template, f.editor, "approved")
+	section := f.section(t, version.PublicID, template.PublicID)
+	parent := f.resource(t, version.PublicID, section.PublicID, parentID, "minecraft.advancement", "default", map[string]any{})
+	f.review(t, parent, f.editor, "approved")
+	child := f.resource(t, version.PublicID, section.PublicID, "test013:child", "minecraft.advancement", "default", map[string]any{})
+	f.review(t, child, f.editor, "approved")
+	path := project + "/content-sections/" + section.PublicID + "/layout"
+	layout := modContentLayoutPatch{VersionPublicID: version.PublicID, RootSectionPublicID: section.PublicID,
+		DisplayMode: "compact", BaseRevisionID: &child.RevisionID, Resources: []modContentLayoutResourceEdit{
+			{ResourcePublicID: parent.PublicID, SectionPublicID: section.PublicID, Ordinal: 0, Advancement: &modContentAdvancementLayoutEdit{GroupID: "advancement:mixed"}},
+			{ResourcePublicID: child.PublicID, SectionPublicID: section.PublicID, Ordinal: 1, Advancement: &modContentAdvancementLayoutEdit{ParentResourcePublicID: parent.PublicID, GroupID: "advancement:mixed", X: 1}},
+		}}
+	first := f.submit(t, f.editor, http.MethodPatch, path, layout, http.StatusOK)
+	f.review(t, first, f.editor, "approved")
+	before, definition := test013DetailRevision(t, f, child.PublicID, version.PublicID)
+	if definition["parentId"] != parentID {
+		t.Fatalf("initially published child parent = %v", definition["parentId"])
+	}
+
+	item := f.resource(t, version.PublicID, section.PublicID, parentID, "minecraft.item", "default", map[string]any{})
+	f.review(t, item, f.editor, "approved")
+	const externalParent = "minecraft:story/root"
+	external := f.resource(t, version.PublicID, section.PublicID, "test013:external", "minecraft.advancement", "default", map[string]any{"parentId": externalParent})
+	f.review(t, external, f.editor, "approved")
+	externalBefore, original := test013DetailRevision(t, f, external.PublicID, version.PublicID)
+	if original["parentId"] != externalParent {
+		t.Fatalf("initial external parent = %v", original["parentId"])
+	}
+	// A sparse existing placement exercises the same read fallback as a large imported section.
+	if _, err := f.db.Exec(f.ctx, `update mod_content_section_resources placement set ordinal=5005
+        from catalog_entities entity where entity.id=placement.resource_id and entity.public_id=$1`, external.PublicID); err != nil {
+		t.Fatal(err)
+	}
+	layoutPage := decodeTEST022Data[struct {
+		Items []modContentLayoutQueryItem `json:"items"`
+	}](t, f.require(t, f.editor, http.MethodGet, path, nil, http.StatusOK))
+	var externalLayout *modContentLayoutAdvancementSummary
+	for _, item := range layoutPage.Items {
+		if item.ResourcePublicID == external.PublicID {
+			externalLayout = item.Advancement
+		}
+	}
+	if externalLayout == nil || externalLayout.X != 5 || externalLayout.Y != 0 {
+		t.Errorf("expected first node in next five columns, got %+v", externalLayout)
+	}
+	layout.BaseRevisionID, layout.DisplayMode, layout.Resources = &external.RevisionID, "large", nil
+	changed := f.submit(t, f.editor, http.MethodPatch, path, layout, http.StatusOK)
+	f.review(t, changed, f.editor, "approved")
+	externalAfter, preserved := test013DetailRevision(t, f, external.PublicID, version.PublicID)
+	if externalAfter != externalBefore || preserved["parentId"] != externalParent {
+		t.Errorf("unrelated display edit changed external parent from revision %d to %d: %v", externalBefore, externalAfter, preserved)
+	}
+	after, definition := test013DetailRevision(t, f, child.PublicID, version.PublicID)
+	if before != after || definition["parentId"] != parentID {
+		t.Fatalf("display-only edit changed advancement from revision %d to %d with parent %v", before, after, definition["parentId"])
+	}
+}
+
+func TestImportedAdvancementGroupStaysWithinRegistryIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	tx, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(f.ctx)
+	const canonicalID = "test013:shared"
+	rows := []catalogResourceImportRow{
+		{KindCode: "minecraft.advancement", CanonicalID: canonicalID, ResourcePath: "shared", Data: "{}"},
+		{KindCode: "minecraft.item", CanonicalID: canonicalID, ResourcePath: "shared", Data: "{}"},
+	}
+	if err = canonicalizeCatalogResourceRows(f.ctx, tx, rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		var document map[string]any
+		if err = json.Unmarshal([]byte(row.Data), &document); err != nil {
+			t.Fatal(err)
+		}
+		group, hasGroup := document["layoutGroupId"]
+		if row.KindCode == "minecraft.item" && hasGroup || row.KindCode == "minecraft.advancement" && group != "advancement:"+canonicalID {
+			t.Errorf("%s imported with group %v (present=%v)", row.KindCode, group, hasGroup)
+		}
+	}
+}
+
+func testModContentTemplateWithField(kinds []string, field modContentEntryTypeField) map[string]any {
+	return map[string]any{
+		"resourceKinds": kinds,
+		"entryTypes": []modContentEntryTypeDefinition{{
+			Code: "default", Names: map[string]string{"en-US": "Entry"},
+			Groups: []modContentEntryTypeGroup{{Code: "data", Names: map[string]string{"en-US": "Data"}, Fields: []modContentEntryTypeField{field}}},
+		}},
+	}
+}

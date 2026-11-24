@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	maxModContentCategories    = 1000
-	maxModContentResources     = 20000
-	maxModContentCategoryDepth = 4
+	maxModContentLayoutCoordinate = 1000
+	maxModContentCategories       = 1000
+	maxModContentResources        = 20000
+	maxModContentCategoryDepth    = 4
 )
 
 var modContentPublicIDPattern = regexp.MustCompile(`^[a-z0-9]{9}$`)
@@ -139,7 +140,7 @@ func normalizeModContentLayoutEdit(edit *modContentLayoutEdit) error {
 				!validGroupID ||
 				math.IsNaN(resource.Advancement.X) || math.IsInf(resource.Advancement.X, 0) ||
 				math.IsNaN(resource.Advancement.Y) || math.IsInf(resource.Advancement.Y, 0) ||
-				math.Abs(resource.Advancement.X) > 1000 || math.Abs(resource.Advancement.Y) > 1000 {
+				math.Abs(resource.Advancement.X) > maxModContentLayoutCoordinate || math.Abs(resource.Advancement.Y) > maxModContentLayoutCoordinate {
 				return errCatalogEditorInvalid
 			}
 		}
@@ -199,6 +200,19 @@ func (s *Server) modContentSectionLayout(w http.ResponseWriter, r *http.Request)
 	if err = s.prepareModContentLayout(r.Context(), identity.ID, versionID, &edit); err != nil {
 		writeModContentLayoutPreparationError(w, err)
 		return
+	}
+	// Validation needs the full graph, but a placement or display-only change
+	// must not rewrite other advancement documents (including external parents).
+	changedAdvancements := make(map[string]bool)
+	for _, resource := range patch.Resources {
+		if resource.Advancement != nil {
+			changedAdvancements[resource.ResourcePublicID] = true
+		}
+	}
+	for i := range edit.Resources {
+		if !changedAdvancements[edit.Resources[i].ResourcePublicID] {
+			edit.Resources[i].Advancement = nil
+		}
 	}
 	s.submitExistingModContentMutation(w, r, identity, modContentSnapshot{
 		Kind: "layout", Operation: "edit", ModID: identity.ID, ModSiteID: identity.SiteID,

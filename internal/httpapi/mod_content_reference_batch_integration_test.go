@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -358,4 +359,34 @@ func explainModContentReferenceScalePlan(
 		t.Fatal(err)
 	}
 	return plan.String(), time.Since(started)
+}
+
+func TestFullResourceReferenceListIsTrackedIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	version := f.version(t, f.editor, "test013-mod", "reference list")
+	definition := testModContentTemplateWithField([]string{"minecraft.item"}, modContentEntryTypeField{
+		Code: "items", Type: "reference-list", ReferenceKind: "minecraft.item", Names: map[string]string{"en-US": "Items"}, Paths: [][]string{{"items"}},
+	})
+	template := f.submit(t, f.editor, http.MethodPost, "/api/v1/mods/test013-mod/content-templates", modContentTemplateEdit{
+		Code: "references", DefaultLocale: "en-US", DefaultDisplayMode: "compact", Definition: definition,
+		Localizations: []catalogLocalizationEdit{{Locale: "en-US", Name: "Resource references"}},
+	}, http.StatusCreated)
+	f.review(t, template, f.editor, "approved")
+	section := f.section(t, version.PublicID, template.PublicID)
+	const maxReferences = 2048
+	references := make([]string, maxReferences)
+	for i := range references {
+		references[i] = fmt.Sprintf("test013:reference_%d", i)
+	}
+	resource := f.resource(t, version.PublicID, section.PublicID, "test013:source", "minecraft.item", "default", map[string]any{"items": references})
+	f.review(t, resource, f.editor, "approved")
+	var count int
+	var last string
+	if err := f.db.QueryRow(f.ctx, `select count(*),coalesce(max(ref.raw_resource_id) filter(where ref.field_path like '%.items.2047'),'')
+        from unresolved_resource_references ref join catalog_entities entity on entity.id=ref.source_entity_id where entity.public_id=$1`, resource.PublicID).Scan(&count, &last); err != nil {
+		t.Fatal(err)
+	}
+	if count != len(references) || last != references[len(references)-1] {
+		t.Fatalf("tracked %d references, final path contains %q", count, last)
+	}
 }

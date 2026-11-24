@@ -82,7 +82,7 @@ func normalizeModContentLayoutPatch(patch *modContentLayoutPatch) error {
 			resource.Advancement.ParentResourcePublicID == resource.ResourcePublicID || !validGroupID ||
 			math.IsNaN(resource.Advancement.X) || math.IsInf(resource.Advancement.X, 0) ||
 			math.IsNaN(resource.Advancement.Y) || math.IsInf(resource.Advancement.Y, 0) ||
-			math.Abs(resource.Advancement.X) > 1000 || math.Abs(resource.Advancement.Y) > 1000 {
+			math.Abs(resource.Advancement.X) > maxModContentLayoutCoordinate || math.Abs(resource.Advancement.Y) > maxModContentLayoutCoordinate {
 			return errCatalogEditorInvalid
 		}
 	}
@@ -115,7 +115,11 @@ func applyModContentLayoutPatch(current *modContentLayoutEdit, patch modContentL
 	// unchanged resources displaced by category deletion may fall back to root.
 	current.Categories = categories
 	for _, resource := range patch.Resources {
-		current.Resources[resourceIndexes[resource.ResourcePublicID]] = resource
+		index := resourceIndexes[resource.ResourcePublicID]
+		if resource.Advancement == nil {
+			resource.Advancement = current.Resources[index].Advancement
+		}
+		current.Resources[index] = resource
 	}
 	for index := range current.Resources {
 		if _, exists := allowedSections[current.Resources[index].SectionPublicID]; !exists {
@@ -212,16 +216,16 @@ func loadCurrentModContentLayout(
 	}
 	resourceRows.Close()
 
-	publicIDByCanonicalID := make(map[string]string, len(currentResources))
+	advancementPublicIDByCanonicalID := make(map[string]string, len(currentResources))
 	importRows := make([]catalogResourceImportRow, 0)
 	for _, resource := range currentResources {
-		publicIDByCanonicalID[strings.ToLower(strings.TrimSpace(resource.CanonicalID))] = resource.Edit.ResourcePublicID
 		if resource.KindCode == "minecraft.advancement" {
+			advancementPublicIDByCanonicalID[strings.ToLower(strings.TrimSpace(resource.CanonicalID))] = resource.Edit.ResourcePublicID
 			importRows = append(importRows, catalogResourceImportRow{KindCode: resource.KindCode, CanonicalID: resource.CanonicalID, Data: string(resource.Definition)})
 		}
 	}
 	derivedGroups := importedAdvancementLayoutGroups(importRows)
-	for index, resource := range currentResources {
+	for _, resource := range currentResources {
 		if resource.KindCode == "minecraft.advancement" {
 			var definition map[string]any
 			if len(resource.Definition) > 0 && json.Unmarshal(resource.Definition, &definition) != nil {
@@ -236,11 +240,12 @@ func loadCurrentModContentLayout(
 			if groupID == "" {
 				groupID = derivedGroups[strings.ToLower(strings.TrimSpace(resource.CanonicalID))]
 			}
+			defaultX, defaultY := defaultAdvancementLayoutPosition(resource.Edit.Ordinal)
 			resource.Edit.Advancement = &modContentAdvancementLayoutEdit{
-				ParentResourcePublicID: publicIDByCanonicalID[parentCanonicalID],
+				ParentResourcePublicID: advancementPublicIDByCanonicalID[parentCanonicalID],
 				GroupID:                groupID,
-				X:                      numericLayoutValue(display["x"], float64(index%5)),
-				Y:                      numericLayoutValue(display["y"], float64(index/5)),
+				X:                      numericLayoutValue(display["x"], defaultX),
+				Y:                      numericLayoutValue(display["y"], defaultY),
 			}
 		}
 		result.Resources = append(result.Resources, resource.Edit)
@@ -253,4 +258,12 @@ func numericLayoutValue(value any, fallback float64) float64 {
 		return number
 	}
 	return fallback
+}
+
+// Keep the original five-column layout until the coordinate limit is reached,
+// then start the next five columns to the right.
+func defaultAdvancementLayoutPosition(index int) (float64, float64) {
+	const columns = 5
+	const rows = maxModContentLayoutCoordinate + 1
+	return float64(index%columns + index/(rows*columns)*columns), float64(index / columns % rows)
 }
