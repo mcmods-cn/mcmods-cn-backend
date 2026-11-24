@@ -479,6 +479,10 @@ func TestBlueprintDetailScopesProcessingNotesAndStorageMetadata(t *testing.T) {
 		values($1,'Detail projection','nbt','failed','approved','synthetic/original.nbt',$2) returning public_id`, f.userIDs[f.editor], note).Scan(&publicID); err != nil {
 		t.Fatal(err)
 	}
+	var ownerPublicID string
+	if err := f.db.QueryRow(f.ctx, "select public_id from users where id=$1", f.userIDs[f.editor]).Scan(&ownerPublicID); err != nil {
+		t.Fatal(err)
+	}
 	for _, viewer := range []struct {
 		name, token, expectedNote string
 	}{
@@ -488,6 +492,10 @@ func TestBlueprintDetailScopesProcessingNotesAndStorageMetadata(t *testing.T) {
 			data := decodeTEST022Data[map[string]any](t, f.require(t, viewer.token, http.MethodGet, "/api/v1/blueprints/"+publicID, nil, http.StatusOK))
 			if data["lastError"] != viewer.expectedNote || data["id"] != publicID || data["status"] != "failed" {
 				t.Fatalf("detail status=%v id=%v note=%v", data["status"], data["id"], data["lastError"])
+			}
+			uploader, ok := data["uploader"].(map[string]any)
+			if !ok || uploader["id"] != ownerPublicID {
+				t.Fatalf("uploader id=%v, want profile id %s", uploader["id"], ownerPublicID)
 			}
 			for _, key := range []string{"originalObjectKey", "originalFileId"} {
 				if _, found := data[key]; found {

@@ -454,7 +454,7 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 	args = append(args, cursorArguments...)
 	args = append(args, request.Limit+1, request.Offset)
 	rows, err := s.db.Query(r.Context(), `select b.id,b.public_id,b.title,b.description_markdown,b.source_format,b.status,b.size_x,b.size_y,b.size_z,
-		b.block_count,b.palette_count,b.created_at,b.updated_at,u.id,u.username,u.avatar_url,lower(b.title),
+		b.block_count,b.palette_count,b.created_at,b.updated_at,u.public_id,u.username,u.avatar_url,lower(b.title),
 		coalesce(popularity.heat_score,0)::text,coalesce(popularity.download_count,0)::text,
 		coalesce(popularity.favorite_count,0)::text,coalesce(popularity.bayesian_rating,0)::text,
 		coalesce(popularity.rating_count,0),coalesce(popularity.view_count,0)::text,
@@ -475,7 +475,7 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 		var item blueprintPageRow
 		if err = rows.Scan(&item.InternalID, &item.PublicID, &item.Title, &item.Description, &item.Format, &item.Status,
 			&item.SizeX, &item.SizeY, &item.SizeZ, &item.BlockCount, &item.PaletteCount, &item.CreatedAt, &item.UpdatedAt,
-			&item.UploaderID, &item.Username, &item.Avatar, &item.SortName, &item.Heat, &item.Downloads,
+			&item.UploaderPublicID, &item.Username, &item.Avatar, &item.SortName, &item.Heat, &item.Downloads,
 			&item.Favorites, &item.Rating, &item.RatingCount, &item.Views, &item.Comments); err != nil {
 			writeError(w, http.StatusInternalServerError, "解析蓝图库失败")
 			return
@@ -517,7 +517,7 @@ func (s *Server) blueprints(w http.ResponseWriter, r *http.Request) {
 		items = append(items, map[string]any{"id": item.PublicID, "title": item.Title, "description": item.Description, "sourceFormat": item.Format, "status": item.Status,
 			"size": []int{item.SizeX, item.SizeY, item.SizeZ}, "blockCount": item.BlockCount, "paletteCount": item.PaletteCount, "createdAt": item.CreatedAt, "updatedAt": item.UpdatedAt,
 			"coverUrl": blueprintCoverPath(item.PublicID, item.UpdatedAt), "requiredMods": requiredMods[item.InternalID],
-			"uploader": map[string]any{"id": item.UploaderID, "username": item.Username, "avatarUrl": item.Avatar}})
+			"uploader": map[string]any{"id": item.UploaderPublicID, "username": item.Username, "avatarUrl": item.Avatar}})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": items, "limit": request.Limit, "offset": request.Offset,
@@ -586,15 +586,15 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
 	admin := claimsAllow(claims, "admin.*")
 	var blueprintID, ownerID int64
-	var title, description, format, status, reviewStatus, normalizedKey, coverKey, lastError, username, avatar string
+	var title, description, format, status, reviewStatus, normalizedKey, coverKey, lastError, uploaderPublicID, username, avatar string
 	var sizeX, sizeY, sizeZ, paletteCount, entityCount, dataVersion int
 	var blockCount int64
 	var createdAt, updatedAt time.Time
 	err := s.db.QueryRow(r.Context(), `select b.id,b.owner_id,b.title,b.description_markdown,b.source_format,b.status,b.review_status,
 		b.normalized_object_key,b.cover_object_key,b.size_x,b.size_y,b.size_z,b.block_count,b.palette_count,b.entity_count,b.data_version,case when b.owner_id=$2 or $3 then b.last_error else '' end,b.created_at,b.updated_at,
-		u.username,u.avatar_url from blueprints b join users u on u.id=b.owner_id where b.public_id=$1 and b.status<>'deleted'
+		u.public_id,u.username,u.avatar_url from blueprints b join users u on u.id=b.owner_id where b.public_id=$1 and b.status<>'deleted'
 		and (b.review_status in ('not_required','approved') or b.owner_id=$2 or $3)`, publicID, claims.Subject, admin).
-		Scan(&blueprintID, &ownerID, &title, &description, &format, &status, &reviewStatus, &normalizedKey, &coverKey, &sizeX, &sizeY, &sizeZ, &blockCount, &paletteCount, &entityCount, &dataVersion, &lastError, &createdAt, &updatedAt, &username, &avatar)
+		Scan(&blueprintID, &ownerID, &title, &description, &format, &status, &reviewStatus, &normalizedKey, &coverKey, &sizeX, &sizeY, &sizeZ, &blockCount, &paletteCount, &entityCount, &dataVersion, &lastError, &createdAt, &updatedAt, &uploaderPublicID, &username, &avatar)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "蓝图不存在")
 		return
@@ -637,7 +637,7 @@ func (s *Server) blueprintDetail(w http.ResponseWriter, r *http.Request) {
 		"id": publicID, "title": title, "description": description, "sourceFormat": format, "status": status, "reviewStatus": reviewStatus, "lastError": lastError,
 		"size": []int{sizeX, sizeY, sizeZ}, "blockCount": blockCount, "paletteCount": paletteCount, "entityCount": entityCount, "dataVersion": dataVersion,
 		"createdAt": createdAt, "updatedAt": updatedAt, "canEdit": claims.Subject == ownerID || admin,
-		"uploader": map[string]any{"id": ownerID, "username": username, "avatarUrl": avatar},
+		"uploader": map[string]any{"id": uploaderPublicID, "username": username, "avatarUrl": avatar},
 		"variants": variants, "materials": materials, "requiredMods": requiredModsByID[blueprintID], "assetRevisions": assetRevisions, "renderAvailable": normalizedKey != "",
 		"coverUrl": blueprintCoverPath(publicID, updatedAt), "coverGenerated": strings.Contains(coverKey, "/cover/generated-"),
 	})

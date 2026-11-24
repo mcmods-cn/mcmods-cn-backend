@@ -33,7 +33,7 @@ func TestBlueprintDerivedReadFailuresAreObservableIntegration(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	if _, err = pool.Exec(ctx, `
-		create temp table users(id bigint primary key,username text not null,avatar_url text not null);
+		create temp table users(id bigint primary key,public_id text not null,username text not null,avatar_url text not null);
 		create temp table blueprints(
 			id bigint primary key,public_id text not null,owner_id bigint not null,original_file_id bigint,
 			title text not null,description_markdown text not null,source_format text not null,status text not null,
@@ -65,7 +65,7 @@ func TestBlueprintDerivedReadFailuresAreObservableIntegration(t *testing.T) {
 		create temp table oss_files(
 			id bigint primary key,object_key text not null,content_type text not null,status text not null,scan_status text not null
 		);
-		insert into users values(7,'arch019-user','');
+		insert into users values(7,'arch019us','arch019-user','');
 		insert into blueprints values(
 			1,'arch019-blueprint',7,null,'ARCH-019 blueprint','','nbt','ready','approved','original/key','normalized/key','',null,
 			1,1,1,1,1,0,3700,'',now(),now()

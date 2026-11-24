@@ -42,9 +42,9 @@ type blueprintPageCursor struct {
 type blueprintPageRow struct {
 	InternalID                                   int64
 	PublicID, Title, Description, Format, Status string
-	Username, Avatar, SortName                   string
+	UploaderPublicID, Username, Avatar, SortName string
 	SizeX, SizeY, SizeZ, PaletteCount            int
-	BlockCount, UploaderID                       int64
+	BlockCount                                   int64
 	CreatedAt, UpdatedAt                         time.Time
 	Heat, Downloads, Favorites, Rating, Views    string
 	Comments                                     string
