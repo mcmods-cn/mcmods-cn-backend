@@ -1,0 +1,61 @@
+name: Verify live skin, transfer, avatar and AI configuration
+on:
+  push:
+    branches: [qa/named-identity-journeys-nov24]
+permissions:
+  contents: read
+jobs:
+  live-provider:
+    runs-on: ubuntu-latest
+    timeout-minutes: 38
+    strategy:
+      fail-fast: false
+      matrix:
+        case: [skin, fid, ai, creator]
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: mcmods_test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 25
+    env:
+      CASE: ${{ matrix.case }}
+      APP_ENV: test
+      DATABASE_URL: postgres://postgres@127.0.0.1:5432/mcmods_test?sslmode=disable
+      JWT_SECRET: isolated-provider-acceptance-only-signing-material
+      SETTINGS_ENCRYPTION_KEY: isolated-provider-acceptance-only-settings-material
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {path: harness, persist-credentials: false}
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {path: code, ref: 214195c8984b19d516044c7716c076278b7c6f77, persist-credentials: false}
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {repository: mcmods-cn/mcmods-cn-frontend, path: frontend, ref: 7fd79235539a048c65dc5fda42929fd166d61385, persist-credentials: false}
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with: {repository: mcmods-cn/mcmods_exporter, path: exporter, ref: 1e00e8b302d5c514cbc2204a556a610bc944c9da, persist-credentials: false}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with: {go-version-file: code/go.mod, cache-dependency-path: code/go.sum}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with: {node-version: '24.19.0', cache: npm, cache-dependency-path: frontend/package-lock.json}
+      - name: Install the locked frontend and Chromium
+        working-directory: frontend
+        run: |
+          npm ci
+          npx --no-install playwright install --with-deps chromium
+      - name: Run the named real PostgreSQL fixture and Chromium
+        shell: bash
+        run: |
+          export BASE="$GITHUB_WORKSPACE/code" FRONTEND_CHECKOUT="$GITHUB_WORKSPACE/frontend" EXPORTER_CHECKOUT="$GITHUB_WORKSPACE/exporter" HARNESS="$GITHUB_WORKSPACE/harness"
+          export OUT="$RUNNER_TEMP/provider-state"
+          bash "$HARNESS/qa/identity-run.sh"
+      - name: Preserve browser and named database terminal outcomes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: identity-${{ matrix.case }}
+          path: |
+            ${{ runner.temp }}/identity-public/
+          if-no-files-found: warn
+          retention-days: 14
