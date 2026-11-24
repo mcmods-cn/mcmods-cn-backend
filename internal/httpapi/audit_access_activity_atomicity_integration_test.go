@@ -67,6 +67,13 @@ func TestAuditCMP003CreatorMutationActivityIsAtomicFullHTTPIntegration(t *testin
 				}
 				path += "/" + publicID
 				if operation == "update" {
+					detail := decodeTEST022Data[struct {
+						PublishedRevisionID string `json:"publishedRevisionId"`
+					}](t, f.require(t, f.editor, http.MethodGet, path, nil, http.StatusOK))
+					body = struct {
+						creatorSnapshot
+						BaseRevisionID string `json:"baseRevisionId"`
+					}{snapshot, detail.PublishedRevisionID}
 					method = http.MethodPut
 					want = 200
 					action = activity.ActionEdit
