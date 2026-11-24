@@ -921,11 +921,6 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	ownerID, allowed := s.blueprintOwnerAccess(r, publicID)
-	if !allowed {
-		writeError(w, http.StatusForbidden, "没有权限编辑该蓝图")
-		return
-	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存蓝图失败")
@@ -936,12 +931,23 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "Lock blueprint revision failed")
 		return
 	}
-	var blueprintID int64
+	var blueprintID, ownerID int64
 	var coverFileID, coverKey string
 	var baseRevisionID *int64
-	if err = tx.QueryRow(r.Context(), `select id,coalesce((select public_id from oss_files where id=blueprints.cover_file_id),''),cover_object_key,published_revision_id from blueprints where public_id=$1 and owner_id=$2 for update`, publicID, ownerID).
-		Scan(&blueprintID, &coverFileID, &coverKey, &baseRevisionID); err != nil {
+	if err = tx.QueryRow(r.Context(), `select id,owner_id,coalesce((select public_id from oss_files where id=blueprints.cover_file_id),''),cover_object_key,published_revision_id from blueprints where public_id=$1 and status<>'deleted' for update`, publicID).
+		Scan(&blueprintID, &ownerID, &coverFileID, &coverKey, &baseRevisionID); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusForbidden, "没有权限编辑该蓝图")
+		return
+	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取蓝图版本失败")
+		return
+	}
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if actor.Subject != ownerID && !claimsAllow(actor, "admin.*") {
+		writeError(w, http.StatusForbidden, "没有权限编辑该蓝图")
 		return
 	}
 	snapshotValue := blueprintContentSnapshot{PublicID: publicID, Title: request.Title, Description: request.Description, CoverFileID: coverFileID, CoverKey: coverKey,
@@ -967,12 +973,12 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 			reason = "New blueprint"
 		}
 		operation = "create"
-		if err = withdrawPendingContentRequestsTx(r.Context(), tx, "blueprint", publicID, currentClaims(r).Subject, r); err != nil {
+		if err = withdrawPendingContentRequestsTx(r.Context(), tx, "blueprint", publicID, actor.Subject, r); err != nil {
 			writeError(w, http.StatusInternalServerError, "Replace blueprint draft failed")
 			return
 		}
 	}
-	reviewRequired = reviewRequired && !claimsAllow(currentClaims(r), "admin.*")
+	reviewRequired = reviewRequired && !claimsAllow(actor, "admin.*")
 	if antiAbuseModerationRequired(r) {
 		reviewRequired = true
 	}
@@ -982,7 +988,7 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
 		EntityType: "blueprint", EntityID: blueprintID, AggregateType: "blueprint", AggregateKey: publicID, BaseRevision: baseRevisionID, Snapshot: snapshot,
-		Reason: reason, ActorID: currentClaims(r).Subject, Status: status, Source: "blueprint_metadata",
+		Reason: reason, ActorID: actor.Subject, Status: status, Source: "blueprint_metadata",
 		Metadata: map[string]any{"blueprintId": publicID, "title": request.Title, "operation": operation}, Request: r,
 	})
 	if err != nil {
@@ -998,7 +1004,7 @@ func (s *Server) updateBlueprint(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "提交蓝图审核失败")
 			return
 		}
-	} else if err = applyBlueprintContentSnapshotTx(r.Context(), tx, blueprintID, created.RevisionID, currentClaims(r).Subject, snapshotValue); err != nil {
+	} else if err = applyBlueprintContentSnapshotTx(r.Context(), tx, blueprintID, created.RevisionID, actor.Subject, snapshotValue); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存蓝图失败")
 		return
 	}
