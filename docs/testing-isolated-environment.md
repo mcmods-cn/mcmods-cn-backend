@@ -256,11 +256,11 @@ MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_JOURNEY_DIR/runtime.json" node --tes
 
 签出并固定三个仓库的完整提交。使用已验哈希的生产制品，将实际站点的 HTTPS 回环地址设为 `MCMODS_AUDIT_FRONTEND_ORIGIN`。用 `MCMODS_AUDIT_FRONTEND_BUILD_MANIFEST` 和 `MCMODS_AUDIT_EXPECT_FRONTEND_BUILD_MANIFEST_SHA256` 固定部署清单，其中包含源码目录与提交、部署目录、BUILD_ID、server.js 哈希、`embeddedSiteOrigin` 和 `embeddedApiOrigin`。支持同站点的根 API 和 `/service` API。启动后，夹具用实际文件、公开的 `/authentication-write-config`、可信 CA 链与指定叶证书逐项核对。运行目录须为本次全新路径，认证材料只保存在私有子目录。
 
-设置 `MCMODS_RUN_FINAL_GAME_JOURNEY=1`，执行下列三步。浏览器审核完成后独立观察器继续检查授权到期及回收终态，取得 `terminal-acceptance.json` 才给夹具写入 STOP。完整环境变量、OSS 协议和证据字段见[固定小包验收协议](audit/final-game-native-protocol.md)。
+把 `MCMODS_AUDIT_OWNED_ENV_DIR` 指向本次隔离环境的私有资源清单目录。观察器核对容器所有者、实际数据库 OID、角色、回环绑定及 schema 标记。设置 `MCMODS_RUN_FINAL_GAME_JOURNEY=1`，执行下列三步。浏览器审核完成后独立观察器继续检查授权到期及回收终态，取得 `terminal-acceptance.json` 才给夹具写入 STOP。完整环境变量、OSS 协议和证据字段见[固定小包验收协议](audit/final-game-native-protocol.md)。
 
 ```sh
 go test ./internal/httpapi -run '^TestAuditFinalGameJourneyFixture$' -v -count=1 -timeout=105m
-MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_FINAL_GAME_DIR/browser-runtime.json" node --test browser-tests/audit-game-live.mts
+MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_FINAL_GAME_DIR/runtime.json" node --test browser-tests/audit-game-live.mts
 python tools/audit/final-game/observe.py "$MCMODS_AUDIT_FINAL_GAME_DIR/runtime.json" ACTUAL_BROWSER_REPORT "$MCMODS_AUDIT_FINAL_GAME_DIR/observation"
 ```
 

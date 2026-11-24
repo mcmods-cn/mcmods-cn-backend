@@ -73,7 +73,7 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 	}
 	samplePath := os.Getenv("MCMODS_AUDIT_GAME_PACKAGE")
 	if samplePath == "" {
-		samplePath = "/workspace/audit-fixes-20261024/artifacts/exporter/game-fabric-final/auditfixture-20261024-101102-941.zip"
+		samplePath = filepath.Join(packageDirectory, "testdata", "audit-20261024", "auditfixture-minecraft1201-fabric-jei1520-v7.zip")
 	}
 	sample, err := os.ReadFile(samplePath)
 	if err != nil {
@@ -331,6 +331,12 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var databaseOID uint32
+	var databaseName, databaseOwner, connectedRole string
+	if err = db.QueryRow(f.ctx, `select oid,datname,pg_get_userbyid(datdba),current_user from pg_database where datname=current_database()`).
+		Scan(&databaseOID, &databaseName, &databaseOwner, &connectedRole); err != nil {
+		t.Fatal("could not identify the actual fixture database", err)
+	}
 	readyAt := time.Now().UTC()
 	serveDeadline, hasDeadline := f.ctx.Deadline()
 	if !hasDeadline {
@@ -338,6 +344,7 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 	}
 	runtime := map[string]any{
 		"schemaVersion": 2, "owner": "mcmods-final-game-journey", "pid": os.Getpid(), "ownedSchema": schema,
+		"databaseBinding":    map[string]any{"name": databaseName, "oid": databaseOID, "owner": databaseOwner, "role": connectedRole, "host": dbConfig.ConnConfig.Host, "port": dbConfig.ConnConfig.Port},
 		"sourceCheckoutPath": backendCheckout, "compilerSourceCheckoutPath": backendCheckout, "testPackageWorkingDirectory": packageDirectory,
 		"apiOrigin": origin.URL, "internalOSSOrigin": f.provider.URL, "ossOrigin": frontendOrigin, "frontendOrigin": frontendOrigin, "authPath": authPath, "stopPath": stopPath, "tlsReadyPath": tlsReadyPath,
 		"ossBucketPathPrefix": "/" + storageConfig.Bucket + "/", "tls": tlsState, "frontendProductionBuild": productionBuild,
@@ -434,13 +441,7 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 		runtime["assetBytes"] = assetBytes
 		f.objectMu.Unlock()
 		auditJourneyWriteJSON(t, runtimePath, runtime)
-		browserRuntime := make(map[string]any, len(runtime)+1)
-		for key, value := range runtime {
-			browserRuntime[key] = value
-		}
-		browserRuntime["actualAPIOrigin"] = origin.URL
-		browserRuntime["apiOrigin"] = build.EmbeddedAPIOrigin
-		auditJourneyWriteJSON(t, filepath.Join(directory, "browser-runtime.json"), browserRuntime)
+
 	}
 	updateRuntime("BOOTSTRAP_WAIT_TLS_PROXY")
 	bootstrapCtx, cancelBootstrap := context.WithTimeout(f.ctx, 5*time.Minute)
