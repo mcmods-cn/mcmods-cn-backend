@@ -12,7 +12,7 @@ Imported recipe and catalyst maps are treated as untrusted input. Derived links,
 
 Registration and content preference updates distinguish primary content language, secondary content language and UI language. The primary content language can be any valid BCP-47 tag. The secondary language must be one of the eight supported human-editable content locales; supported aliases normalize consistently. UI language is stored separately. Administrative user details report the secondary content language rather than the UI language.
 
-No schema migration or production data cleanup is required for these HTTP projection changes. Tests use synthetic data in actual isolated PostgreSQL databases, including pending/approved transitions, independent canonical fallback, private assets and short links, unresolved presentation fields and constant-query batched reads. They do not validate production cache topology, data quality or supplier translation quality.
+Visibility regression tests use synthetic data in actual isolated PostgreSQL databases, including pending/approved transitions, independent canonical fallback, private assets and short links, unresolved presentation fields and constant-query batched reads. They do not validate production cache topology, data quality or supplier translation quality.
 
 Legacy canonical references can resolve through the existing list APIs before navigating to a public ID: `GET /api/v1/tags?canonicalId=...&registry=...` filters both identity fields exactly, and `GET /api/v1/recipe-types?canonicalId=...` filters the recipe-type identity exactly. These optional parameters preserve the existing response envelope, pagination, fuzzy `q` behavior and public-source policy. Unknown identities return an empty list. The recipe-type cache includes the exact filter. Clients must URL-encode values and navigate only after matching the returned canonical identity and registry.
 
@@ -35,9 +35,8 @@ For a single icon, pass a resource public ID in `ref`, or specify the canonical 
 
 The public recipe-type directory searches canonical identifiers and displayed titles in every available language. An approved manual name replaces the import title in its own language. Other import languages stay available, and pending or rejected names stay out of the directory and its search results.
 
-
 ### Manual recipe content
 
-The manual editor publishes recipes through `publishCatalogRecipeTx`. The reviewed definition, selected template, bindings and candidates supply the canonical layout. Recipe cards and category pages display the approved localized recipe body in `note`; the preferred language wins, followed by the secondary and the recipe default. Imported recipe observations supply layouts where a canonical definition is absent.
+The manual editor publishes recipes through `publishCatalogRecipeTx`. The reviewed definition, selected template, bindings and candidates supply the canonical layout. Recipe cards and category pages read `note` from the same approved translation. They prefer the requested primary language, then the secondary language, the recipe default, English, and the remaining locales in code order. An approved translation with an empty body keeps an empty note, including when the author cleared it. Imported recipe observations supply layouts where a canonical definition is absent.
 
 The former global recipe editor last wrote `recipe_content_overrides` before commit `c63c22a` in August 2026. The current empty-database installation omits that development table. New corrections belong to the reviewed editor and the existing localization or import history.
