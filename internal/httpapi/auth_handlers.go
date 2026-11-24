@@ -459,9 +459,22 @@ func (s *Server) evaluatePermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value := claimsNumericPermissionValue(claims, code)
+	allowed := claimsAllow(claims, code) || value > 0
+	if allowed && value == 0 {
+		if child := selectedPermissionRule(claims.PermissionRules, code+".*"); child != nil && !child.Allow {
+			// A parent boolean can remain usable even if its children are denied.
+			// A declared quantity with this rule combination has zero allowance.
+			var numeric bool
+			if err := s.db.QueryRow(r.Context(), `select exists(select 1 from permissions where code=$1)`, code+".<num>").Scan(&numeric); err != nil {
+				writeError(w, http.StatusServiceUnavailable, "permission catalog unavailable")
+				return
+			}
+			allowed = !numeric
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"permission": code,
-		"allowed":    claimsAllow(claims, code) || value > 0,
+		"allowed":    allowed,
 		"value":      value,
 	})
 }

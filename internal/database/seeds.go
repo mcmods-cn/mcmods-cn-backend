@@ -64,9 +64,9 @@ var seedPermissions = []seedPermission{
 	{Code: "user.avatar.animated", Module: "user", Name: "Use animated avatar", Description: "Allows GIF or APNG avatars."},
 	{Code: "user.ai.daily_token_limit.<num>", Module: "user", Name: "Daily AI token limit", Description: "Numeric permission; replace <num> with the daily token allowance."},
 	{Code: "user.ai.daily_token_limit.20000", Module: "user", Name: "Daily AI token limit: 20,000", Description: "Default daily AI translation allowance for registered users."},
-	{Code: "user.file.daily_limit.<num>", Module: "user", Name: "Daily upload limit", Description: "Numeric permission; replace <num> with bytes allowed per day."},
-	{Code: "user.file.total_limit.<num>", Module: "user", Name: "Total upload limit", Description: "Numeric permission; replace <num> with total stored bytes."},
-	{Code: "user.file.single_limit.<num>", Module: "user", Name: "Single file limit", Description: "Numeric permission; replace <num> with maximum bytes per file."},
+	{Code: "user.file.daily_limit.<num>", Module: "user", Name: "Daily upload limit", Description: "Numeric permission; replace <num> with MiB allowed per day."},
+	{Code: "user.file.total_limit.<num>", Module: "user", Name: "Total upload limit", Description: "Numeric permission; replace <num> with the total stored MiB."},
+	{Code: "user.file.single_limit.<num>", Module: "user", Name: "Single file limit", Description: "Numeric permission; replace <num> with maximum MiB per file."},
 	{Code: "user.draft.retention_seconds.<num>", Module: "user", Name: "Draft retention period", Description: "Numeric permission; replace <num> with the number of seconds that each autosaved draft remains available."},
 	{Code: "user.draft.retention_seconds.2592000", Module: "user", Name: "Draft retention: 30 days", Description: "Keeps registered users' autosaved drafts for 2,592,000 seconds."},
 

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -148,6 +149,30 @@ func BenchmarkPermissionRoleSharedParents(b *testing.B) {
 		applyPermissionRoles(candidates, parents, graph, nil)
 		if !candidates["news.read"].Allow {
 			b.Fatal("grant was lost")
+		}
+	}
+}
+
+func TestPermissionEvaluationDistinguishesZeroQuotaFromParentBooleanIntegration(t *testing.T) {
+	f := newTEST017Fixture(t)
+	actor := f.editor
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[actor], "admin.*", "user.file.total_limit.*", "admin.users.*")
+	if _, err := f.db.Exec(f.ctx, `update user_permissions assignment set allow=false from permissions node
+		where assignment.permission_id=node.id and assignment.user_id=$1 and node.code in ('user.file.total_limit.*','admin.users.*')`, f.userIDs[actor]); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		code    string
+		allowed bool
+	}{{"user.file.total_limit", false}, {"admin.users", true}} {
+		response := decodeTEST022Data[struct {
+			Permission string
+			Allowed    *bool
+			Value      *int32
+		}](t,
+			f.require(t, actor, http.MethodGet, "/api/v1/auth/permissions/evaluate?code="+test.code, nil, http.StatusOK))
+		if response.Permission != test.code || response.Allowed == nil || *response.Allowed != test.allowed || response.Value == nil || *response.Value != 0 {
+			t.Fatalf("permission %s returned %+v", test.code, response)
 		}
 	}
 }
