@@ -29,11 +29,11 @@ func TestSeedCrawlerDailyImportsCountFirstCommittedDraftAcrossWorkers(t *testing
 	}
 	candidate := func(externalID string) int64 {
 		t.Helper()
-		id, _, err := worker.upsertSeedCrawlerCandidate(ctx, runID, "mod", seedModrinthHit{ProjectID: externalID, Title: "Example mod"})
+		item, err := worker.upsertSeedCrawlerCandidate(ctx, runID, "mod", seedModrinthHit{ProjectID: externalID, Title: "Example mod"}, true)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return id
+		return item.ID
 	}
 	first, second, yesterday := candidate("alpha"), candidate("beta"), candidate("yesterday")
 	if _, err := pool.Exec(ctx, `update seed_crawler_candidates set status='submitted',drafted_at=now()-interval '2 days',

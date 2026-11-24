@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,9 +22,20 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
+	var metadataRequests atomic.Int32
+	var nextDay atomic.Bool
 	provider := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
+		if request.URL.Path != "/search" {
+			metadataRequests.Add(1)
+		}
 		switch request.URL.Path {
+		case "/search":
+			if nextDay.Load() {
+				_, _ = response.Write([]byte(`{"hits":[{"project_id":"bug042-manual-external","slug":"bug042-manual","title":"Atomic manual draft","downloads":3000},{"project_id":"another-mod","slug":"another-mod","title":"Another mod","downloads":3000}],"total_hits":2}`))
+				return
+			}
+			_, _ = response.Write([]byte(`{"hits":[{"project_id":"bug042-external","slug":"bug042-seed","title":"Atomic seed","downloads":1000},{"project_id":"bug042-manual-external","slug":"bug042-manual","title":"Atomic manual draft","downloads":3000}],"total_hits":2}`))
 		case "/project/bug042-seed":
 			_, _ = response.Write([]byte(`{"id":"bug042-external","slug":"bug042-seed","title":"Atomic seed","description":"Atomic summary","body":"Atomic body","project_type":"mod","status":"approved","client_side":"required","server_side":"required","categories":["utility"],"game_versions":["1.20.1"],"loaders":["fabric"],"license":{"id":"MIT"}}`))
 		case "/project/bug042-external/version":
@@ -34,7 +46,9 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 			_, _ = response.Write([]byte(`[]`))
 		case "/project/bug042-manual":
 			_, _ = response.Write([]byte(`{"id":"bug042-manual-external","slug":"bug042-manual","title":"Atomic manual draft","description":"Manual summary","body":"Manual body","project_type":"mod","status":"approved","client_side":"required","server_side":"required","categories":["utility"],"game_versions":["1.20.1"],"loaders":["fabric"],"license":{"id":"MIT"}}`))
-		case "/project/bug042-manual-external/version":
+		case "/project/another-mod":
+			_, _ = response.Write([]byte(`{"id":"another-mod","slug":"another-mod","title":"Another mod","description":"Summary","body":"Body","project_type":"mod","status":"approved","client_side":"required","server_side":"required","categories":["utility"],"game_versions":["1.20.1"],"loaders":["fabric"],"license":{"id":"MIT"}}`))
+		case "/project/another-mod/version", "/project/bug042-manual-external/version":
 			_, _ = response.Write([]byte(`[]`))
 		default:
 			http.NotFound(response, request)
@@ -130,10 +144,21 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	if _, err = pool.Exec(ctx, `drop trigger bug042_reject_source_binding on project_external_sources`); err != nil {
 		t.Fatal(err)
 	}
-	status, err = worker.createSeedDraft(ctx, candidateID, actor, "mod", hit,
-		seedCrawlerRuntimeConfig{AIDailyTokenBudget: 0, AutoSubmitReview: true})
-	if err != nil || status != "submitted" {
-		t.Fatalf("retry status=%q err=%v", status, err)
+	if _, err = pool.Exec(ctx, `update seed_crawler_configs set project_types=array['mod'],daily_limit=1,batch_size=2,
+		minimum_downloads=0,ai_daily_token_budget=0,auto_submit_review=true where id`); err != nil {
+		t.Fatal(err)
+	}
+	beforeRetry := metadataRequests.Load()
+	stats, err := worker.executeRun(ctx, runID, actor, false)
+	if err != nil || stats["submitted"] != 1 || stats["failed"] != 0 || metadataRequests.Load() != beforeRetry {
+		t.Fatalf("retrying saved draft at full daily limit: stats=%v metadata requests=%d err=%v", stats, metadataRequests.Load()-beforeRetry, err)
+	}
+	var skippedFresh bool
+	if err = pool.QueryRow(ctx, "select not exists(select 1 from seed_crawler_candidates where external_project_id='bug042-manual-external')").Scan(&skippedFresh); err != nil || !skippedFresh {
+		t.Fatalf("exhausted run recorded an uncharged candidate: skipped=%t err=%v", skippedFresh, err)
+	}
+	if _, err = pool.Exec(ctx, "update seed_crawler_configs set daily_limit=20 where id"); err != nil {
+		t.Fatal(err)
 	}
 	var draftStatus, projectKey, targetURL string
 	var changeRequestID *int64
@@ -262,4 +287,22 @@ func TestBUG042SeedCrawlerSubmissionFactsCommitTogetherAndRetryIntegration(t *te
 	if activeDrafts != 1 || candidateStatus != "draft" {
 		t.Fatalf("manual draft retry draft/candidate=%d/%s, want 1/draft", activeDrafts, candidateStatus)
 	}
+	// The next day has room for one new draft. The first hit is an already
+	// charged retry, so the second hit can still use that one free place.
+	nextDay.Store(true)
+	if _, err = pool.Exec(ctx, `update seed_crawler_candidates set drafted_at=now()-interval '2 days' where drafted_at is not null;
+		update seed_crawler_candidates set status='failed' where external_project_id='bug042-manual-external';
+		update seed_crawler_configs set daily_limit=1,auto_submit_review=false where id`); err != nil {
+		t.Fatal(err)
+	}
+	beforeRetry = metadataRequests.Load()
+	stats, err = worker.executeRun(ctx, runID, actor, false)
+	if err != nil || stats["drafts"] != 2 || stats["failed"] != 0 || metadataRequests.Load()-beforeRetry != 2 {
+		t.Fatalf("retry with a free place for a new draft: stats=%v metadata requests=%d err=%v", stats, metadataRequests.Load()-beforeRetry, err)
+	}
+	used, _, err := seedCrawlerDraftsToday(ctx, pool)
+	if err != nil || used != 1 {
+		t.Fatalf("charged %d new drafts, want 1: %v", used, err)
+	}
+
 }

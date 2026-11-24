@@ -50,25 +50,25 @@ func TestBUG041SeedCrawlerCandidateTracksCurrentObservationRunIntegration(t *tes
 	}
 
 	worker := NewSeedCrawlerWorker(loaded, pool)
-	firstCandidateID, firstStatus, err := worker.upsertSeedCrawlerCandidate(ctx, firstRunID, "mod", seedModrinthHit{
+	first, err := worker.upsertSeedCrawlerCandidate(ctx, firstRunID, "mod", seedModrinthHit{
 		ProjectID: "bug041-project", Slug: "bug041-old", Title: "Old observation", Downloads: 10,
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondCandidateID, secondStatus, err := worker.upsertSeedCrawlerCandidate(ctx, secondRunID, "mod", seedModrinthHit{
+	second, err := worker.upsertSeedCrawlerCandidate(ctx, secondRunID, "mod", seedModrinthHit{
 		ProjectID: "bug041-project", Slug: "bug041-new", Title: "New observation", Downloads: 20,
-	})
+	}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if firstCandidateID != secondCandidateID || firstStatus != "candidate" || secondStatus != "candidate" {
-		t.Fatalf("candidate upserts=%d/%s then %d/%s", firstCandidateID, firstStatus, secondCandidateID, secondStatus)
+	if first.ID != second.ID || first.Status != "candidate" || second.Status != "candidate" {
+		t.Fatalf("candidate upserts=%d/%s then %d/%s", first.ID, first.Status, second.ID, second.Status)
 	}
 
 	var firstSeenRunID, lastSeenRunID, downloads int64
 	var payload json.RawMessage
-	if err = pool.QueryRow(ctx, `select first_seen_run_id,last_seen_run_id,downloads,payload from seed_crawler_candidates where id=$1`, firstCandidateID).
+	if err = pool.QueryRow(ctx, `select first_seen_run_id,last_seen_run_id,downloads,payload from seed_crawler_candidates where id=$1`, first.ID).
 		Scan(&firstSeenRunID, &lastSeenRunID, &downloads, &payload); err != nil {
 		t.Fatal(err)
 	}

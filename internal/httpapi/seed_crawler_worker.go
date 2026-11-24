@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -403,7 +404,20 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 		"discovered": 0, "eligible": 0, "duplicates": 0, "drafts": 0, "submitted": 0, "failed": 0,
 		"providerSucceeded": 0, "providerFailed": 0,
 	}
-	if remaining == 0 {
+	var retryTypes []string
+	if !dryRun {
+		rows, err := worker.server.db.Query(ctx, `select t from unnest($1::text[]) as t where exists (
+			select 1 from seed_crawler_candidates where project_type=t and downloads>$2
+			and drafted_at is not null and status in ('failed','submitting'))`, cfg.ProjectTypes, cfg.MinimumDownloads)
+		if err != nil {
+			return stats, err
+		}
+		retryTypes, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return stats, err
+		}
+	}
+	if remaining == 0 && len(retryTypes) == 0 {
 		return stats, nil
 	}
 	importCfg, err := worker.server.modImportConfigFromSettings(ctx)
@@ -419,10 +433,14 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 	}
 	fetchErrors := make([]error, 0, len(cfg.ProjectTypes))
 	for _, projectType := range cfg.ProjectTypes {
-		if remaining <= 0 {
-			break
+		limit := min(cfg.BatchSize, remaining)
+		if slices.Contains(retryTypes, projectType) {
+			limit = cfg.BatchSize
 		}
-		hits, fetchErr := fetchSeedModrinthProjects(ctx, client, importCfg, projectType, min(cfg.BatchSize, remaining))
+		if limit <= 0 {
+			continue
+		}
+		hits, fetchErr := fetchSeedModrinthProjects(ctx, client, importCfg, projectType, limit)
 		if fetchErr != nil {
 			stats["failed"]++
 			stats["providerFailed"]++
@@ -432,47 +450,57 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 		stats["providerSucceeded"]++
 		stats["discovered"] += len(hits)
 		for _, hit := range hits {
-			if !seedCrawlerDownloadEligible(hit.Downloads, cfg.MinimumDownloads) || remaining <= 0 {
+			if !seedCrawlerDownloadEligible(hit.Downloads, cfg.MinimumDownloads) {
 				continue
 			}
 			stats["eligible"]++
-			candidateID, currentStatus, upsertErr := worker.upsertSeedCrawlerCandidate(ctx, runID, projectType, hit)
-			err = upsertErr
+			candidate, err := worker.upsertSeedCrawlerCandidate(ctx, runID, projectType, hit, remaining > 0)
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
 			if err != nil {
 				stats["failed"]++
 				continue
 			}
-			if currentStatus == "draft" || currentStatus == "submitted" || currentStatus == "existing" {
+			if candidate.Status == "draft" || candidate.Status == "submitted" || candidate.Status == "existing" {
 				stats["duplicates"]++
 				continue
 			}
 			if dryRun {
 				continue
 			}
-			status, processErr := worker.createSeedDraft(ctx, candidateID, actor, projectType, hit, cfg)
+			var status string
+			var processErr error
+			if candidate.Drafted {
+				status, processErr = worker.resumeSeedDraft(ctx, candidate.ID, actor, projectType, hit, cfg.AutoSubmitReview)
+			} else {
+				status, processErr = worker.createSeedDraft(ctx, candidate.ID, actor, projectType, hit, cfg)
+			}
 			if processErr != nil {
 				if errors.Is(processErr, errSeedCrawlerDailyImportLimit) {
-					return stats, nil
+					remaining = 0
+					continue
 				}
 				if errors.Is(processErr, errSeedCrawlerLeaseOwnershipLost) {
 					return stats, processErr
 				}
 				stats["failed"]++
 				if _, updateErr := worker.server.db.Exec(ctx, `update seed_crawler_candidates set status='failed',last_error=$2,updated_at=now()
-					where id=$1 and status not in ('draft','submitted','existing')`, candidateID, truncateRunes(processErr.Error(), 2000)); updateErr != nil {
-					return stats, errors.Join(processErr, fmt.Errorf("record failed seed crawler candidate %d: %w", candidateID, updateErr))
+					where id=$1 and status not in ('draft','submitted','existing')`, candidate.ID, truncateRunes(processErr.Error(), 2000)); updateErr != nil {
+					return stats, errors.Join(processErr, fmt.Errorf("record failed seed crawler candidate %d: %w", candidate.ID, updateErr))
 				}
 				continue
 			}
 			switch status {
 			case "draft":
 				stats["drafts"]++
-				remaining--
 			case "submitted":
 				stats["submitted"]++
-				remaining--
 			case "duplicates":
 				stats["duplicates"]++
+			}
+			if !candidate.Drafted && (status == "draft" || status == "submitted") {
+				remaining--
 			}
 		}
 	}
@@ -482,18 +510,26 @@ func (worker *SeedCrawlerWorker) executeRun(ctx context.Context, runID int64, ac
 	return stats, nil
 }
 
-func (worker *SeedCrawlerWorker) upsertSeedCrawlerCandidate(ctx context.Context, runID int64, projectType string, hit seedModrinthHit) (int64, string, error) {
+type seedCrawlerCandidateState struct {
+	ID      int64
+	Status  string
+	Drafted bool
+}
+
+func (worker *SeedCrawlerWorker) upsertSeedCrawlerCandidate(ctx context.Context, runID int64, projectType string, hit seedModrinthHit, allowNew bool) (seedCrawlerCandidateState, error) {
+	var candidate seedCrawlerCandidateState
 	payload, err := json.Marshal(hit)
 	if err != nil {
-		return 0, "", fmt.Errorf("encode seed crawler candidate: %w", err)
+		return candidate, fmt.Errorf("encode seed crawler candidate: %w", err)
 	}
-	var candidateID int64
-	var currentStatus string
 	err = worker.server.db.QueryRow(ctx, `insert into seed_crawler_candidates(first_seen_run_id,last_seen_run_id,external_project_id,project_type,downloads,payload)
-		values($1,$1,$2,$3,$4,$5::jsonb) on conflict(external_project_id) do update set last_seen_run_id=excluded.last_seen_run_id,
+		select $1,$1,$2,$3,$4,$5::jsonb where $6 or exists (
+			select 1 from seed_crawler_candidates where external_project_id=$2 and project_type=$3
+			and drafted_at is not null and status in ('failed','submitting'))
+		on conflict(external_project_id) do update set last_seen_run_id=excluded.last_seen_run_id,
 		downloads=excluded.downloads,payload=excluded.payload,updated_at=now()
-		returning id,status`, runID, hit.ProjectID, projectType, hit.Downloads, payload).Scan(&candidateID, &currentStatus)
-	return candidateID, currentStatus, err
+		returning id,status,drafted_at is not null`, runID, hit.ProjectID, projectType, hit.Downloads, payload, allowNew).Scan(&candidate.ID, &candidate.Status, &candidate.Drafted)
+	return candidate, err
 }
 
 type seedModrinthHit struct {
@@ -540,8 +576,9 @@ func fetchSeedModrinthProjects(ctx context.Context, client *http.Client, cfg mod
 	if err = getProviderJSON(ctx, client, seedModrinthSearchURL(cfg.Modrinth.BaseURL, providerType, limit, offset), headers, &response); err != nil {
 		return nil, err
 	}
-	result := make([]seedModrinthHit, 0, len(response.Hits))
-	for _, hit := range response.Hits {
+	hits := response.Hits[:min(limit, len(response.Hits))]
+	result := make([]seedModrinthHit, 0, len(hits))
+	for _, hit := range hits {
 		result = append(result, seedModrinthHit{ProjectID: hit.ProjectID, Slug: hit.Slug, Title: hit.Title, Description: hit.Description, Downloads: hit.Downloads})
 	}
 	return result, nil
@@ -648,27 +685,14 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 	} else if projectType == "resource_pack" {
 		editURL = "/resource-packs/new"
 	}
-	nextStatus := "draft"
-	if cfg.AutoSubmitReview {
-		nextStatus = "submitting"
-	}
 	tx, err := worker.server.db.Begin(ctx)
 	if err != nil {
 		return "", fmt.Errorf("begin seed crawler draft stage: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	if err = lockSeedCrawlerRunLeaseTx(ctx, tx, actor.Subject); err != nil {
-		return "", err
-	}
-	if _, err = authorizeAutomationProject(ctx, tx, actor.Subject, "", true, false); err != nil {
-		return "", err
-	}
-	staged, err := stageSeedCrawlerCandidateTx(ctx, tx, candidateID, nextStatus)
-	if err != nil {
-		return "", err
-	}
-	if !staged {
-		return "duplicates", nil
+	nextStatus, err := prepareSeedDraftStageTx(ctx, tx, candidateID, actor.Subject, cfg.AutoSubmitReview)
+	if err != nil || nextStatus == "duplicates" {
+		return nextStatus, err
 	}
 	var draftID string
 	err = tx.QueryRow(ctx, `insert into user_drafts(user_id,draft_key,project_key,project_title,kind,title,edit_url,payload,expires_at)
@@ -690,6 +714,38 @@ func (worker *SeedCrawlerWorker) createSeedDraft(ctx context.Context, candidateI
 	return "submitted", nil
 }
 
+// A submitted project's source binding and its saved draft are finalized in
+// submitSeedDraft. Retrying that boundary needs neither fresh metadata nor AI.
+func (worker *SeedCrawlerWorker) resumeSeedDraft(ctx context.Context, candidateID int64, actor security.Claims, projectType string, hit seedModrinthHit, autoSubmit bool) (string, error) {
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	nextStatus, err := prepareSeedDraftStageTx(ctx, tx, candidateID, actor.Subject, autoSubmit)
+	if err != nil || nextStatus == "duplicates" {
+		return nextStatus, err
+	}
+	var draftID string
+	var payload []byte
+	err = tx.QueryRow(ctx, `select public_id,payload-'importOrigin'-'externalProjectId' from user_drafts
+		where user_id=$1 and draft_key=$2 and kind='seed_crawler_import'
+		and submitted_at is null and expires_at>now() for update`, actor.Subject, "seed-crawler:"+hit.ProjectID).Scan(&draftID, &payload)
+	if err != nil {
+		return "", fmt.Errorf("read staged crawler draft: %w", err)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	if !autoSubmit {
+		return nextStatus, nil
+	}
+	if _, err = worker.submitSeedDraft(ctx, candidateID, draftID, actor, projectType, hit.ProjectID, seedModrinthURL(projectType, hit.Slug), payload); err != nil {
+		return "", err
+	}
+	return "submitted", nil
+}
+
 const seedCrawlerDraftsTodaySQL = `select count(*),statement_timestamp() from seed_crawler_candidates
 	where drafted_at>=date_trunc('day',statement_timestamp()) and drafted_at<date_trunc('day',statement_timestamp())+interval '1 day'`
 
@@ -698,6 +754,27 @@ func seedCrawlerDraftsToday(ctx context.Context, query databaseQuery) (int, time
 	var at time.Time
 	err := query.QueryRow(ctx, seedCrawlerDraftsTodaySQL).Scan(&count, &at)
 	return count, at, err
+}
+
+func prepareSeedDraftStageTx(ctx context.Context, tx pgx.Tx, candidateID, actorID int64, autoSubmit bool) (string, error) {
+	if err := lockSeedCrawlerRunLeaseTx(ctx, tx, actorID); err != nil {
+		return "", err
+	}
+	if _, err := authorizeAutomationProject(ctx, tx, actorID, "", true, false); err != nil {
+		return "", err
+	}
+	nextStatus := "draft"
+	if autoSubmit {
+		nextStatus = "submitting"
+	}
+	staged, err := stageSeedCrawlerCandidateTx(ctx, tx, candidateID, nextStatus)
+	if err != nil {
+		return "", err
+	}
+	if !staged {
+		return "duplicates", nil
+	}
+	return nextStatus, nil
 }
 
 // The singleton config lock serializes the daily limit across instances. The
