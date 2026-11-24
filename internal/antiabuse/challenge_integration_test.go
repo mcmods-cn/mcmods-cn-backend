@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -54,6 +55,17 @@ func TestFormAndHumanChallengesAreBoundAndSingleUse(t *testing.T) {
 	form, err := service.IssueFormToken(ctx, userID, sessionID, ip, "comment.create", objectKey)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A legitimate UTF-8 object scope may cross the storage byte budget.
+	longPrefix := strings.Repeat("界", 53)
+	longScope := longPrefix + "界"
+	scoped, err := service.IssueFormToken(ctx, userID, sessionID, ip, "comment.create", longScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopedInput := Evaluation{UserID: userID, Action: "comment.create", ObjectKey: longScope, FormToken: scoped.Token, Now: time.Now()}
+	if _, ok := service.consumeFormToken(ctx, scopedInput, service.privateHash("session", sessionID), service.privateHash("ip", ip)); !ok {
+		t.Fatal("issued UTF-8 scope did not match its submitted object")
 	}
 	base := Evaluation{UserID: userID, SessionID: sessionID, IP: ip, DeviceID: "integration-device", UserAgent: "Mozilla/5.0", Action: "comment.create", ObjectKey: objectKey, Now: time.Now()}
 	first, err := service.Evaluate(ctx, withEvaluation(base, form.Token, "first unique integration comment", ""))

@@ -399,11 +399,7 @@ func antiAbuseObjectType(r *http.Request) string {
 }
 
 func antiAbuseObjectKey(r *http.Request) string {
-	cleaned := path.Clean(r.URL.Path)
-	if len(cleaned) > 160 {
-		cleaned = cleaned[:160]
-	}
-	return cleaned
+	return antiabuse.ObjectKey(path.Clean(r.URL.Path))
 }
 
 func (s *Server) botTraffic(next http.Handler) http.Handler {

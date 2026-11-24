@@ -18,7 +18,7 @@ import (
 
 func (s *Service) IssueFormToken(ctx context.Context, userID int64, sessionID, ip, action, objectKey string) (FormToken, error) {
 	action = strings.TrimSpace(action)
-	objectKey = truncate(strings.TrimSpace(objectKey), 160)
+	objectKey = ObjectKey(objectKey)
 	if userID <= 0 || sessionID == "" || action == "" || len(action) > 80 {
 		return FormToken{}, fmt.Errorf("invalid form token scope")
 	}
@@ -46,7 +46,7 @@ func (s *Service) consumeFormToken(ctx context.Context, input Evaluation, sessio
 	err := s.db.QueryRow(ctx, `update anti_abuse_challenges set status='consumed',consumed_at=now()
 		where public_id=$1 and token_hash=$2 and kind='form' and status='pending' and user_id=$3 and session_hash=$4
 		  and action=$5 and object_key=$6 and expires_at>now() and (ip_hash='' or ip_hash=$7)
-		returning issued_at`, publicID, tokenHash(token), input.UserID, sessionHash, input.Action, truncate(input.ObjectKey, 160), ipHash).Scan(&issuedAt)
+		returning issued_at`, publicID, tokenHash(token), input.UserID, sessionHash, input.Action, ObjectKey(input.ObjectKey), ipHash).Scan(&issuedAt)
 	if err != nil {
 		return 0, false
 	}
@@ -76,7 +76,7 @@ func (s *Service) createChallenge(ctx context.Context, input Evaluation, session
 	err = s.db.QueryRow(ctx, `insert into anti_abuse_challenges
 		(user_id,session_hash,action,object_key,kind,provider,token_hash,answer_hash,status,ip_hash,expires_at,metadata)
 		values($1,$2,$3,$4,'human',$5,$6,$7,'pending',$8,$9,jsonb_build_object('nonce',$10::text)) returning public_id`,
-		input.UserID, sessionHash, input.Action, truncate(input.ObjectKey, 160), provider, tokenHash(token), answerHash,
+		input.UserID, sessionHash, input.Action, ObjectKey(input.ObjectKey), provider, tokenHash(token), answerHash,
 		ipHash, expiresAt, token).Scan(&publicID)
 	if err != nil {
 		return ChallengeInfo{}, err
@@ -94,7 +94,7 @@ func (s *Service) verifyChallenge(ctx context.Context, input Evaluation, session
 	err := s.db.QueryRow(ctx, `select provider,answer_hash,metadata from anti_abuse_challenges
 		where public_id=$1 and kind='human' and status='pending' and user_id=$2 and session_hash=$3 and action=$4 and object_key=$5
 		  and expires_at>clock_timestamp() and (ip_hash='' or ip_hash=$6)`, publicID, input.UserID, sessionHash, input.Action,
-		truncate(input.ObjectKey, 160), ipHash).Scan(&provider, &answerHash, &metadata)
+		ObjectKey(input.ObjectKey), ipHash).Scan(&provider, &answerHash, &metadata)
 	if err != nil {
 		return false, true
 	}

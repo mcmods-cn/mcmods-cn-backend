@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -511,7 +512,7 @@ func (s *Service) RecordDecision(ctx context.Context, input Evaluation, decision
 	// Rejected traffic must not hold an HTTP connection while a remote or busy
 	// database persists security telemetry. The bounded queue applies memory
 	// backpressure; restrictions above still take effect before the response.
-	input.Content = truncate(input.Content, 20000)
+	input.Content = queuedContent(input.Content)
 	aggregateOnly := false
 	if decision.Outcome != AccountReview {
 		sampleKey := "anti-abuse:event-sample:" + s.privateHash("event-sample", strconv.FormatInt(input.UserID, 10)+":"+input.Action+":"+string(decision.Outcome)+":"+firstString(decision.Rules)+":"+input.IP)
@@ -537,7 +538,7 @@ func (s *Service) EnqueueSuccess(input Evaluation, decision Decision) bool {
 		default:
 		}
 	}
-	input.Content = truncate(input.Content, maximumQueuedSuccessContentBytes)
+	input.Content = queuedContent(input.Content)
 	select {
 	case s.successes <- queuedSuccessRecord{input: input, decision: decision}:
 		s.successQueued.Add(1)
@@ -729,7 +730,7 @@ func (s *Service) recordSuccess(ctx context.Context, input Evaluation, decision 
 	normalized := NormalizeContent(duplicateFingerprintContent(input))
 	if normalized != "" && contentAction(input.Action) {
 		_, err := s.db.Exec(ctx, `insert into anti_abuse_content_fingerprints(user_id,action,object_key,exact_hash,simhash,ip_hash,event_id)
-			values($1,$2,$3,$4,$5,$6,$7)`, input.UserID, input.Action, truncate(input.ObjectKey, 160), ContentHash(normalized), int64(SimHash(normalized)), s.privateHash("ip", input.IP), eventID)
+			values($1,$2,$3,$4,$5,$6,$7)`, input.UserID, input.Action, ObjectKey(input.ObjectKey), ContentHash(normalized), int64(SimHash(normalized)), s.privateHash("ip", input.IP), eventID)
 		resultErr = errors.Join(resultErr, err)
 	}
 	if s.cache.ClaimThrottle(ctx, "anti-abuse-cleanup", 6*time.Hour) {
@@ -814,7 +815,7 @@ func (s *Service) insertEvent(ctx context.Context, input Evaluation, decision De
 	err := s.db.QueryRow(timeout, `insert into anti_abuse_events(user_id,action,object_type,object_key,outcome,risk_score,rule_codes,
 		ip_hash,subnet_hash,device_hash,session_hash,crawler_class,content_hash,request_id,metadata)
 		values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'{}'::jsonb) returning id`, nullableID(input.UserID), input.Action,
-		truncate(input.ObjectType, 80), truncate(input.ObjectKey, 160), decision.Outcome, decision.RiskScore, decision.Rules,
+		truncate(input.ObjectType, 80), ObjectKey(input.ObjectKey), decision.Outcome, decision.RiskScore, decision.Rules,
 		s.privateHash("ip", input.IP), s.privateHash("subnet", subnetForIP(input.IP)), s.privateHash("device", input.DeviceID),
 		s.privateHash("session", input.SessionID), crawler, contentHash(input.Content), truncate(input.RequestID, 128)).Scan(&id)
 	return id, err
@@ -1179,12 +1180,30 @@ func nullableID(value int64) any {
 	}
 	return value
 }
+
+// ObjectKey applies the same byte budget to challenge scopes and recorded events.
+func ObjectKey(value string) string {
+	return truncate(strings.TrimSpace(value), 160)
+}
+
 func truncate(value string, limit int) string {
 	if len(value) <= limit {
 		return value
 	}
+	for limit > 0 && !utf8.RuneStart(value[limit]) {
+		limit--
+	}
 	return value[:limit]
 }
+
+func queuedContent(value string) string {
+	if len(value) <= maximumQueuedSuccessContentBytes {
+		return value
+	}
+	// A short prefix must not keep an entire request body live in a worker queue.
+	return strings.Clone(truncate(value, maximumQueuedSuccessContentBytes))
+}
+
 func firstString(values []string) string {
 	if len(values) == 0 {
 		return ""

@@ -2,6 +2,7 @@ package antiabuse
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,5 +106,16 @@ func TestSuccessQueueTruncatesContentBeforeRetention(t *testing.T) {
 	queued := <-service.successes
 	if len(queued.input.Content) != maximumQueuedSuccessContentBytes {
 		t.Fatalf("queued content length = %d", len(queued.input.Content))
+	}
+}
+
+func TestSuccessQueuePreservesUnicodeWhenBoundingRetainedContent(t *testing.T) {
+	service := &Service{cfg: config.AntiAbuseConfig{Enabled: true}, successes: make(chan queuedSuccessRecord, 1)}
+	prefix := strings.Repeat("界", maximumQueuedSuccessContentBytes/3)
+	if !service.EnqueueSuccess(Evaluation{Action: "comment.create", Content: prefix + "界"}, Decision{Outcome: Allow}) {
+		t.Fatal("expected a queued record")
+	}
+	if got := (<-service.successes).input.Content; got != prefix {
+		t.Fatalf("retained %d bytes, want %d whole UTF-8 bytes", len(got), len(prefix))
 	}
 }
