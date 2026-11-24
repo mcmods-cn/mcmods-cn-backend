@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http/httptest"
 	"testing"
 
@@ -107,5 +108,46 @@ func TestClaimsAllowHonorsResolvedDeny(t *testing.T) {
 	}
 	if claimsAllow(claims, "admin.users.read") {
 		t.Fatal("resolved deny rule must not authorize a request")
+	}
+}
+
+func TestInheritedPermissionUsesNearestConcreteRoleAcrossRoots(t *testing.T) {
+	const permission = "project.edit.alpha"
+	graph := map[string]permissionRole{
+		"team":       {Parents: []string{"reviewer", "maintainer"}},
+		"reviewer":   {Parents: []string{"editor.alpha", "standard"}},
+		"maintainer": {Parents: []string{"reviewer", "editor.beta"}},
+		"standard":   {Weight: 10, Permissions: []domain.RolePermissionEntry{{Code: permission, Allow: false}}},
+	}
+	template := permissionRole{Code: "editor.[project]", Weight: 10, hasExpiringRules: true,
+		Permissions: []domain.RolePermissionEntry{{Code: "project.edit.[project]", Allow: true}}}
+	for _, assigned := range [][]string{{"team", "editor.alpha"}, {"editor.alpha", "team"}} {
+		rules := map[string]permissionCandidate{}
+		temporary := applyPermissionRoles(rules, assigned, graph, []permissionRole{template})
+		alpha, beta := rules[permission], rules["project.edit.beta"]
+		if !temporary || len(rules) != 2 || !alpha.Allow || alpha.Depth != 0 || alpha.Source != "group.editor.alpha" || !beta.Allow || beta.Depth != 2 {
+			t.Fatalf("roots %v result=%+v temporary=%t", assigned, rules, temporary)
+		}
+	}
+}
+
+func BenchmarkPermissionRoleSharedParents(b *testing.B) {
+	graph := map[string]permissionRole{"base": {Permissions: []domain.RolePermissionEntry{{Code: "news.read", Allow: true}}}}
+	parents := []string{"base"}
+	for level := 0; level < 8; level++ {
+		next := []string{fmt.Sprintf("editor_%d", level), fmt.Sprintf("author_%d", level)}
+		for _, name := range next {
+			graph[name] = permissionRole{Parents: parents, Permissions: []domain.RolePermissionEntry{{Code: "news.read", Allow: true}}}
+		}
+		parents = next
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		candidates := map[string]permissionCandidate{}
+		applyPermissionRoles(candidates, parents, graph, nil)
+		if !candidates["news.read"].Allow {
+			b.Fatal("grant was lost")
+		}
 	}
 }

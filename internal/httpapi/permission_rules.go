@@ -238,34 +238,40 @@ func resolveUsersRootPermissionsQuery(ctx context.Context, query permissionQuery
 }
 
 func applyPermissionRoles(candidates map[string]permissionCandidate, roleCodes []string, rolesByCode map[string]permissionRole, templates []permissionRole) (hasExpiringRules bool) {
-	var applyRole func(string, int, map[string]bool)
-	applyRole = func(roleCode string, depth int, path map[string]bool) {
-		if path[roleCode] {
-			return
+	// Each concrete role has the same rules and parents whichever path reached it.
+	// From all assigned roots, the first visit is the shortest inheritance path.
+	type pendingRole struct {
+		code  string
+		depth int
+	}
+	seen := make(map[string]bool, len(roleCodes))
+	pending := make([]pendingRole, 0, len(roleCodes))
+	add := func(code string, depth int) {
+		if !seen[code] {
+			seen[code] = true
+			pending = append(pending, pendingRole{code, depth})
 		}
-		role, variables, ok := resolvePermissionRole(roleCode, rolesByCode, templates)
+	}
+	for _, code := range roleCodes {
+		add(code, 0)
+	}
+	for i := 0; i < len(pending); i++ {
+		current := pending[i]
+		role, variables, ok := resolvePermissionRole(current.code, rolesByCode, templates)
 		if !ok {
-			return
+			continue
 		}
 		hasExpiringRules = hasExpiringRules || role.hasExpiringRules
-		nextPath := make(map[string]bool, len(path)+1)
-		for code := range path {
-			nextPath[code] = true
-		}
-		nextPath[roleCode] = true
 		for _, entry := range role.Permissions {
 			code := applyRoleVariables(entry.Code, variables)
 			applyPermissionCandidate(candidates, permissionCandidate{
-				PermissionRule: security.PermissionRule{Code: code, Allow: entry.Allow, Priority: role.Weight, Source: "group." + roleCode},
-				Depth:          depth,
+				PermissionRule: security.PermissionRule{Code: code, Allow: entry.Allow, Priority: role.Weight, Source: "group." + current.code},
+				Depth:          current.depth,
 			})
 		}
 		for _, parent := range role.Parents {
-			applyRole(applyRoleVariables(parent, variables), depth+1, nextPath)
+			add(applyRoleVariables(parent, variables), current.depth+1)
 		}
-	}
-	for _, roleCode := range roleCodes {
-		applyRole(roleCode, 0, map[string]bool{})
 	}
 	return hasExpiringRules
 }
