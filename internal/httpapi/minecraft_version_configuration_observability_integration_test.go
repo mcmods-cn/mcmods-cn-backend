@@ -50,11 +50,14 @@ func TestMinecraftVersionConfigurationDistinguishesMissingFromBrokenIntegration(
 	server := &Server{db: pool}
 	response := httptest.NewRecorder()
 	server.publicMinecraftVersions(response, httptest.NewRequest(http.MethodGet, "/api/v1/minecraft/versions", nil).WithContext(ctx))
-	var publicMissing minecraftVersionConfig
+	var publicMissing struct{ Data minecraftVersionConfig }
 	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &publicMissing) != nil {
 		t.Fatalf("public missing configuration status=%d body=%s; want decodable safe default", response.Code, response.Body.String())
 	}
-	for _, loader := range publicMissing.Loaders {
+	if !reflect.DeepEqual(missing, publicMissing.Data) {
+		t.Fatalf("public response did not contain the initial catalog: %#v", publicMissing.Data)
+	}
+	for _, loader := range publicMissing.Data.Loaders {
 		if loader.Versions == nil || len(loader.Versions) != 0 {
 			t.Fatalf("public missing loader %q versions=%#v; want JSON [] for unknown compatibility", loader.Code, loader.Versions)
 		}
@@ -86,6 +89,15 @@ func TestMinecraftVersionConfigurationDistinguishesMissingFromBrokenIntegration(
 	server.updateMinecraftVersions(response, updateRequest)
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("admin update over broken configuration status=%d body=%s; want 500", response.Code, response.Body.String())
+	}
+
+	for _, invalid := range []string{"null", "{}", `{"versions":null,"loaders":[]}`, `{"versions":[],"loaders":null}`} {
+		if _, err = pool.Exec(ctx, `update system_settings set value=$2::jsonb where key=$1`, minecraftVersionsSettingKey, invalid); err != nil {
+			t.Fatal(err)
+		}
+		if _, loadErr := loadMinecraftVersionConfig(ctx, pool); !errors.Is(loadErr, errMinecraftVersionConfigUnavailable) {
+			t.Errorf("invalid catalog %s returned %v", invalid, loadErr)
+		}
 	}
 
 	tooLongCode := strings.Repeat("x", 81)

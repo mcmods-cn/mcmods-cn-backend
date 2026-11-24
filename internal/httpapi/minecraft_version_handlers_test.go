@@ -41,14 +41,13 @@ func TestNextMinecraftVersionSync(t *testing.T) {
 }
 
 func TestStoredMinecraftVersionOrderIsAuthoritative(t *testing.T) {
-	base := minecraftVersionConfig{Versions: []minecraftVersionOption{{Code: "1.20.1", Type: "release"}}}
 	stored := minecraftVersionConfig{Versions: []minecraftVersionOption{
 		{Code: "26.2", Type: "release"},
 		{Code: "26.3-snapshot-3", Type: "snapshot"},
-	}}
-	merged := mergeMinecraftVersionConfig(base, stored)
-	if len(merged.Versions) != 2 || merged.Versions[0].Code != "26.2" {
-		t.Fatalf("stored version order was not preserved: %#v", merged.Versions)
+	}, Loaders: []minecraftLoaderOption{}}
+	config, err := normalizeMinecraftVersionDocument(stored)
+	if err != nil || !reflect.DeepEqual(config.Versions, stored.Versions) {
+		t.Fatalf("stored version order was not preserved: %#v, %v", config.Versions, err)
 	}
 }
 

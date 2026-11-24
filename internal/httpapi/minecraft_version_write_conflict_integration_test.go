@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -119,4 +121,22 @@ func TestMinecraftVersionManualUpdateConflictsWithInFlightSyncIntegration(t *tes
 	if err = adminPool.QueryRow(ctx, `select count(*) from minecraft_loader_artifact_versions`).Scan(&artifactCount); err != nil || artifactCount != 0 {
 		t.Fatalf("stale artifacts persisted after retry: count=%d err=%v", artifactCount, err)
 	}
+	for _, body := range []string{
+		`{"versions":[{"code":"1.20.4","type":"release"}],"commonVersions":[],"loaders":[]}`,
+		`{"versions":[],"commonVersions":[],"loaders":[]}`,
+	} {
+		written := httptest.NewRecorder()
+		server.updateMinecraftVersions(written, httptest.NewRequest(http.MethodPut, "/api/v1/admin/config/minecraft-versions", strings.NewReader(body)).WithContext(ctx))
+		public := httptest.NewRecorder()
+		server.publicMinecraftVersions(public, httptest.NewRequest(http.MethodGet, "/api/v1/minecraft/versions", nil).WithContext(ctx))
+		var saved, read struct{ Data minecraftVersionConfig }
+		if written.Code != http.StatusOK || public.Code != http.StatusOK ||
+			json.Unmarshal(written.Body.Bytes(), &saved) != nil || json.Unmarshal(public.Body.Bytes(), &read) != nil {
+			t.Fatalf("catalog save/read failed: PUT=%d GET=%d", written.Code, public.Code)
+		}
+		if read.Data.Loaders == nil || read.Data.CommonVersions == nil || !reflect.DeepEqual(saved.Data, read.Data) {
+			t.Fatalf("catalog changed after saving: returned %#v, read back %#v", saved.Data, read.Data)
+		}
+	}
+
 }

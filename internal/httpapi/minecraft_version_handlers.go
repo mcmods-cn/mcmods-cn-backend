@@ -92,7 +92,7 @@ func (s *Server) updateMinecraftVersions(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "request body is invalid")
 		return
 	}
-	config, err := normalizeMinecraftVersionConfig(payload)
+	config, err := normalizeMinecraftVersionDocument(payload)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -140,11 +140,11 @@ func loadMinecraftVersionConfig(ctx context.Context, db minecraftVersionConfigQu
 	if err = json.Unmarshal(raw, &stored); err != nil {
 		return minecraftVersionConfig{}, fmt.Errorf("%w: decode setting: %v", errMinecraftVersionConfigUnavailable, err)
 	}
-	normalized, err := normalizeMinecraftVersionConfig(stored)
+	normalized, err := normalizeMinecraftVersionDocument(stored)
 	if err != nil {
 		return minecraftVersionConfig{}, fmt.Errorf("%w: normalize setting: %v", errMinecraftVersionConfigUnavailable, err)
 	}
-	return mergeMinecraftVersionConfig(config, normalized), nil
+	return normalized, nil
 }
 
 func classifyMinecraftVersionCodes(config minecraftVersionConfig, values []string, maximum int) (recognized, unknown []string, err error) {
@@ -218,18 +218,13 @@ func minecraftVersionType(value string, codes ...string) string {
 	}
 }
 
-func mergeMinecraftVersionConfig(base, stored minecraftVersionConfig) minecraftVersionConfig {
-	if len(stored.Versions) > 0 {
-		base.Versions = stored.Versions
+// The PUT and the persisted setting are complete catalog documents. An
+// explicitly empty list is a valid selection. Defaults only seed an absent row.
+func normalizeMinecraftVersionDocument(payload minecraftVersionConfig) (minecraftVersionConfig, error) {
+	if payload.Versions == nil || payload.Loaders == nil {
+		return minecraftVersionConfig{}, &requestError{message: "versions and loaders must be arrays"}
 	}
-	if len(stored.CommonVersions) > 0 {
-		base.CommonVersions = stored.CommonVersions
-	}
-	if len(stored.Loaders) > 0 {
-		base.Loaders = stored.Loaders
-	}
-	copyMinecraftSyncMetadata(&base, stored)
-	return base
+	return normalizeMinecraftVersionConfig(payload)
 }
 
 func copyMinecraftSyncMetadata(target *minecraftVersionConfig, source minecraftVersionConfig) {
