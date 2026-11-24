@@ -545,7 +545,7 @@ func (cfg Config) Validate() error {
 	if cfg.Typesense.Enabled {
 		typesenseURL, parseErr := url.Parse(strings.TrimSpace(cfg.Typesense.URL))
 		if parseErr != nil || typesenseURL.Scheme == "" || typesenseURL.Host == "" || typesenseURL.User != nil ||
-			(typesenseURL.Scheme != "http" && typesenseURL.Scheme != "https") || typesenseURL.RawQuery != "" || typesenseURL.Fragment != "" {
+			(typesenseURL.Scheme != "http" && typesenseURL.Scheme != "https") || strings.ContainsAny(cfg.Typesense.URL, "?#") {
 			problems = append(problems, errors.New("TYPESENSE_URL must be an absolute HTTP(S) URL without credentials, query, or fragment"))
 		}
 		if strings.TrimSpace(cfg.Typesense.APIKey) == "" {
@@ -605,7 +605,7 @@ func (cfg Config) Validate() error {
 	frontend, err := url.Parse(strings.TrimSpace(cfg.FrontendOrigin))
 	if err != nil || frontend.Scheme == "" || frontend.Host == "" || frontend.User != nil ||
 		(frontend.Scheme != "http" && frontend.Scheme != "https") ||
-		frontend.RawQuery != "" || frontend.Fragment != "" || (frontend.Path != "" && frontend.Path != "/") {
+		strings.ContainsAny(cfg.FrontendOrigin, "?#") || (frontend.Path != "" && frontend.Path != "/") {
 		problems = append(problems, errors.New("FRONTEND_ORIGIN must be an absolute HTTP(S) origin without path, query, or fragment"))
 	} else if environment == "production" && frontend.Scheme != "https" {
 		problems = append(problems, errors.New("FRONTEND_ORIGIN must use HTTPS in production"))
