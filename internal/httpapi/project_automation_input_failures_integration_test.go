@@ -19,7 +19,7 @@ func TestProjectAutomationSeparatesUnavailableFactsFromPolicyDecisionsIntegratio
 		t.Fatalf("expected the actual restrictive license, code=%s err=%v", code, err)
 	}
 	job.LicenseOverride, job.OverrideReason, job.OverrideSource = true, "Written permission", "Fixture agreement"
-	if err := worker.checkRedistribution(f.ctx, job); err != nil {
+	if _, err := requireProjectRedistribution(f.ctx, f.db, job); err != nil {
 		t.Fatalf("explicit redistribution permission: %v", err)
 	}
 
@@ -33,7 +33,7 @@ func TestProjectAutomationSeparatesUnavailableFactsFromPolicyDecisionsIntegratio
 		t.Fatal(err)
 	}
 	var pgErr *pgconn.PgError
-	if err := worker.checkRedistribution(f.ctx, job); !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
+	if _, err := requireProjectRedistribution(f.ctx, f.db, job); !errors.As(err, &pgErr) || pgErr.Code != "42P01" {
 		t.Errorf("policy storage error under manual override=%v", err)
 	}
 	job.LicenseOverride = false

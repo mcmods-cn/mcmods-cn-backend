@@ -309,7 +309,7 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 		}
 		return result, "update_conflict", updateErr
 	case "site_downloads":
-		if err = worker.checkRedistribution(ctx, job); err != nil {
+		if _, err = requireProjectRedistribution(ctx, worker.server.db, job); err != nil {
 			if errors.Is(err, errRedistributionNotAllowed) {
 				return nil, "license_denied", err
 			}
@@ -320,6 +320,14 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 			return nil, providerFailureCode(loadErr), loadErr
 		}
 		result, mirrorErr := worker.mirrorFiles(ctx, job, cfg, files)
+		switch {
+		case errors.Is(mirrorErr, errRedistributionNotAllowed):
+			return result, "license_denied", mirrorErr
+		case errors.Is(mirrorErr, errAutomationPermissionDenied):
+			return result, "automation_permission_denied", mirrorErr
+		case errors.Is(mirrorErr, errProjectAutomationParentUnavailable):
+			return result, "update_conflict", mirrorErr
+		}
 		result, maintenanceErr := worker.withMaintenanceResult(ctx, job, result, latestProviderFileActivity(files))
 		if mirrorErr == nil && maintenanceErr != nil {
 			return result, "maintenance_status_update_failed", maintenanceErr
@@ -821,15 +829,15 @@ func (worker *ProjectAutomationWorker) currentProjectVersions(ctx context.Contex
 	return versions, err
 }
 
-func (worker *ProjectAutomationWorker) checkRedistribution(ctx context.Context, job projectAutomationJob) error {
-	license, allowed, err := projectRedistributionPolicy(ctx, worker.server.db, job.ProjectType, job.InternalID)
+func requireProjectRedistribution(ctx context.Context, query databaseQuery, job projectAutomationJob) (string, error) {
+	license, allowed, err := projectRedistributionPolicy(ctx, query, job.ProjectType, job.InternalID)
 	if err != nil {
-		return fmt.Errorf("read project redistribution policy: %w", err)
+		return "", fmt.Errorf("read project redistribution policy: %w", err)
 	}
-	if allowed || job.LicenseOverride && strings.TrimSpace(job.OverrideReason) != "" && strings.TrimSpace(job.OverrideSource) != "" {
-		return nil
+	if !allowed && !(job.LicenseOverride && strings.TrimSpace(job.OverrideReason) != "" && strings.TrimSpace(job.OverrideSource) != "") {
+		return "", fmt.Errorf("%w: %q", errRedistributionNotAllowed, license)
 	}
-	return fmt.Errorf("%w: %q", errRedistributionNotAllowed, license)
+	return license, nil
 }
 
 func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job projectAutomationJob, cfg modImportConfig, files []providerProjectFile) (map[string]any, error) {
@@ -917,38 +925,8 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 		if downloadErr != nil {
 			return result(), downloadErr
 		}
-		metadata, _ := json.Marshal(file)
-		tx, txErr := worker.server.db.Begin(ctx)
-		if txErr != nil {
-			return nil, errors.Join(txErr, worker.cleanupUnregisteredProjectMirror(ctx, client, ossCfg, objectKey))
-		}
-		var ossFileID int64
-		txErr = lockProjectAutomationRunTx(ctx, tx, job)
-		if txErr == nil {
-			txErr = tx.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
-			content_type,size_bytes,source_size_bytes,sha256,status,scan_status) values($1,$2,$3,$4,$5,'project_auto_update',$6,$6,
-			'application/octet-stream',$7,$7,$8,'active','pending') returning id`, ossCfg.Bucket, ossCfg.displayEndpoint(), ossCfg.Region,
-				objectKey, ossCategoryFromObjectKey(objectKey, ossCfg.Prefix), file.FileName, size, digest).Scan(&ossFileID)
-		}
-		if txErr == nil {
-			_, txErr = tx.Exec(ctx, `insert into mirrored_project_files(project_route_id,source_type,external_file_id,file_sha256,byte_size,oss_file_id,
-			license_spdx_id,status,metadata) values($1,$2,$3,$4,$5,$6,coalesce(
-				(select license from mods where $7='mod' and id=$8),
-				(select license from simple_projects where $7<>'mod' and id=$8 and project_type=$7)),
-				'scanning',$9::jsonb)`, job.RouteID, job.SourceType, file.ID, digest, size, ossFileID, job.ProjectType, job.InternalID, metadata)
-		}
-		if txErr == nil {
-			txErr = tx.Commit(ctx)
-		} else {
-			_ = tx.Rollback(ctx)
-		}
-		if txErr != nil {
-			_ = tx.Rollback(ctx)
-			cleanupErr := worker.cleanupUnregisteredProjectMirror(ctx, client, ossCfg, objectKey)
-			if cleanupErr != nil {
-				return nil, errors.Join(txErr, cleanupErr)
-			}
-			return nil, txErr
+		if err = worker.registerDownloadedProjectMirror(ctx, job, ossCfg, file, objectKey, size, digest); err != nil {
+			return result(), errors.Join(err, worker.cleanupUnregisteredProjectMirror(ctx, client, ossCfg, objectKey))
 		}
 		queued++
 	}
@@ -956,6 +934,55 @@ func (worker *ProjectAutomationWorker) mirrorFiles(ctx context.Context, job proj
 		return result(), fmt.Errorf("%w: %d file(s) require a clean rescan", errProjectMirrorScanRejected, scanFailures)
 	}
 	return result(), nil
+}
+
+// Verify current project authority after the external download. The run fence
+// holds the setting and bound source, including any written redistribution grant.
+func (worker *ProjectAutomationWorker) registerDownloadedProjectMirror(ctx context.Context, job projectAutomationJob, cfg ossConfigPayload, file providerProjectFile, objectKey string, size int64, digest string) error {
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockProjectAutomationRunTx(ctx, tx, job); err != nil {
+		return err
+	}
+	approved, err := projectFileTargetIsApprovedTx(ctx, tx, job.ProjectType, job.InternalID)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && !approved {
+		return errProjectAutomationParentUnavailable
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = authorizeAutomationProject(ctx, tx, job.ActorID, job.ProjectPublicID, false, true); err != nil {
+		return err
+	}
+	license, err := requireProjectRedistribution(ctx, tx, job)
+	if err != nil {
+		return err
+	}
+	// The external project is taken from the validated source binding. Keep it
+	// with the provider snapshot for inspection after the project is rebound.
+	if job.ExternalID != "" {
+		file.ProviderProjectID = job.ExternalID
+	}
+	metadata, err := json.Marshal(file)
+	if err != nil {
+		return err
+	}
+	var ossFileID int64
+	err = tx.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,category,source,original_name,source_original_name,
+        content_type,size_bytes,source_size_bytes,sha256,status,scan_status) values($1,$2,$3,$4,$5,'project_auto_update',$6,$6,
+        'application/octet-stream',$7,$7,$8,'active','pending') returning id`, cfg.Bucket, cfg.displayEndpoint(), cfg.Region, objectKey, ossCategoryFromObjectKey(objectKey, cfg.Prefix), file.FileName, size, digest).Scan(&ossFileID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `insert into mirrored_project_files(project_route_id,source_type,external_file_id,file_sha256,byte_size,oss_file_id,
+        license_spdx_id,status,metadata) values($1,$2,$3,$4,$5,$6,$7,'scanning',$8::jsonb)`, job.RouteID, job.SourceType, file.ID, digest, size, ossFileID, license, metadata)
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (worker *ProjectAutomationWorker) cleanupUnregisteredProjectMirror(ctx context.Context, client *aliyunoss.Client, cfg ossConfigPayload, objectKey string) error {
