@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -573,16 +572,42 @@ func decodeLiteLoaderMinecraftVersions(payload []byte) ([]string, error) {
 }
 
 func resolveArtifactMinecraftVersions(artifacts, known []string) []string {
-	sortedKnown := append([]string(nil), known...)
-	sort.SliceStable(sortedKnown, func(i, j int) bool { return len(sortedKnown[i]) > len(sortedKnown[j]) })
+	knownOrder := make(map[string]int, len(known))
+	longest := 0
+	for index, version := range known {
+		if _, exists := knownOrder[version]; !exists {
+			knownOrder[version] = index
+			longest = max(longest, len(version))
+		}
+	}
+
 	resolved := make([]string, 0, len(artifacts))
 	for _, artifact := range artifacts {
 		artifact = strings.TrimSpace(artifact)
-		for _, version := range sortedKnown {
-			if artifact == version || strings.HasPrefix(artifact, version+"-") || strings.HasSuffix(artifact, "-"+version) {
-				resolved = append(resolved, version)
-				break
+		if _, exact := knownOrder[artifact]; exact {
+			resolved = append(resolved, artifact)
+			continue
+		}
+		best, bestOrder := "", len(known)
+		consider := func(candidate string) {
+			if len(candidate) < len(best) || len(candidate) > longest {
+				return
 			}
+			index, known := knownOrder[candidate]
+			if known && (len(candidate) > len(best) || index < bestOrder) {
+				best, bestOrder = candidate, index
+			}
+		}
+		// Historical Forge releases put the game version at either end. A
+		// version can itself contain hyphens, so inspect each boundary.
+		for i := 0; i < len(artifact); i++ {
+			if artifact[i] == '-' {
+				consider(artifact[:i])
+				consider(artifact[i+1:])
+			}
+		}
+		if best != "" {
+			resolved = append(resolved, best)
 		}
 	}
 	return uniqueTrimmed(resolved, maxMinecraftVersions)

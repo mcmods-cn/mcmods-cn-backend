@@ -76,6 +76,15 @@ func TestResolveForgeMinecraftVersions(t *testing.T) {
 	}
 }
 
+func TestResolveForgeMinecraftVersionPrefersLongestThenCatalogOrder(t *testing.T) {
+	known := []string{"bbb", "aaa", "aaa-pre", "a", "aaa-pre-1"}
+	artifacts := []string{"aaa-bbb", "bbb-aaa", "aaa-pre-2", "forge-aaa-pre-1", "aaa-pre", "unknown"}
+	want := []string{"bbb", "aaa-pre", "aaa-pre-1"}
+	if got := resolveArtifactMinecraftVersions(artifacts, known); !reflect.DeepEqual(got, want) {
+		t.Errorf("resolved versions %q, want %q", got, want)
+	}
+}
+
 func TestResolveNeoForgeMinecraftVersions(t *testing.T) {
 	known := []string{"1.20.1", "1.20.4", "1.21", "1.21.1", "25w14craftmine", "26.2"}
 	artifacts := []string{"1.20.1-47.1.106", "20.4.251", "21.0.167", "21.1.241", "0.25w14craftmine.3-beta", "26.2.18-beta"}
