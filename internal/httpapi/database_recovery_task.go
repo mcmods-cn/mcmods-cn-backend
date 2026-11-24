@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"time"
 
 	"mcmods-cn-backend/internal/queue"
 )
@@ -13,4 +14,29 @@ func runDatabaseRecoveryTask(ctx context.Context, client *queue.Client, code str
 		return run(ctx)
 	}
 	return client.RunTask(ctx, code, run)
+}
+
+func startDatabaseJobHeartbeat(parent context.Context, interval time.Duration, renew func(context.Context) error) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := renew(ctx); err != nil {
+					cancel(err)
+					return
+				}
+			}
+		}
+	}()
+	return ctx, func() {
+		cancel(context.Canceled)
+		<-done
+	}
 }

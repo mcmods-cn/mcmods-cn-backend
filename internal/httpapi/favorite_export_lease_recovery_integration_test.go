@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -30,6 +31,31 @@ func TestFavoriteExportExhaustedLeaseRecoveryIntegration(t *testing.T) {
 		t.Fatalf("create expired export task: %v", err)
 	}
 	worker := NewFavoriteModpackExportWorker(cfg, pool, nil)
+	var resultFile int64
+	if err := pool.QueryRow(ctx, `insert into oss_files(bucket,endpoint,region,object_key,source,status,scan_status)
+		values('fixture','oss.example','region','tmp/late.mrpack','favorite_modpack_export','active','trusted_generated') returning id`).Scan(&resultFile); err != nil {
+		t.Fatal(err)
+	}
+	if published, err := worker.finalizeFavoriteExportArtifact(ctx, taskID, "expired-test", resultFile, 100, "fixture", time.Now().Add(time.Hour)); published || err == nil {
+		t.Fatalf("expired attempt published artifact %t, error %v", published, err)
+	}
+	cause := errors.New("fixture build failure")
+	for _, attempt := range []int{1, favoriteExportMaxAttempts(cfg.FavoriteExport.MaxBuildAttempts)} {
+		if _, err := pool.Exec(ctx, "update favorite_modpack_export_tasks set attempt_count=$2 where public_id=$1", taskID, attempt); err != nil {
+			t.Fatal(err)
+		}
+		if err := worker.fail(ctx, taskID, "expired-test", "BUILD_FAILED", cause); !errors.Is(err, cause) {
+			t.Fatalf("attempt %d cause = %v", attempt, err)
+		}
+		var stillOwned bool
+		if err := pool.QueryRow(ctx, `select status='processing' and lease_token='expired-test' and result_file_id is null and not exists(
+			select 1 from nats_outbox where payload#>>'{data,taskId}'=$1) from favorite_modpack_export_tasks where public_id=$1`, taskID).Scan(&stillOwned); err != nil || !stillOwned {
+			t.Fatalf("expired attempt %d altered task/notification = %t, %v", attempt, !stillOwned, err)
+		}
+	}
+	if err := worker.renewFavoriteExportLease(ctx, taskID, "expired-test", time.Minute); !errors.Is(err, errFavoriteExportLeaseLost) {
+		t.Fatalf("expired heartbeat = %v", err)
+	}
 	if err := worker.failExhaustedLeases(ctx); err != nil {
 		t.Fatalf("fail exhausted export lease: %v", err)
 	}
@@ -40,4 +66,36 @@ func TestFavoriteExportExhaustedLeaseRecoveryIntegration(t *testing.T) {
 	if status != "failed" || code != "WORKER_LEASE_EXHAUSTED" || detail != "export processing failed" {
 		t.Fatalf("unexpected recovered task state: status=%q code=%q detail=%q", status, code, detail)
 	}
+	if _, err := pool.Exec(ctx, `update favorite_modpack_export_tasks set status='processing',lease_token='new-attempt',
+		lease_expires_at=clock_timestamp()+interval '20 seconds' where public_id=$1`, taskID); err != nil {
+		t.Fatal(err)
+	}
+	renewed := make(chan error, 1)
+	_, stop := startDatabaseJobHeartbeat(ctx, 10*time.Millisecond, func(work context.Context) error {
+		err := worker.renewFavoriteExportLease(work, taskID, "new-attempt", time.Minute)
+		select {
+		case renewed <- err:
+		default:
+		}
+		return err
+	})
+	select {
+	case err := <-renewed:
+		stop()
+		if err != nil {
+			t.Fatalf("active heartbeat: %v", err)
+		}
+	case <-ctx.Done():
+		stop()
+		t.Fatal(ctx.Err())
+	}
+	var active bool
+	if err := pool.QueryRow(ctx, `select lease_token='new-attempt' and lease_expires_at>clock_timestamp()+interval '25 seconds'
+		from favorite_modpack_export_tasks where public_id=$1`, taskID).Scan(&active); err != nil || !active {
+		t.Fatalf("active lease renewed = %t, error %v", active, err)
+	}
+	if err := worker.renewFavoriteExportLease(ctx, taskID, "expired-test", time.Hour); !errors.Is(err, errFavoriteExportLeaseLost) {
+		t.Fatalf("old token renewed a new attempt: %v", err)
+	}
+
 }

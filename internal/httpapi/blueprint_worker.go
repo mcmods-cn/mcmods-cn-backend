@@ -121,7 +121,9 @@ func (worker *BlueprintWorker) processJob(ctx context.Context, jobID int64) erro
 	if err != nil || !claimed {
 		return err
 	}
-	workContext, stopHeartbeat := worker.startBlueprintJobHeartbeat(ctx, job.id, job.runToken)
+	workContext, stopHeartbeat := startDatabaseJobHeartbeat(ctx, blueprintHeartbeatInterval, func(work context.Context) error {
+		return worker.renewBlueprintJobLease(work, job.id, job.runToken)
+	})
 	var workErr error
 	switch job.operation {
 	case "normalize":
@@ -180,31 +182,6 @@ func (worker *BlueprintWorker) claimBlueprintJob(ctx context.Context, jobID int6
 		return claimedBlueprintJob{}, false, errBlueprintJobLeaseActive
 	}
 	return claimedBlueprintJob{}, false, fmt.Errorf("blueprint job %d is not claimable: status=%s attempts=%d/%d: %s", jobID, status, attempts, maxAttempts, lastError)
-}
-
-func (worker *BlueprintWorker) startBlueprintJobHeartbeat(parent context.Context, jobID int64, runToken string) (context.Context, func()) {
-	ctx, cancel := context.WithCancelCause(parent)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		ticker := time.NewTicker(blueprintHeartbeatInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := worker.renewBlueprintJobLease(ctx, jobID, runToken); err != nil {
-					cancel(err)
-					return
-				}
-			}
-		}
-	}()
-	return ctx, func() {
-		cancel(context.Canceled)
-		<-done
-	}
 }
 
 // Materialize the locked row before checking time. An unchanged tuple can

@@ -321,14 +321,11 @@ func (worker *FavoriteModpackExportWorker) handle(ctx context.Context, raw []byt
 }
 
 func (worker *FavoriteModpackExportWorker) process(ctx context.Context, taskID string) error {
-	var ownerID int64
-	var name, version, minecraftVersion, loader, loaderVersion string
-	var taskCounts favoriteExportResultCounts
 	maxAttempts := favoriteExportMaxAttempts(worker.server.cfg.FavoriteExport.MaxBuildAttempts)
 	leaseTTL := favoriteExportLeaseTTL(worker.server.cfg.FavoriteExport.LeaseTTL)
 	leaseToken := newExportID()
 	tag, err := worker.server.db.Exec(ctx, `update favorite_modpack_export_tasks set status='processing',stage='building',
-		attempt_count=attempt_count+1,lease_token=$2,lease_expires_at=now()+$4::interval,
+		attempt_count=attempt_count+1,lease_token=$2,lease_expires_at=clock_timestamp()+$4::interval,
 		started_at=coalesce(started_at,now()),updated_at=now()
 		where public_id=$1 and attempt_count<$3 and (
 			(status='pending' and coalesce(lease_expires_at,now())<=now()) or
@@ -339,8 +336,40 @@ func (worker *FavoriteModpackExportWorker) process(ctx context.Context, taskID s
 	if tag.RowsAffected() == 0 {
 		return nil
 	}
+	work, stop := startDatabaseJobHeartbeat(ctx, max(time.Nanosecond, leaseTTL/3), func(work context.Context) error {
+		return worker.renewFavoriteExportLease(work, taskID, leaseToken, leaseTTL)
+	})
+	err = worker.buildFavoriteExport(work, taskID, leaseToken, maxAttempts)
+	heartbeatErr := context.Cause(work)
+	stop()
+	if err != nil {
+		return errors.Join(err, heartbeatErr)
+	}
+	return nil
+}
+
+var errFavoriteExportLeaseLost = errors.New("favorite export lease was lost")
+
+// Check the deadline after acquiring the row lock, including when a locker
+// leaves the row unchanged. Renewals cannot revive an expired attempt.
+func (worker *FavoriteModpackExportWorker) renewFavoriteExportLease(ctx context.Context, taskID, leaseToken string, ttl time.Duration) error {
+	tag, err := worker.server.db.Exec(ctx, `with locked as materialized (
+		select id, lease_expires_at from favorite_modpack_export_tasks
+		where public_id=$1 and status='processing' and lease_token=$2 for no key update
+	) update favorite_modpack_export_tasks task set lease_expires_at=clock_timestamp()+$3::interval
+		from locked where task.id=locked.id and locked.lease_expires_at>clock_timestamp()`, taskID, leaseToken, pgInterval(ttl))
+	if err == nil && tag.RowsAffected() != 1 {
+		return errFavoriteExportLeaseLost
+	}
+	return err
+}
+
+func (worker *FavoriteModpackExportWorker) buildFavoriteExport(ctx context.Context, taskID, leaseToken string, maxAttempts int) error {
+	var ownerID int64
+	var name, version, minecraftVersion, loader, loaderVersion string
+	var taskCounts favoriteExportResultCounts
 	var attempt int
-	err = worker.server.db.QueryRow(ctx, `select owner_user_id,pack_name,pack_version_id,minecraft_version,loader_type,loader_version,attempt_count,
+	err := worker.server.db.QueryRow(ctx, `select owner_user_id,pack_name,pack_version_id,minecraft_version,loader_type,loader_version,attempt_count,
 		collection_item_count,exported_mod_count,auto_dependency_count,skipped_item_count,failed_item_count,final_file_count
 		from favorite_modpack_export_tasks where public_id=$1 and lease_token=$2`, taskID, leaseToken).
 		Scan(&ownerID, &name, &version, &minecraftVersion, &loader, &loaderVersion, &attempt,
@@ -412,7 +441,9 @@ func (worker *FavoriteModpackExportWorker) process(ctx context.Context, taskID s
 	expires := time.Now().Add(favoriteExportArtifactTTL(worker.server.cfg.FavoriteExport.ArtifactTTL))
 	_, err = worker.finalizeFavoriteExportArtifact(ctx, taskID, leaseToken, fileID, result.Size, result.SHA256, expires)
 	if err != nil {
-		compensationErr := worker.compensateUnlinkedFavoriteExportArtifact(ctx, taskID, fileID)
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		compensationErr := worker.compensateUnlinkedFavoriteExportArtifact(cleanup, taskID, fileID)
 		return errors.Join(err, compensationErr)
 	}
 	return nil
@@ -475,17 +506,17 @@ func (worker *FavoriteModpackExportWorker) finalizeFavoriteExportArtifact(ctx co
 		return false, nil
 	}
 	if status != "processing" || currentLease != leaseToken {
-		return false, errors.New("favorite export lease was lost before completion")
+		return false, errFavoriteExportLeaseLost
 	}
 	tag, err := tx.Exec(ctx, `update favorite_modpack_export_tasks set status='ready',stage='completed',
 		result_file_id=$3,result_file_size=$4,result_sha256=$5,finished_at=now(),expires_at=$6,updated_at=now(),
 		error_code='',error_detail='',lease_token='',lease_expires_at=null
-		where public_id=$1 and lease_token=$2 and status='processing'`, taskID, leaseToken, fileID, fileSize, sha256, expires)
+		where public_id=$1 and lease_token=$2 and status='processing' and lease_expires_at>clock_timestamp()`, taskID, leaseToken, fileID, fileSize, sha256, expires)
 	if err != nil {
 		return false, err
 	}
 	if tag.RowsAffected() != 1 {
-		return false, errors.New("favorite export lease was lost before completion")
+		return false, errFavoriteExportLeaseLost
 	}
 	var ownerID int64
 	var name, minecraftVersion, loader, loaderVersion string
@@ -524,33 +555,37 @@ func (worker *FavoriteModpackExportWorker) cleanupCancelledFavoriteExportArtifac
 
 func (worker *FavoriteModpackExportWorker) fail(ctx context.Context, taskID, leaseToken, code string, cause error) error {
 	slog.Error("favorite modpack export task failed", "task_id", taskID, "code", code, "error", cause)
+	tx, err := worker.server.db.Begin(ctx)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("begin favorite export failure: %w", err))
+	}
+	defer tx.Rollback(ctx)
 	var attempts int
-	if err := worker.server.db.QueryRow(ctx, `select attempt_count from favorite_modpack_export_tasks where public_id=$1 and lease_token=$2`, taskID, leaseToken).Scan(&attempts); err != nil {
+	if err := tx.QueryRow(ctx, `select attempt_count from favorite_modpack_export_tasks
+		where public_id=$1 and lease_token=$2 and status='processing' for no key update`, taskID, leaseToken).Scan(&attempts); err != nil {
 		return errors.Join(cause, fmt.Errorf("load favorite export failure attempt for lease: %w", err))
 	}
 	if attempts < favoriteExportMaxAttempts(worker.server.cfg.FavoriteExport.MaxBuildAttempts) {
 		retryDelay := time.Duration(max(1, attempts)*10) * time.Second
-		tag, err := worker.server.db.Exec(ctx, `update favorite_modpack_export_tasks set status='pending',stage='retry_wait',
+		tag, err := tx.Exec(ctx, `update favorite_modpack_export_tasks set status='pending',stage='retry_wait',
 			error_code=$3,error_detail='temporary processing failure',lease_token='',lease_expires_at=now()+$4::interval,updated_at=now()
-			where public_id=$1 and lease_token=$2`, taskID, leaseToken, code, fmt.Sprintf("%d seconds", int(retryDelay.Seconds())))
+			where public_id=$1 and lease_token=$2 and lease_expires_at>clock_timestamp()`, taskID, leaseToken, code, fmt.Sprintf("%d seconds", int(retryDelay.Seconds())))
 		if err != nil {
 			return errors.Join(cause, fmt.Errorf("persist favorite export retry state: %w", err))
 		}
 		if tag.RowsAffected() != 1 {
-			return errors.Join(cause, errors.New("favorite export lease was lost before retry state persisted"))
+			return errors.Join(cause, errFavoriteExportLeaseLost)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return errors.Join(cause, fmt.Errorf("commit favorite export retry state: %w", err))
 		}
 		return cause
 	}
 	var ownerID int64
 	var name string
-	tx, err := worker.server.db.Begin(ctx)
-	if err != nil {
-		return errors.Join(cause, fmt.Errorf("begin terminal favorite export failure: %w", err))
-	}
-	defer tx.Rollback(ctx)
 	err = tx.QueryRow(ctx, `update favorite_modpack_export_tasks set status='failed',stage='failed',
 		error_code=$3,error_detail='export processing failed',finished_at=now(),lease_token='',lease_expires_at=null,updated_at=now()
-		where public_id=$1 and lease_token=$2 returning owner_user_id,pack_name`, taskID, leaseToken, code).Scan(&ownerID, &name)
+		where public_id=$1 and lease_token=$2 and lease_expires_at>clock_timestamp() returning owner_user_id,pack_name`, taskID, leaseToken, code).Scan(&ownerID, &name)
 	if err != nil {
 		return errors.Join(cause, fmt.Errorf("persist terminal favorite export failure: %w", err))
 	}
