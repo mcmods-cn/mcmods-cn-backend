@@ -25,6 +25,9 @@ func serveAutomationCurseForgeFixture(t *testing.T, handler http.Handler) {
 	t.Cleanup(fixture.Close)
 	original := http.DefaultTransport
 	transport := original.(*http.Transport).Clone()
+	// CI may configure an outbound HTTPS proxy. This fixture's TLS connection
+	// belongs exclusively to its local listener.
+	transport.Proxy = nil
 	dialer := tls.Dialer{Config: fixture.Client().Transport.(*http.Transport).TLSClientConfig.Clone()}
 	dialer.Config.ServerName = "example.com"
 	transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
