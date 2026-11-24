@@ -60,7 +60,7 @@ func TestFavoriteExportReportAndWorkerFailuresAreObservableIntegration(t *testin
 			reason_detail text not null default '',modrinth_project_id text not null default '',modrinth_version_id text not null default '',
 			selected_version_name text not null default '',selected_file_name text not null default '',minecraft_version text not null default '',
 			loader text not null default '',release_type text not null default '',env_client text not null default '',env_server text not null default '',
-			file_size text not null,sha1 text not null default '',sha512 text not null default '',download_url text not null default '',
+			file_size bigint not null,sha1 text not null default '',sha512 text not null default '',download_url text not null default '',
 			dependency_of jsonb not null
 		);
 		insert into favorite_collections values(1,'arch018c1');
@@ -92,7 +92,8 @@ func TestFavoriteExportReportAndWorkerFailuresAreObservableIntegration(t *testin
 		t.Fatalf("corrupt dependency report status = %d, body=%s", response.Code, response.Body.String())
 	}
 
-	if _, err = pool.Exec(ctx, `update favorite_modpack_export_items set file_size='broken',dependency_of='[]'::jsonb`); err != nil {
+	if _, err = pool.Exec(ctx, `alter table favorite_modpack_export_items alter column file_size type text using file_size::text;
+		update favorite_modpack_export_items set file_size='broken',dependency_of='[]'::jsonb`); err != nil {
 		t.Fatal(err)
 	}
 	worker := NewFavoriteModpackExportWorker(config.Config{}, pool, nil)
