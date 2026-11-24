@@ -217,3 +217,25 @@ func TestSEC031CommentSubresourcesHideCommentsWhoseTargetIsInvisibleIntegration(
 		assertRepliesVisible(t, claims)
 	})
 }
+
+func TestPublicLinksFollowNotificationAudienceIntegration(t *testing.T) {
+	f := newTEST022Fixture(t, false)
+	for _, broadcast := range []bool{false, true} {
+		var recipient any
+		if !broadcast {
+			recipient = f.userIDs[f.editor]
+		}
+		var id string
+		if err := f.db.QueryRow(f.ctx, `insert into notifications(recipient_id,kind,title,body) values($1,'review','fixture','fixture') returning public_id`, recipient).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		path := "/api/v1/public-links/" + id
+		f.requireAt(t, 0, "", http.MethodGet, path, nil, http.StatusNotFound)
+		f.requireAt(t, 0, f.editor, http.MethodGet, path, nil, http.StatusOK)
+		want := http.StatusNotFound
+		if broadcast {
+			want = http.StatusOK
+		}
+		f.requireAt(t, 0, f.reviewer, http.MethodGet, path, nil, want)
+	}
+}

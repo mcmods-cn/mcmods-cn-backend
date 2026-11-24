@@ -215,7 +215,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/v1/catalog/recipes/{publicId}/render", s.optionalAuth(s.globalRecipeRender))
 	s.mux.HandleFunc("PUT /api/v1/catalog/recipes/{publicId}", s.requirePermission("content.write", s.catalogRecipeDetail))
 	s.mux.HandleFunc("DELETE /api/v1/catalog/recipes/{publicId}", s.requirePermission("content.write", s.catalogRecipeDetail))
-	s.mux.HandleFunc("GET /api/v1/public-links/{publicId}", s.resolvePublicLink)
+	s.mux.HandleFunc("GET /api/v1/public-links/{publicId}", s.optionalAuth(s.resolvePublicLink))
 	s.mux.HandleFunc("GET /api/v1/skin-service", s.optionalAuth(s.skinService))
 	s.mux.HandleFunc("GET /api/v1/skins", s.optionalAuth(s.skins))
 	s.mux.HandleFunc("POST /api/v1/skins", s.requirePermission("skin.library.upload", s.skins))
