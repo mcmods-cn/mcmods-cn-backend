@@ -33,7 +33,9 @@ const minimumRiskRejects = boundedNumber(process.env.MCMODS_LOAD_MIN_RISK_REJECT
 const requiredCodes = splitValues(process.env.MCMODS_LOAD_REQUIRED_CODES ?? "");
 
 const results = [];
-const outcomes = [];
+let successfulResponses = 0;
+let expectedRejects = 0;
+let unexpectedResponses = 0;
 const statusCounts = new Map();
 const scenarioCounts = new Map();
 const antiAbuseCodes = new Map();
@@ -56,12 +58,15 @@ for (const stage of stages) {
 }
 
 const elapsedSeconds = Math.max(0.001, (performance.now() - started) / 1_000);
-const sorted = results.toSorted((left, right) => left - right);
+const sorted = results.sort((left, right) => left - right);
 const success = [...statusCounts.entries()].filter(([status]) => status >= 200 && status < 400).reduce((sum, [, count]) => sum + count, 0);
 const clientErrors = [...statusCounts.entries()].filter(([status]) => status >= 400 && status < 500).reduce((sum, [, count]) => sum + count, 0);
 const serverErrors = [...statusCounts.entries()].filter(([status]) => status >= 500).reduce((sum, [, count]) => sum + count, 0);
 const outcomeSummary = summarizeLoadOutcomes({
-  outcomes,
+  successfulResponses,
+  expectedRejects,
+  unexpectedResponses,
+  observedCodes: antiAbuseCodes,
   networkErrors,
   completed,
   minimumSuccessfulResponses,
@@ -155,12 +160,10 @@ async function worker(workerID, deadline) {
         }
       } catch {}
       statusCounts.set(response.status, (statusCounts.get(response.status) ?? 0) + 1);
-      outcomes.push({
-        name: request.name,
-        status: response.status,
-        code,
-        ...classifyLoadResponse(request, response.status, code),
-      });
+      const outcome = classifyLoadResponse(request, response.status, code);
+      if (!outcome.expected) unexpectedResponses++;
+      else if (outcome.expectedReject) expectedRejects++;
+      else successfulResponses++;
     } catch {
       networkErrors++;
     } finally {

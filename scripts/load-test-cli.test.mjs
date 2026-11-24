@@ -53,13 +53,17 @@ async function runLoad(baseURL, extraEnvironment = {}, onStart) {
   }
 }
 
+function failureMessage(result) {
+  return result.report?.contract.failureReasons.join(", ") || result.stderr;
+}
+
 test("CLI accepts only responses in the selected request contract", async () => {
   await withLoadServer((_request, response) => {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(`{"ok":true}`);
   }, async (baseURL) => {
     const result = await runLoad(baseURL, { MCMODS_LOAD_SCENARIO: "infrastructure" });
-    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.code, 0, failureMessage(result));
     assert.ok(result.report.expectedResponses > 0);
     assert.equal(result.report.unexpectedResponses, 0);
     assert.equal(result.report.errorRate, 0);
@@ -89,7 +93,7 @@ test("CLI measures the redirect response from the selected server", async () => 
     response.end();
   }, async (baseURL) => {
     const result = await runLoad(baseURL, { MCMODS_LOAD_SCENARIO: "infrastructure" });
-    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.code, 0, failureMessage(result));
     assert.ok(result.report.statuses[302] > 0);
     assert.equal(redirectDestinationRequests, 0);
   });
@@ -138,7 +142,7 @@ test("anti-abuse CLI treats only structured configured rejections as expected", 
       MCMODS_LOAD_REQUIRED_CODES: "rate_limited",
       MCMODS_LOAD_MIN_RISK_REJECTS: "1",
     });
-    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.code, 0, failureMessage(result));
     assert.ok(result.report.expectedRejects > 0);
     assert.equal(result.report.unexpectedResponses, 0);
     assert.equal(result.report.errorRate, 0);
@@ -163,7 +167,7 @@ test("catalog CLI requests the first server page using its cursor contract", asy
       MCMODS_LOAD_STAGES: "6x1",
     });
     assert.ok(serverRequests > 0);
-    assert.equal(result.code, 0);
+    assert.equal(result.code, 0, failureMessage(result));
     assert.equal(result.report.unexpectedResponses, 0);
   });
 });
@@ -183,7 +187,7 @@ test("anti-abuse CLI records a structured 428 challenge as an expected rejection
       MCMODS_LOAD_COMMENT_TARGET_ID: "testmod01",
       MCMODS_LOAD_REQUIRED_CODES: "challenge_required",
     });
-    assert.equal(result.code, 0);
+    assert.equal(result.code, 0, failureMessage(result));
     assert.ok(result.report.statuses[428] > 0);
     assert.equal(result.report.statuses[428], result.report.expectedRejects);
     assert.equal(result.report.unexpectedResponses, 0);

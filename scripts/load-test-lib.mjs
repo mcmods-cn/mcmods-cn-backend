@@ -18,18 +18,16 @@ export function loadFailureRate(failures, completed) {
 }
 
 export function summarizeLoadOutcomes({
-  outcomes,
+  successfulResponses,
+  expectedRejects,
+  unexpectedResponses,
+  observedCodes,
   networkErrors,
   completed,
   minimumSuccessfulResponses,
   minimumRiskRejects,
   requiredCodes,
 }) {
-  const expectedResponses = outcomes.filter((outcome) => outcome.expected).length;
-  const expectedRejects = outcomes.filter((outcome) => outcome.expectedReject).length;
-  const successfulResponses = outcomes.filter((outcome) => outcome.expected && !outcome.expectedReject).length;
-  const unexpectedResponses = outcomes.length - expectedResponses;
-  const observedCodes = new Set(outcomes.map((outcome) => outcome.code).filter(Boolean));
   const missingRequiredCodes = requiredCodes.filter((code) => !observedCodes.has(code));
   const failureReasons = [];
   if (unexpectedResponses) failureReasons.push(`${unexpectedResponses} unexpected HTTP responses`);
@@ -44,7 +42,7 @@ export function summarizeLoadOutcomes({
     failureReasons.push(`missing required response codes: ${missingRequiredCodes.join(", ")}`);
   }
   return {
-    expectedResponses,
+    expectedResponses: successfulResponses + expectedRejects,
     expectedRejects,
     successfulResponses,
     unexpectedResponses,

@@ -40,11 +40,10 @@ test("expected anti-abuse rejection is distinct from unexpected HTTP failure", (
 
 test("scenario contract enforces unexpected responses, minimum volume, and required risk codes", () => {
   const summary = summarizeLoadOutcomes({
-    outcomes: [
-      { expected: true, expectedReject: false, code: "allowed" },
-      { expected: true, expectedReject: true, code: "rate_limited" },
-      { expected: false, expectedReject: false, code: "unexpected" },
-    ],
+    successfulResponses: 1,
+    expectedRejects: 1,
+    unexpectedResponses: 1,
+    observedCodes: new Set(["allowed", "rate_limited", "unexpected"]),
     networkErrors: 1,
     completed: 4,
     minimumSuccessfulResponses: 3,
