@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,16 +28,25 @@ type projectAutomationTarget struct {
 	CanonicalURL string
 }
 
-func (s *Server) projectAutomationTarget(r *http.Request) (projectAutomationTarget, error) {
+func (s *Server) projectAutomationTarget(w http.ResponseWriter, r *http.Request) (projectAutomationTarget, bool) {
 	projectType := normalizeChangelogTargetType(r.PathValue("projectType"))
 	projectID := strings.ToLower(strings.TrimSpace(r.PathValue("projectId")))
 	if !autoUpdateProjectTypes[projectType] || !validCatalogPublicID(projectID) {
-		return projectAutomationTarget{}, pgx.ErrNoRows
+		writeError(w, http.StatusNotFound, "项目不存在")
+		return projectAutomationTarget{}, false
 	}
 	var target projectAutomationTarget
 	err := s.db.QueryRow(r.Context(), `select id,internal_id,entity_type,public_id,canonical_path from public_routes
 		where entity_type=$1 and public_id=$2`, projectType, projectID).Scan(&target.RouteID, &target.InternalID, &target.ProjectType, &target.PublicID, &target.CanonicalURL)
-	return target, err
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "项目不存在")
+		return target, false
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取项目失败")
+		return target, false
+	}
+	return target, true
 }
 
 func projectAutomationAllowed(claims security.Claims, permission, projectID string) bool {
@@ -66,15 +76,11 @@ func lockProjectAutomationConfiguration(ctx context.Context, tx pgx.Tx, routeID 
 }
 
 func (s *Server) projectAutomation(w http.ResponseWriter, r *http.Request) {
-	target, err := s.projectAutomationTarget(r)
-	if errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, 404, "项目不存在")
+	target, ok := s.projectAutomationTarget(w, r)
+	if !ok {
 		return
 	}
-	if err != nil {
-		writeError(w, 500, "读取项目失败")
-		return
-	}
+	var err error
 	if !projectAutomationAllowed(currentClaims(r), "project.auto_update.view", target.PublicID) {
 		writeError(w, 403, "无权查看项目自动更新")
 		return
@@ -347,9 +353,8 @@ type bindProjectSourceRequest struct {
 }
 
 func (s *Server) bindProjectAutomationSource(w http.ResponseWriter, r *http.Request) {
-	target, err := s.projectAutomationTarget(r)
-	if err != nil {
-		writeError(w, 404, "项目不存在")
+	target, ok := s.projectAutomationTarget(w, r)
+	if !ok {
 		return
 	}
 	if !projectAutomationAllowed(currentClaims(r), "project.external_source.bind", target.PublicID) {
@@ -364,7 +369,14 @@ func (s *Server) bindProjectAutomationSource(w http.ResponseWriter, r *http.Requ
 	request.SourceType = strings.ToLower(strings.TrimSpace(request.SourceType))
 	reference, canonicalURL, verifyErr := s.verifyProjectExternalSource(r.Context(), target.ProjectType, request.SourceType, request.URL)
 	if verifyErr != nil {
-		writeError(w, 400, verifyErr.Error())
+		switch {
+		case errors.Is(verifyErr, errInvalidAutomationSource):
+			writeError(w, http.StatusBadRequest, "来源链接无效或与项目类型不匹配")
+		case errors.Is(verifyErr, errProviderSourceNotPublic), isProviderNotFound(verifyErr):
+			writeError(w, http.StatusBadRequest, "没有找到可公开使用的来源项目")
+		default:
+			writeError(w, http.StatusServiceUnavailable, "暂时无法验证来源，请稍后重试")
+		}
 		return
 	}
 	tx, err := s.db.Begin(r.Context())
@@ -417,13 +429,15 @@ func (s *Server) bindProjectAutomationSource(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, 200, map[string]any{"sourceType": request.SourceType, "externalProjectId": reference, "url": canonicalURL, "verified": true})
 }
 
+var errInvalidAutomationSource = errors.New("invalid automation source reference")
+
 func (s *Server) verifyProjectExternalSource(ctx context.Context, projectType, sourceType, rawURL string) (string, string, error) {
 	provider, canonicalURL, reference, err := parseProjectImportSource(projectType, sourceType, rawURL)
 	if sourceType == "github" && err != nil {
 		provider, canonicalURL, reference, err = parseProjectImportSource("mod", sourceType, rawURL)
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", errInvalidAutomationSource
 	}
 	cfg, err := s.modImportConfigFromSettings(ctx)
 	if err != nil {
@@ -446,7 +460,7 @@ func (s *Server) verifyProjectExternalSource(ctx context.Context, projectType, s
 		var project modrinthProject
 		headers := publicProviderHeaders(cfg.UserAgent)
 		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(reference), headers, &project); err != nil {
-			return "", "", errors.New("无法验证 Modrinth 项目")
+			return "", "", err
 		}
 		if !publicModrinthProjectStatus(project.Status) || strings.TrimSpace(project.ID) == "" {
 			return "", "", errProviderSourceNotPublic
@@ -457,7 +471,7 @@ func (s *Server) verifyProjectExternalSource(ctx context.Context, projectType, s
 		var repository githubRepository
 		headers := publicProviderHeaders(cfg.UserAgent)
 		if err = getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+reference, headers, &repository); err != nil {
-			return "", "", errors.New("无法验证 GitHub 仓库")
+			return "", "", err
 		}
 		if repository.Private == nil || *repository.Private {
 			return "", "", errProviderSourceNotPublic
@@ -467,15 +481,31 @@ func (s *Server) verifyProjectExternalSource(ctx context.Context, projectType, s
 	headers := providerCredentialHeaders(cfg.UserAgent, "curseforge", cfg.CurseForge.BaseURL, "", cfg.CurseForge.APIKey)
 	numericID, err := resolveCurseForgeProjectID(ctx, client, reference, cfg, headers)
 	if err != nil {
-		return "", "", errors.New("无法验证 CurseForge 项目")
+		return "", "", err
+	}
+	var project struct {
+		Data curseForgeMod `json:"data"`
+	}
+	if err = getProviderJSONLimited(ctx, client, cfg.CurseForge.BaseURL+"/mods/"+numericID, headers, projectFileProviderJSONLimit, &project); err != nil {
+		return "", "", err
+	}
+	if !project.Data.IsAvailable {
+		return "", "", errProviderSourceNotPublic
+	}
+	if project.Data.ID <= 0 || strconv.FormatInt(project.Data.ID, 10) != numericID {
+		return "", "", errors.New("CurseForge returned a different project identity")
+	}
+	_, _, slug, err := parseProjectImportSource(projectType, provider, project.Data.Links.WebsiteURL)
+	_, numericReferenceErr := strconv.ParseInt(reference, 10, 64)
+	if err != nil || (numericReferenceErr != nil && !strings.EqualFold(slug, reference)) {
+		return "", "", errInvalidAutomationSource
 	}
 	return numericID, canonicalURL, nil
 }
 
 func (s *Server) runProjectAutomation(w http.ResponseWriter, r *http.Request) {
-	target, err := s.projectAutomationTarget(r)
-	if err != nil {
-		writeError(w, 404, "项目不存在")
+	target, ok := s.projectAutomationTarget(w, r)
+	if !ok {
 		return
 	}
 	if !projectAutomationAllowed(currentClaims(r), "project.auto_update.run", target.PublicID) {
@@ -491,19 +521,23 @@ func (s *Server) runProjectAutomation(w http.ResponseWriter, r *http.Request) {
 	}
 	request.Kind = strings.ToLower(strings.TrimSpace(request.Kind))
 	var runID string
-	err = s.db.QueryRow(r.Context(), `insert into project_auto_update_runs(setting_id)
+	err := s.db.QueryRow(r.Context(), `insert into project_auto_update_runs(setting_id)
 		select id from project_auto_update_settings where project_route_id=$1 and update_kind=$2 and source_type is not null returning public_id`, target.RouteID, request.Kind).Scan(&runID)
+	var conflict *pgconn.PgError
+	if errors.Is(err, pgx.ErrNoRows) || errors.As(err, &conflict) && conflict.Code == "23505" && conflict.ConstraintName == "uq_project_auto_update_active_run" {
+		writeError(w, http.StatusConflict, "该类型未绑定来源、已有任务运行或配置不存在")
+		return
+	}
 	if err != nil {
-		writeError(w, 409, "该类型未绑定来源、已有任务运行或配置不存在")
+		writeError(w, http.StatusInternalServerError, "创建自动更新任务失败")
 		return
 	}
 	writeJSON(w, 202, map[string]any{"id": runID, "status": "pending"})
 }
 
 func (s *Server) projectAutomationRuns(w http.ResponseWriter, r *http.Request) {
-	target, err := s.projectAutomationTarget(r)
-	if err != nil {
-		writeError(w, 404, "项目不存在")
+	target, ok := s.projectAutomationTarget(w, r)
+	if !ok {
 		return
 	}
 	if !projectAutomationAllowed(currentClaims(r), "project.auto_update.view_logs", target.PublicID) {

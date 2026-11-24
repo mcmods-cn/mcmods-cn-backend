@@ -66,6 +66,10 @@ func TestProjectScheduleChangesPreserveApprovedRedistributionDecisionIntegration
 	}
 	// The agreement is attached to the currently bound external project.
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/mods/22" {
+			_, _ = io.WriteString(w, `{"data":{"id":22,"isAvailable":true,"links":{"websiteUrl":"https://www.curseforge.com/minecraft/mc-mods/replacement"}}}`)
+			return
+		}
 		if r.URL.Path != "/mods/search" || r.URL.Query().Get("slug") != "replacement" {
 			http.NotFound(w, r)
 			return

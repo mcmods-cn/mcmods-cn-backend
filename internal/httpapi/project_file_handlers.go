@@ -797,7 +797,7 @@ func resolveCurseForgeProjectID(ctx context.Context, client *http.Client, projec
 		return "", errors.New("CurseForge returned too many projects")
 	}
 	if len(response.Data) == 0 {
-		return "", errExternalProjectFileNotFound
+		return "", &providerHTTPStatusError{statusCode: http.StatusNotFound, message: "CurseForge project not found"}
 	}
 	return strconv.FormatInt(response.Data[0].ID, 10), nil
 }
