@@ -221,6 +221,7 @@ func ratingSchemaStatements() []string {
 		$$ language sql stable strict`,
 	}
 	statements = append(statements, popularityFactProjectionStatements()...)
+	statements = append(statements, socialPopularitySchemaStatements()...)
 	statements = append(statements, ratingEligibilityStatements()...)
 	return append(statements, []string{
 		`create or replace function record_popularity_event(target_route_id bigint,event_kind text,event_value numeric) returns void as $$
@@ -384,35 +385,7 @@ func ratingSchemaStatements() []string {
 		commentPopularityTriggerDefinitions["trg_comments_popularity_insert"],
 		commentPopularityTriggerDefinitions["trg_comments_popularity_update"],
 		commentPopularityTriggerDefinitions["trg_comments_popularity_delete"],
-		`create or replace function refresh_popularity_from_favorite() returns trigger as $$
-		declare route_id bigint; actor_user_id bigint; remaining bigint; trust numeric; metric_eligible boolean;
-		begin
-			select route.id into route_id from public_routes route where
-				route.entity_type=case when tg_op='DELETE' then old.entity_type else new.entity_type end and
-				route.internal_id=case when tg_op='DELETE' then old.entity_id else new.entity_id end and
-				route.entity_type in ('mod','modpack','plugin','map','resource_pack','shader_pack','datapack','addon','minecraft_server');
-			if route_id is null then if tg_op='DELETE' then return old; end if; return new; end if;
-			select collection.user_id into actor_user_id from favorite_collections collection
-			where collection.id=case when tg_op='DELETE' then old.collection_id else new.collection_id end;
-			trust:=coalesce(content_user_trust(actor_user_id),0.2);
-			metric_eligible:=content_popularity_actor_eligible(route_id,actor_user_id);
-			if not content_target_user_is_developer(route_id,actor_user_id) then
-				select count(*) into remaining from favorite_collection_items item
-				join favorite_collections collection on collection.id=item.collection_id
-				where collection.user_id=actor_user_id and item.entity_type=(select entity_type from public_routes where id=route_id)
-				and item.entity_id=(select internal_id from public_routes where id=route_id);
-				if tg_op='INSERT' and remaining=1 then
-					perform record_popularity_event(route_id,'favorite',4*trust);
-					if metric_eligible then perform adjust_content_popularity_lifetime_facts(route_id,0,0,0,1,0,0,0,0); end if;
-				elsif tg_op='DELETE' and remaining=0 then
-					perform record_popularity_event(route_id,'favorite',-4*trust);
-					if metric_eligible then perform adjust_content_popularity_lifetime_facts(route_id,0,0,0,-1,0,0,0,0); end if;
-				end if;
-			end if;
-			perform enqueue_content_stats_refresh(route_id,true,true);
-			if tg_op='DELETE' then return old; end if; return new;
-		end;
-		$$ language plpgsql`,
+		favoritePopularityFunctionStatement(),
 		`create trigger trg_favorite_items_popularity after insert or delete on favorite_collection_items
 			for each row execute function refresh_popularity_from_favorite()`,
 	}...)
@@ -437,8 +410,6 @@ func contentPopularityCommentRefreshFunctionStatement() string {
 	return `create or replace function refresh_popularity_from_comment() returns trigger as $$
 	declare
 		changes_sql text; source_sql text; changed record;
-		author_count bigint; previous_count bigint; commenter_delta bigint;
-		trust numeric; metric_eligible boolean;
 	begin
 		-- Final transition-table state is grouped before counting, so a batch
 		-- of first/last rows contributes exactly one author transition.
@@ -450,31 +421,8 @@ func contentPopularityCommentRefreshFunctionStatement() string {
 			source_sql:='select target_type,target_id,target_version_id,author_id,-1::bigint delta from comment_popularity_old where status=''published'' union all select target_type,target_id,target_version_id,author_id,1::bigint delta from comment_popularity_new where status=''published''';
 		end if;
 		changes_sql:='select content_route_for_comment(target_type,target_id,target_version_id) route_id,author_id,sum(delta)::bigint published_delta from ('||source_sql||') changes group by 1,2 having sum(delta)<>0 and content_route_for_comment(target_type,target_id,target_version_id) is not null order by 1,2';
-		-- Target/author row counters finish before this statement trigger.
-		-- Reuse fact row locks, in route order, before reading or changing facts.
-		for changed in execute 'select distinct route_id from ('||changes_sql||') grouped order by route_id' loop
-			insert into content_popularity_lifetime_facts(object_route_id)
-			values(changed.route_id) on conflict(object_route_id) do nothing;
-			perform 1 from content_popularity_lifetime_facts where object_route_id=changed.route_id for update;
-		end loop;
 		for changed in execute changes_sql loop
-			-- VOLATILE SQL reads a fresh READ COMMITTED snapshot after lock wait.
-			select count(*) into author_count from comments comment
-			where comment.status='published' and comment.author_id=changed.author_id
-			  and content_route_for_comment(comment.target_type,comment.target_id,comment.target_version_id)=changed.route_id;
-			previous_count:=author_count-changed.published_delta;
-			commenter_delta:=case when previous_count=0 and author_count>0 then 1
-				when previous_count>0 and author_count=0 then -1 else 0 end;
-			metric_eligible:=content_popularity_actor_eligible(changed.route_id,changed.author_id);
-			if metric_eligible then
-				perform adjust_content_popularity_lifetime_facts(changed.route_id,0,0,0,0,
-					changed.published_delta,commenter_delta,0,0);
-			end if;
-			if commenter_delta<>0 and not content_target_user_is_developer(changed.route_id,changed.author_id) then
-				trust:=coalesce(content_user_trust(changed.author_id),0.2);
-				perform record_popularity_event(changed.route_id,'comment',commenter_delta*3*trust);
-			end if;
-			perform enqueue_content_stats_refresh(changed.route_id,true,true);
+			perform adjust_social_contribution(changed.route_id,changed.author_id,changed.published_delta,0);
 		end loop;
 		return null;
 	end;
