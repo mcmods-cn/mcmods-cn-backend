@@ -101,6 +101,29 @@ jobs:
           go-version-file: go.mod
       - name: Initialize the owned job database
         uses: ./.github/actions/initialize-test-database
+      - name: Restore a logical backup and check the current application baseline
+        shell: bash
+        env:
+          PG_SERVICE: ${{ job.services.postgres.id }}
+          PGUSER: postgres
+          SOURCE_DB: mcmods_test
+          RESTORED_DB: mcmods_restore_check
+          MCMODS_SKIP_DOTENV: "true"
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/db-initialize" ./cmd/db-initialize
+          "$RUNNER_TEMP/db-initialize"
+          docker exec "$PG_SERVICE" createdb -U "$PGUSER" -T template0 "$RESTORED_DB"
+          docker exec "$PG_SERVICE" pg_dump -U "$PGUSER" --format=custom --no-owner --no-privileges "$SOURCE_DB" |
+            docker exec -i "$PG_SERVICE" pg_restore -U "$PGUSER" --single-transaction --exit-on-error --no-owner --no-privileges -d "$RESTORED_DB"
+          bot_id() {
+            docker exec "$PG_SERVICE" psql -XAtq -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$1" -c "select public_id from users where username='autobot' and status='system'"
+          }
+          original=$(bot_id "$SOURCE_DB")
+          test -n "$original"
+          test "$original" = "$(bot_id "$RESTORED_DB")"
+          DATABASE_URL=$(python3 -c 'import os, urllib.parse as u; print(u.urlsplit(os.environ["DATABASE_URL"])._replace(path="/"+os.environ["RESTORED_DB"]).geturl())')
+          "$RUNNER_TEMP/db-initialize"
       - name: Run every discovered test in isolated serial PostgreSQL batches
         run: go run ./tools/testing/db_suite
 

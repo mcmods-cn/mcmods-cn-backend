@@ -50,6 +50,8 @@ go test -race -p 1 ./internal/queue ./internal/querycache -count=1
 
 在已确认用途的 PostgreSQL 18.6 空库配置服务端环境，安装 schema 后再启动 API 与 Worker。安装 DDL、必需权限和禁用密码登录的系统身份共用一个事务。进程启动时用同一入口核对版本、DDL 定义指纹和实际 catalog 指纹。当前基线为 generation 172。外部更新日志和镜像下载分别以所属项目及供应商身份定键。项目换来源后仍保留自己的已发布内容和人工修订。版本或结构不符时拒绝启动。旧库用对应应用版本读取，只有已核实归属的开发库才可重建。[隔离环境重建](docs/testing-isolated-environment.md#重建任务自有环境)
 
+在 PostgreSQL 集成 CI 中，服务容器使用同版本的 `pg_dump --format=custom` 与 `pg_restore --single-transaction --exit-on-error`，向独立空库恢复完整结构和数据，再比较系统身份公开 ID 并运行同一份 `db-initialize`。转储使用 `--no-owner --no-privileges`，部署时单独恢复环境角色、授权和对象存储文件。[恢复门禁](.github/workflows/ci.yml)
+
 计算目录指纹时，安装事务使用 PostgreSQL 默认的间隔表示（`IntervalStyle=postgres`）和标识符引用方式（`quote_all_identifiers=off`）。评分记录保存其实际计入的分数及趋势权重。发布状态、账号或开发者资格变化时，项目、类别和评分维度通过同一写入规则校正。爬虫每日配额以首次写入草稿的时间统计。旧代际须用配套程序和数据库快照恢复；在已核实归属的空库安装当前代际。
 
 ```sh
