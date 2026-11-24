@@ -146,6 +146,32 @@ func TestSiteAffairsTranslationDraftsDoNotChangeOtherLocalesPublicationIntegrati
 	if len(page.Data.Items) != 1 || page.Data.Items[0].ID != changelogPublicID || page.Data.Items[0].Locale != "fr-FR" {
 		t.Fatalf("public page leaked draft or lost published fallback: %+v", page.Data.Items)
 	}
+
+	t.Run("fallback tie resolves the same language on list and detail", func(t *testing.T) {
+		// A sequential scan can encounter equally ranked translations in insertion order.
+		if _, err := pool.Exec(ctx, `set enable_indexscan=off; set enable_bitmapscan=off`); err != nil {
+			t.Fatal(err)
+		}
+		var entryID int64
+		var publicID string
+		if err := pool.QueryRow(ctx, `insert into site_changelogs(change_date,status,created_by)
+			values(date '2026-08-20','published',$1) returning id,public_id`, actorID).Scan(&entryID, &publicID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `insert into site_changelog_translations(changelog_id,locale,title,body_markdown,status,updated_by)
+			values($1,'ja-JP','Japanese','body','published',$2),($1,'de-DE','German','body','published',$2)`, entryID, actorID); err != nil {
+			t.Fatal(err)
+		}
+		request := siteChangelogPageRequest{Locale: "es-ES", Limit: 10}
+		page, err := server.queryPublicSiteChangelogPage(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Items) == 0 || page.Items[0].ID != publicID || page.Items[0].Locale != "de-DE" {
+			t.Fatalf("unexpected fallback in first list item: %+v", page.Items)
+		}
+		assertBUG103PublicChangelog(t, ctx, server, publicID, request.Locale, http.StatusOK, "de-DE", "German")
+	})
 }
 
 func assertBUG103AboutStatuses(t *testing.T, ctx context.Context, pool *pgxpool.Pool, pageID int64, expectedParent string, expectedTranslations map[string]string) {

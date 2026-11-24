@@ -91,7 +91,7 @@ join lateral (
 	select value.locale,value.title,value.body_markdown
 	from site_changelog_translations value
 	where value.changelog_id=page.id and value.status='published'
-	order by case value.locale when $1 then 0 when 'zh-CN' then 1 when 'en-US' then 2 else 3 end,value.locale
+	order by ` + siteAffairsTranslationOrder + `
 	limit 1
 ) translation on true
 order by page.change_date desc,page.id desc`

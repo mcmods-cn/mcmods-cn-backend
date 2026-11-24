@@ -32,13 +32,16 @@ func normalizedSiteAffairsAdminLocale(value string) (string, bool) {
 	return value, isEditableContentLocale(value)
 }
 
+// All public site-affairs views choose one published translation using the requested locale in $1.
+const siteAffairsTranslationOrder = `case value.locale when $1 then 0 when 'zh-CN' then 1 when 'en-US' then 2 else 3 end,value.locale`
+
 func (s *Server) publicAboutPage(w http.ResponseWriter, r *http.Request) {
 	locale := normalizedSiteAffairsLocale(r.URL.Query().Get("locale"))
 	var title, body, resolvedLocale string
-	err := s.db.QueryRow(r.Context(), `select translation.title,translation.body_markdown,translation.locale
-		from site_pages page join site_page_translations translation on translation.page_id=page.id
-		where page.code='about' and page.status='published' and translation.status='published'
-		order by case translation.locale when $1 then 0 when 'zh-CN' then 1 when 'en-US' then 2 else 3 end limit 1`, locale).
+	err := s.db.QueryRow(r.Context(), `select value.title,value.body_markdown,value.locale
+		from site_pages page join site_page_translations value on value.page_id=page.id
+		where page.code='about' and page.status='published' and value.status='published'
+		order by `+siteAffairsTranslationOrder+` limit 1`, locale).
 		Scan(&title, &body, &resolvedLocale)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "关于本站页面尚未发布")
@@ -180,10 +183,10 @@ func (s *Server) publicSiteChangelogDetail(w http.ResponseWriter, r *http.Reques
 	var changeDate time.Time
 	err := s.db.QueryRow(r.Context(), `select changelog.public_id,changelog.change_date,translation.locale,translation.title,translation.body_markdown
 		from site_changelogs changelog join lateral (
-			select locale,title,body_markdown from site_changelog_translations where changelog_id=changelog.id
-			and status='published'
-			order by case locale when $2 then 0 when 'zh-CN' then 1 when 'en-US' then 2 else 3 end limit 1
-		) translation on true where changelog.public_id=$1 and changelog.status='published'`, r.PathValue("id"), locale).
+			select value.locale,value.title,value.body_markdown from site_changelog_translations value
+			where value.changelog_id=changelog.id and value.status='published'
+			order by `+siteAffairsTranslationOrder+` limit 1
+		) translation on true where changelog.public_id=$2 and changelog.status='published'`, locale, r.PathValue("id")).
 		Scan(&id, &changeDate, &resolvedLocale, &title, &body)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "站点更新记录不存在")
