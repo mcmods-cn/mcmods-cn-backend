@@ -237,10 +237,7 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	rows.Close()
 	targets, targetExpiries, changed := shiftRoleTrackRoles(roles, currentExpiries, direction)
 	if !changed {
-		if err = enqueueRequestActivityTx(r, tx); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to persist role track activity")
-			return
-		}
+		skipRequestActivity(r)
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, http.StatusInternalServerError, "调整用户权限组失败")
 			return

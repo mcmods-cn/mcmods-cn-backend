@@ -199,6 +199,9 @@ func TestOCT03CBUG004ConcurrentRoleTrackReadsCommittedManualBindingIntegration(t
 			return
 		}
 		beforeVersion, beforeCreated, beforeChanges := readGrant()
+		if _, err := f.db.Exec(f.ctx, `alter table activity_event_outbox add constraint no_boundary_edit_activity check(false) not valid`); err != nil {
+			t.Fatal(err)
+		}
 		path := "/api/v1/admin/users/" + targetPublicID + "/role-tracks/oct03_track/upgrade"
 		body := f.require(t, f.reviewer, http.MethodPost, path, nil, http.StatusOK)
 		result := decodeTEST022Data[struct {
