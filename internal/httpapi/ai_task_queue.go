@@ -7,8 +7,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/queue"
 	"mcmods-cn-backend/internal/security"
@@ -20,10 +18,6 @@ const (
 	aiTaskRecoveryBatch    = 100
 )
 
-type aiTaskExecutor interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-}
-
 type aiTaskExecutionKey struct{}
 
 type aiTaskExecution struct {
@@ -34,7 +28,7 @@ type aiTaskExecution struct {
 var errAITaskExecutionLost = errors.New("AI task execution was canceled or superseded")
 var errAIExecutionPolicy = errors.New("AI task requester or translation source is no longer eligible")
 
-func claimAITaskExecution(ctx context.Context, db *pgxpool.Pool, taskID int64) (aiTaskExecution, error) {
+func claimAITaskExecution(ctx context.Context, db databaseQuery, taskID int64) (aiTaskExecution, error) {
 	run := aiTaskExecution{ID: taskID}
 	err := db.QueryRow(ctx, `update ai_tasks
 		set status='running',started_at=clock_timestamp(),finished_at=null,error='',updated_at=now()
@@ -108,13 +102,6 @@ func enqueueAITaskTx(ctx context.Context, tx pgx.Tx, eventType string, taskID in
 		TaskID: taskID, TaskUID: taskUID, TaskType: taskType,
 	})
 	return err
-}
-
-func claimAITaskForExecution(ctx context.Context, executor aiTaskExecutor, taskID int64) (bool, error) {
-	tag, err := executor.Exec(ctx, `update ai_tasks
-		set status='running',started_at=coalesce(started_at,now()),finished_at=null,error='',updated_at=now()
-		where id=$1 and status in ('queued','retrying')`, taskID)
-	return err == nil && tag.RowsAffected() == 1, err
 }
 
 type recoverableAITask struct {

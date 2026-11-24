@@ -2,10 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func TestContentTranslationUsesSharedTransactionalAITaskOutbox(t *testing.T) {
@@ -222,13 +225,16 @@ func TestAITaskRecoveryRequeuesOrphansAndStaleRunsOnce(t *testing.T) {
 	if err = tx.QueryRow(ctx, `select id from ai_tasks where task_uid='ai-orphan'`).Scan(&orphanID); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := claimAITaskForExecution(ctx, tx, orphanID)
-	if err != nil || !claimed {
-		t.Fatalf("first AI claim = %v/%v", claimed, err)
+	run, err := claimAITaskExecution(ctx, tx, orphanID)
+	if err != nil || run.ID != orphanID || run.Started.IsZero() {
+		t.Fatalf("first AI claim = %#v/%v", run, err)
 	}
-	claimed, err = claimAITaskForExecution(ctx, tx, orphanID)
-	if err != nil || claimed {
-		t.Fatalf("duplicate AI claim = %v/%v", claimed, err)
+	var started time.Time
+	if err = tx.QueryRow(ctx, `select started_at from ai_tasks where id=$1 and status='running'`, run.ID).Scan(&started); err != nil || !started.Equal(run.Started) {
+		t.Fatalf("claimed run does not match the stored active attempt: %v", err)
+	}
+	if _, err = claimAITaskExecution(ctx, tx, orphanID); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("duplicate AI claim = %v", err)
 	}
 	if err = tx.Rollback(ctx); err != nil {
 		t.Fatal(err)
