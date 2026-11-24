@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -19,17 +21,27 @@ type userConnectionItem struct {
 	Signature string `json:"signature"`
 }
 
+type profileRelationships struct {
+	Followers, Following, Blocked              int64
+	IsFollowing, BlocksTarget, BlockedByTarget bool
+}
+
+func loadProfileRelationships(ctx context.Context, db databaseQuery, target, viewer int64) (profileRelationships, error) {
+	var links profileRelationships
+	err := db.QueryRow(ctx, `select
+		(select count(*) from user_follows f join users u on u.id=f.follower_id where f.followed_id=$1 and u.status='active'),
+		(select count(*) from user_follows f join users u on u.id=f.followed_id where f.follower_id=$1 and u.status='active'),
+		case when $1=$2 then (select count(*) from user_blocks b join users u on u.id=b.blocked_id where b.blocker_id=$1 and u.status='active') else 0 end,
+		exists(select 1 from user_follows where $2>0 and $2<>$1 and follower_id=$2 and followed_id=$1),
+		exists(select 1 from user_blocks where $2>0 and $2<>$1 and blocker_id=$2 and blocked_id=$1),
+		exists(select 1 from user_blocks where $2>0 and $2<>$1 and blocker_id=$1 and blocked_id=$2)`,
+		target, viewer).Scan(&links.Followers, &links.Following, &links.Blocked, &links.IsFollowing, &links.BlocksTarget, &links.BlockedByTarget)
+	return links, err
+}
+
 func (s *Server) userOverview(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	var followers, following, blocked int64
-	err := s.db.QueryRow(
-		r.Context(),
-		`select
-		 (select count(*) from user_follows follow join users account on account.id=follow.follower_id where follow.followed_id=$1 and account.status='active'),
-		 (select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active'),
-		 (select count(*) from user_blocks block join users account on account.id=block.blocked_id where block.blocker_id=$1 and account.status='active')`,
-		claims.Subject,
-	).Scan(&followers, &following, &blocked)
+	links, err := loadProfileRelationships(r.Context(), s.db, claims.Subject, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "读取用户主页概览失败")
 		return
@@ -40,9 +52,9 @@ func (s *Server) userOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"followers": followers,
-		"following": following,
-		"blocked":   blocked,
+		"followers": links.Followers,
+		"following": links.Following,
+		"blocked":   links.Blocked,
 		"aiBalance": balance,
 	})
 }
@@ -72,30 +84,24 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 
 	claims := currentClaims(r)
 	isOwn := claims.Subject > 0 && claims.Subject == userID
-	var followers, following, blockedCount int64
-	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows follow join users account on account.id=follow.follower_id where follow.followed_id=$1 and account.status='active'`, userID).Scan(&followers)
-	_ = s.db.QueryRow(r.Context(), `select count(*) from user_follows follow join users account on account.id=follow.followed_id where follow.follower_id=$1 and account.status='active'`, userID).Scan(&following)
-	if isOwn {
-		_ = s.db.QueryRow(r.Context(), `select count(*) from user_blocks block join users account on account.id=block.blocked_id where block.blocker_id=$1 and account.status='active'`, userID).Scan(&blockedCount)
+	links, err := loadProfileRelationships(r.Context(), s.db, userID, claims.Subject)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "读取用户关系失败")
+		return
 	}
-	isFollowing := false
-	isBlocked := false
-	blockedEitherDirection := false
-	if claims.Subject > 0 && !isOwn {
-		_ = s.db.QueryRow(
-			r.Context(),
-			`select exists(select 1 from user_follows where follower_id = $1 and followed_id = $2)`,
-			claims.Subject,
-			userID,
-		).Scan(&isFollowing)
-		_ = s.db.QueryRow(r.Context(), `select
-			exists(select 1 from user_blocks where blocker_id=$1 and blocked_id=$2),
-			exists(select 1 from user_blocks where (blocker_id=$1 and blocked_id=$2) or (blocker_id=$2 and blocked_id=$1))`,
-			claims.Subject, userID).Scan(&isBlocked, &blockedEitherDirection)
+	canBlock := claims.Subject > 0 && !isOwn && status == "active"
+	canInteract := canBlock && !links.BlocksTarget && !links.BlockedByTarget
+	canFollow := canInteract && claimsAllow(claims, "user.follow.create")
+	canMessage := canInteract && claimsAllow(claims, "user.message.send")
+	if canFollow || canMessage {
+		_, permissions, err := s.resolveUserRootPermissions(r.Context(), userID)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "读取互动权限失败")
+			return
+		}
+		canFollow = canFollow && permissionRulesAllow(permissions, "user.follow.receive")
+		canMessage = canMessage && permissionRulesAllow(permissions, "user.message.receive")
 	}
-	canBlock := claims.Subject > 0 && !isOwn
-	canFollow := claims.Subject > 0 && !isOwn && !blockedEitherDirection && claimsAllow(claims, "user.follow.create") && s.userHasPermission(r.Context(), userID, "user.follow.receive")
-	canMessage := claims.Subject > 0 && !isOwn && !blockedEitherDirection && claimsAllow(claims, "user.message.send") && s.userHasPermission(r.Context(), userID, "user.message.receive")
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	avatarURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, avatarURL)
 	if err != nil {
@@ -111,11 +117,11 @@ func (s *Server) userProfile(w http.ResponseWriter, r *http.Request) {
 	onlineActive := s.cache.UsersOnline(r.Context(), []int64{userID}, time.Now(), s.cache.Config().PresenceTTL)[userID]
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": identity.PublicID, "username": username, "status": status,
-		"createdAt": createdAt, "followers": followers, "following": following,
-		"blocked":   blockedCount,
+		"createdAt": createdAt, "followers": links.Followers, "following": links.Following,
+		"blocked":   links.Blocked,
 		"avatarUrl": avatarURL, "signature": signature, "profileBackgroundUrl": profileBackgroundURL,
 		"onlineStatus": mapPublicOnlineVisibility(showOnlineStatus, onlineActive),
-		"isOwn":        isOwn, "isFollowing": isFollowing, "isBlocked": isBlocked,
+		"isOwn":        isOwn, "isFollowing": links.IsFollowing, "isBlocked": links.BlocksTarget,
 		"canBlock": canBlock, "canFollow": canFollow, "canMessage": canMessage,
 	})
 }
@@ -179,19 +185,6 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "不能关注自己")
 		return
 	}
-	blocked, err := s.usersBlockEachOther(r.Context(), claims.Subject, targetID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "检查用户关系失败")
-		return
-	}
-	if blocked {
-		writeError(w, http.StatusForbidden, "当前无法关注该用户")
-		return
-	}
-	if !s.userHasPermission(r.Context(), targetID, "user.follow.receive") {
-		writeError(w, http.StatusForbidden, "对方没有允许被关注的权限")
-		return
-	}
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "关注用户失败")
@@ -202,6 +195,15 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "检查用户关系失败")
 		return
 	}
+	var activeID int64
+	if err = tx.QueryRow(r.Context(), `select id from users where id=$1 and status='active' for share`, targetID).Scan(&activeID); errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "用户不存在")
+		return
+	} else if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "检查用户状态失败")
+		return
+	}
+	var blocked bool
 	if err = tx.QueryRow(r.Context(), `select exists(select 1 from user_blocks
 		where (blocker_id=$1 and blocked_id=$2) or (blocker_id=$2 and blocked_id=$1))`, claims.Subject, targetID).Scan(&blocked); err != nil {
 		writeError(w, http.StatusInternalServerError, "检查用户关系失败")
@@ -211,10 +213,23 @@ func (s *Server) followUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "当前无法关注该用户")
 		return
 	}
+	permissions, err := resolveUsersRootPermissionsQuery(r.Context(), tx, []int64{claims.Subject, targetID})
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "检查关注权限失败")
+		return
+	}
+	if !permissionRulesAllow(permissions[claims.Subject].Permissions, "user.follow.create") {
+		writeError(w, http.StatusForbidden, "没有关注权限")
+		return
+	}
+	if !permissionRulesAllow(permissions[targetID].Permissions, "user.follow.receive") {
+		writeError(w, http.StatusForbidden, "对方没有允许被关注的权限")
+		return
+	}
 	tag, err := tx.Exec(
 		r.Context(),
 		`insert into user_follows (follower_id, followed_id)
-		 select $1, id from users where id = $2 and status = 'active'
+		 values($1,$2)
 		 on conflict do nothing`,
 		claims.Subject,
 		targetID,
@@ -294,17 +309,19 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer tx.Rollback(r.Context())
-	_, err = tx.Exec(
+	var emailEnabled, projectUpdatesEnabled bool
+	err = tx.QueryRow(
 		r.Context(),
 		`insert into user_notification_settings (user_id,email_enabled,project_updates_enabled,updated_at)
 		 values ($1,coalesce($2,false),coalesce($3,true),now())
 		 on conflict (user_id) do update set
 		 email_enabled=coalesce($2,user_notification_settings.email_enabled),
-		 project_updates_enabled=coalesce($3,user_notification_settings.project_updates_enabled),updated_at=now()`,
+		 project_updates_enabled=coalesce($3,user_notification_settings.project_updates_enabled),updated_at=now()
+		 returning email_enabled,project_updates_enabled`,
 		claims.Subject,
 		req.EmailEnabled,
 		req.ProjectUpdatesEnabled,
-	)
+	).Scan(&emailEnabled, &projectUpdatesEnabled)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "保存通知设置失败")
 		return
@@ -317,6 +334,5 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "保存通知设置失败")
 		return
 	}
-	getNotificationSettings := r.Clone(r.Context())
-	s.getNotificationSettings(w, getNotificationSettings)
+	writeJSON(w, http.StatusOK, map[string]bool{"emailEnabled": emailEnabled, "projectUpdatesEnabled": projectUpdatesEnabled})
 }
