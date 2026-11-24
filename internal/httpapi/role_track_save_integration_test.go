@@ -97,9 +97,31 @@ func TestRoleTrackUpdateRejectsAnEditForTheOldCodeIntegration(t *testing.T) {
 	if got := readTrack(renamed.Code); !reflect.DeepEqual(got, renamed) {
 		t.Fatalf("active level track changed: got %#v, want %#v", got, renamed)
 	}
-	f.require(t, f.reviewer, http.MethodPut, levelPath, levelConfigPayload{
+	// The level update already holds the new track while its config row is
+	// busy. A concurrent delete must see that selection after taking the lock.
+	barrier, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer barrier.Rollback(f.ctx)
+	if _, err = barrier.Exec(f.ctx, "select singleton from level_system_config where singleton for update"); err != nil {
+		t.Fatal(err)
+	}
+	configured := auditCompletionAsyncJSON(f, f.reviewer, http.MethodPut, levelPath, levelConfigPayload{
 		RoleTrackCode: other.Code, LevelThresholds: []int64{20, 40},
-	}, http.StatusOK)
+	})
+	auditCompletionAwaitLocks(t, f, 1)
+	deleted := auditCompletionAsyncJSON(f, f.reviewer, http.MethodDelete, basePath+"/"+other.Code, nil)
+	auditCompletionAwaitLocks(t, f, 2)
+	if err = barrier.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := <-configured; got.err != nil || got.status != http.StatusOK {
+		t.Fatalf("level track switch status=%d err=%v", got.status, got.err)
+	}
+	if got := <-deleted; got.err != nil || got.status != http.StatusConflict {
+		t.Fatalf("deletion of concurrently selected level track status=%d err=%v", got.status, got.err)
+	}
 	f.require(t, f.reviewer, http.MethodPut, basePath+"/"+renamed.Code, reordered, http.StatusOK)
 	f.require(t, f.reviewer, http.MethodDelete, basePath+"/"+renamed.Code, nil, http.StatusOK)
 
