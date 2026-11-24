@@ -120,8 +120,10 @@ func TestLogShareDownloadRequiresEveryReadyEntryIntegration(t *testing.T) {
 	defer cancel()
 	pool := newTEST018IsolatedDatabase(t, ctx)
 	var shareID int64
-	err := pool.QueryRow(ctx, `insert into log_shares(public_code,source_type,original_name,status,redaction_version,redaction_applied_version,expires_at)
- values('complete-zip-test','file','report.zip','ready',$1,$1,now()+interval '1 day') returning id`, logRedactionVersion).Scan(&shareID)
+	err := pool.QueryRow(ctx, `with owner as (
+		insert into users(username,email,password_hash) values('download-owner','download-owner@example.invalid','disabled') returning id
+	) insert into log_shares(public_code,owner_user_id,source_type,original_name,status,redaction_version,redaction_applied_version,expires_at)
+	select 'complete-zip-test',id,'file','report.zip','ready',$1,$1,now()+interval '1 day' from owner returning id`, logRedactionVersion).Scan(&shareID)
 	if err != nil {
 		t.Fatal(err)
 	}
