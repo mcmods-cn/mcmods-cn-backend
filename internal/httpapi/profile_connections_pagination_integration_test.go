@@ -2,10 +2,10 @@ package httpapi
 
 import (
 	"context"
- "net/http"
- "net/http/httptest"
- "strconv"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -194,51 +194,84 @@ func TestConnectionPageLoadsAvatarAccessInOneQueryIntegration(t *testing.T) {
 	counted.ConnConfig.Tracer = counter
 	counted.MaxConns, counted.MinConns = 1, 1
 	readPool, err := pgxpool.NewWithConfig(ctx, counted)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer readPool.Close()
 	server := &Server{db: readPool, cfg: config.Config{SettingsEncryptionKey: "owned-connection-avatar-signing-test"}}
-	cfg := ossConfigPayload{Enabled: true, Region: "cn-hangzhou", Endpoint: "https://oss-cn-hangzhou.aliyuncs.com", PublicEndpoint: "https://storage.example.invalid", Bucket:"sample-avatars", AccessKeyID:"synthetic-access", AccessKeySecret:"synthetic-secret"}
+	cfg := ossConfigPayload{Enabled: true, Region: "cn-hangzhou", Endpoint: "https://oss-cn-hangzhou.aliyuncs.com", PublicEndpoint: "https://storage.example.invalid", Bucket: "sample-avatars", AccessKeyID: "synthetic-access", AccessKeySecret: "synthetic-secret"}
 	sealed, err := server.sealSystemSetting(cfg)
-	if err != nil { t.Fatal(err) }
-	if _, err = pool.Exec(ctx, "insert into system_settings(key,value) values('oss.aliyun',$1) on conflict(key) do update set value=excluded.value", sealed); err != nil {t.Fatal(err)}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, "insert into system_settings(key,value) values('oss.aliyun',$1) on conflict(key) do update set value=excluded.value", sealed); err != nil {
+		t.Fatal(err)
+	}
 	var anchor int64
 	var anchorPublic string
-	if err = pool.QueryRow(ctx, "insert into users(username,email,password_hash) values('avatar-anchor','anchor@example.invalid','fixture') returning id,public_id").Scan(&anchor,&anchorPublic);err != nil {t.Fatal(err)}
+	if err = pool.QueryRow(ctx, "insert into users(username,email,password_hash) values('avatar-anchor','anchor@example.invalid','fixture') returning id,public_id").Scan(&anchor, &anchorPublic); err != nil {
+		t.Fatal(err)
+	}
 	const external = "https://images.example.invalid/public-avatar.png"
 	if _, err = pool.Exec(ctx, `insert into users(username,email,password_hash,avatar_url)
 		select 'pic-'||n,n||'@example.invalid','fixture',case n when 1 then '' when 2 then $1::text else $2::text||'/avatars/'||n||'.png' end
-		from generate_series(1,60) n`, external, cfg.PublicEndpoint);err != nil {t.Fatal(err)}
+		from generate_series(1,60) n`, external, cfg.PublicEndpoint); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = pool.Exec(ctx, `insert into oss_files(bucket,endpoint,object_key,source,status,scan_status,content_type)
-		select $1::text,$2::text,'avatars/'||n||'.png','user','active','clean','image/png' from generate_series(3,60) n`,cfg.Bucket,cfg.PublicEndpoint);err != nil {t.Fatal(err)}
+		select $1::text,$2::text,'avatars/'||n||'.png','user','active','clean','image/png' from generate_series(3,60) n`, cfg.Bucket, cfg.PublicEndpoint); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = pool.Exec(ctx, `update users u set avatar_file_id=f.id from oss_files f
-		where f.bucket=$1 and f.object_key='avatars/'||substring(u.username from 5)||'.png' and u.username like 'pic-%' and u.username<>'pic-3'`,cfg.Bucket);err != nil {t.Fatal(err)}
+		where f.bucket=$1 and f.object_key='avatars/'||substring(u.username from 5)||'.png' and u.username like 'pic-%' and u.username<>'pic-3'`, cfg.Bucket); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = pool.Exec(ctx, `insert into user_follows(follower_id,followed_id,created_at)
 		select $1,u.id,to_timestamp(substring(u.username from 5)::int) from users u where u.username like 'pic-%'
-		union all select u.id,$1,to_timestamp(substring(u.username from 5)::int) from users u where u.username like 'pic-%'`, anchor);err != nil {t.Fatal(err)}
+		union all select u.id,$1,to_timestamp(substring(u.username from 5)::int) from users u where u.username like 'pic-%'`, anchor); err != nil {
+		t.Fatal(err)
+	}
 	for _, direction := range []string{"followers", "following"} {
 		for _, limit := range []int{1, 60} {
-			t.Run(direction+"/"+strconv.Itoa(limit),func(t *testing.T){
-				request:=httptest.NewRequest(http.MethodGet,"/api/v1/users/"+anchorPublic+"/"+direction+"?limit="+strconv.Itoa(limit),nil).WithContext(ctx)
-				request.SetPathValue("id",anchorPublic)
-				response:=httptest.NewRecorder()
-				before:=counter.queries.Load()
-				server.userConnections(response,request,direction)
-				if response.Code != http.StatusOK { t.Fatalf("HTTP %d: %s",response.Code,response.Body.String())}
-				page:=decodeTEST022Data[struct{Items []userConnectionItem; HasMore bool}](t,response.Body.Bytes())
-				if len(page.Items) != limit || page.HasMore != (limit<60) { t.Fatalf("limit %d returned %d items, hasMore=%t",limit,len(page.Items),page.HasMore) }
-				for i,item:=range page.Items {
-					n:=60-i
-					if item.Username!="pic-"+strconv.Itoa(n) { t.Fatalf("unexpected order at %d: %s",i,item.Username) }
+			t.Run(direction+"/"+strconv.Itoa(limit), func(t *testing.T) {
+				request := httptest.NewRequest(http.MethodGet, "/api/v1/users/"+anchorPublic+"/"+direction+"?limit="+strconv.Itoa(limit), nil).WithContext(ctx)
+				request.SetPathValue("id", anchorPublic)
+				response := httptest.NewRecorder()
+				before := counter.queries.Load()
+				server.userConnections(response, request, direction)
+				if response.Code != http.StatusOK {
+					t.Fatalf("HTTP %d: %s", response.Code, response.Body.String())
+				}
+				page := decodeTEST022Data[struct {
+					Items   []userConnectionItem
+					HasMore bool
+				}](t, response.Body.Bytes())
+				if len(page.Items) != limit || page.HasMore != (limit < 60) {
+					t.Fatalf("limit %d returned %d items, hasMore=%t", limit, len(page.Items), page.HasMore)
+				}
+				for i, item := range page.Items {
+					n := 60 - i
+					if item.Username != "pic-"+strconv.Itoa(n) {
+						t.Fatalf("unexpected order at %d: %s", i, item.Username)
+					}
 					switch n {
-					case 1,3:
-						if item.AvatarURL!="" {t.Fatal("expected an empty or unavailable avatar")}
+					case 1, 3:
+						if item.AvatarURL != "" {
+							t.Fatal("expected an empty or unavailable avatar")
+						}
 					case 2:
-						if item.AvatarURL!=external {t.Fatal("external avatar changed")}
+						if item.AvatarURL != external {
+							t.Fatal("external avatar changed")
+						}
 					default:
-						if !strings.Contains(item.AvatarURL,"/avatars/"+strconv.Itoa(n)+".png?") || !strings.Contains(strings.ToLower(item.AvatarURL),"x-oss-signature") {t.Fatal("expected signed matching image")}
+						if !strings.Contains(item.AvatarURL, "/avatars/"+strconv.Itoa(n)+".png?") || !strings.Contains(strings.ToLower(item.AvatarURL), "x-oss-signature") {
+							t.Fatal("expected signed matching image")
+						}
 					}
 				}
-				if q:=counter.queries.Load()-before; q!=1 {t.Fatalf("%d items made %d stored-image authorization queries, want 1",limit,q)}
+				if q := counter.queries.Load() - before; q != 1 {
+					t.Fatalf("%d items made %d stored-image authorization queries, want 1", limit, q)
+				}
 			})
 		}
 	}
