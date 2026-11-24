@@ -55,11 +55,13 @@ func (r *responseRecorder) Write(body []byte) (int, error) {
 	return size, err
 }
 
-func (r *responseRecorder) Flush() {
+func (r *responseRecorder) Flush() { _ = r.FlushError() }
+
+func (r *responseRecorder) FlushError() error {
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
-	_ = http.NewResponseController(r.ResponseWriter).Flush()
+	return http.NewResponseController(r.ResponseWriter).Flush()
 }
 
 func (r *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {

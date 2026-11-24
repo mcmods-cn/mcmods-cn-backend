@@ -24,6 +24,7 @@ const (
 	maxRealtimeConnectionsPerSession = 2
 	maxRealtimeConnectionLifetime    = 30 * time.Minute
 	realtimeLeaseTTL                 = 90 * time.Second
+	realtimeFrameWriteTimeout        = 10 * time.Second
 )
 
 type realtimeEvent struct {
@@ -98,8 +99,7 @@ func (hub *realtimeHub) connectionCount() (int, int) {
 }
 
 func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
+	if _, ok := w.(http.Flusher); !ok {
 		writeError(w, http.StatusNotImplemented, "streaming is unavailable")
 		return
 	}
@@ -134,10 +134,29 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	channel, unsubscribe := s.realtime.subscribe(claims.Subject)
 	defer unsubscribe()
-	if _, err := fmt.Fprint(w, ": connected\n\n"); err != nil {
+	// The ordinary HTTP server limits an entire response to 30 seconds.
+	// Bound each frame separately so waiting between frames consumes no write budget.
+	controller := http.NewResponseController(w)
+	writeFrame := func(format string, args ...any) error {
+		err := controller.SetWriteDeadline(time.Now().Add(realtimeFrameWriteTimeout))
+		if err != nil && !errors.Is(err, http.ErrNotSupported) {
+			return err
+		}
+		deadlineSet := err == nil
+		if _, err = fmt.Fprintf(w, format, args...); err != nil {
+			return err
+		}
+		if err = controller.Flush(); err != nil {
+			return err
+		}
+		if deadlineSet {
+			return controller.SetWriteDeadline(time.Time{})
+		}
+		return nil
+	}
+	if err := writeFrame(": connected\n\n"); err != nil {
 		return
 	}
-	flusher.Flush()
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
 	remaining := min(maxRealtimeConnectionLifetime, time.Until(time.Unix(claims.ExpiresAt, 0)))
@@ -156,10 +175,9 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 			if !s.realtimeSessionValid(r.Context(), claims, true) || !lease.Refresh(r.Context()) || !coordinator.Refresh(r.Context(), lease.ID()) {
 				return
 			}
-			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+			if err := writeFrame(": heartbeat\n\n"); err != nil {
 				return
 			}
-			flusher.Flush()
 		case event := <-channel:
 			if !s.realtimeSessionValid(r.Context(), claims, false) {
 				return
@@ -169,10 +187,9 @@ func (s *Server) realtimeEvents(w http.ResponseWriter, r *http.Request) {
 				s.realtime.dropped.Add(1)
 				continue
 			}
-			if _, err = fmt.Fprintf(w, "id: %s\nevent: %s\ndata: %s\n\n", event.ID, event.Type, raw); err != nil {
+			if err = writeFrame("id: %s\nevent: %s\ndata: %s\n\n", event.ID, event.Type, raw); err != nil {
 				return
 			}
-			flusher.Flush()
 		}
 	}
 }

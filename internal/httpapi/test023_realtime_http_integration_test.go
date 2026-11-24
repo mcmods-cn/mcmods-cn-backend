@@ -324,3 +324,31 @@ func waitTEST023Connections(t *testing.T, servers []*Server, activeRequests []at
 	}
 	t.Fatalf("SSE subscriptions did not settle to %d", want)
 }
+
+// A net/http write timeout normally applies to the entire response. An active
+// subscriber must still receive new frames after that deadline has passed.
+func TestRealtimeStreamOutlivesOrdinaryResponseWriteTimeout(t *testing.T) {
+	f := newTEST013Fixture(t)
+	api := f.origin.Config.Handler.(*Server)
+	const ordinaryTimeout = time.Second
+	for _, protocol := range []string{"http1", "http2"} {
+		t.Run(protocol, func(t *testing.T) {
+			origin := httptest.NewUnstartedServer(api)
+			origin.Config.WriteTimeout = ordinaryTimeout
+			if protocol == "http2" {
+				origin.EnableHTTP2 = true
+				origin.StartTLS()
+			} else {
+				origin.Start()
+			}
+			t.Cleanup(origin.Close)
+			stream := openTEST023Stream(t, f.ctx, origin, f.editor)
+			defer stream.close(t)
+			time.Sleep(ordinaryTimeout + 100*time.Millisecond)
+			api.publishRealtimeUser(f.userIDs[f.editor], "message.created", map[string]string{"messageId": "fixture"})
+			if got := stream.receive(t); got.kind != "message.created" || got.id == "" {
+				t.Fatalf("event after ordinary response deadline: %#v", got)
+			}
+		})
+	}
+}

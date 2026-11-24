@@ -54,17 +54,19 @@ func (w *compressedResponseWriter) Write(payload []byte) (int, error) {
 	return w.ResponseWriter.Write(payload)
 }
 
-func (w *compressedResponseWriter) Flush() {
+func (w *compressedResponseWriter) Flush() { _ = w.FlushError() }
+
+func (w *compressedResponseWriter) FlushError() error {
 	if !w.decided {
 		w.decide()
 		w.ResponseWriter.WriteHeader(w.statusCode)
 	}
 	if w.gzipWriter != nil {
-		_ = w.gzipWriter.Flush()
+		if err := w.gzipWriter.Flush(); err != nil {
+			return err
+		}
 	}
-	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
-		flusher.Flush()
-	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 func (w *compressedResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
