@@ -159,13 +159,13 @@ func popularityFactProjectionStatements() []string {
 		begin
 			if tg_op='DELETE' and pg_trigger_depth()>1 then return old; end if;
 			if tg_op<>'INSERT' then
-				select rating.object_route_id,content_popularity_actor_eligible(rating.object_route_id,rating.author_id) and rating.status='published'
-				into route_id,eligible from content_ratings rating where rating.id=old.rating_id;
+				select rating.object_route_id,rating.counted
+				into route_id,eligible from content_ratings rating where rating.id=old.rating_id for share;
 				if eligible then perform adjust_content_popularity_dimension_fact(route_id,old.dimension_code,-1,-old.score); end if;
 			end if;
 			if tg_op<>'DELETE' then
-				select rating.object_route_id,content_popularity_actor_eligible(rating.object_route_id,rating.author_id) and rating.status='published'
-				into route_id,eligible from content_ratings rating where rating.id=new.rating_id;
+				select rating.object_route_id,rating.counted
+				into route_id,eligible from content_ratings rating where rating.id=new.rating_id for share;
 				if eligible then perform adjust_content_popularity_dimension_fact(route_id,new.dimension_code,1,new.score); end if;
 			end if;
 			if tg_op='DELETE' then return old; end if; return new;

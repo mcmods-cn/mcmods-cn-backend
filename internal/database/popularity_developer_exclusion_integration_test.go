@@ -125,6 +125,77 @@ func TestPopularityExcludesEveryEffectiveDeveloperIntegration(t *testing.T) {
 		t.Fatalf("rebuild global popularity facts: %v", err)
 	}
 	assertMultiDeveloperPopularityFacts(t, ctx, pool, routeID, "rebuild")
+	t.Run("existing ratings follow current eligibility", func(t *testing.T) {
+		exec := func(query string) {
+			t.Helper()
+			if _, err := pool.Exec(ctx, query); err != nil {
+				t.Fatal(err)
+			}
+		}
+		assertTotals := func(count, total, dimensions int64) {
+			t.Helper()
+			var n, score, gn, gs, dn, ds int64
+			err := pool.QueryRow(ctx, `select facts.rating_count,facts.rating_sum,global.rating_count,
+				global.rating_sum,coalesce(dim.rating_count,0),coalesce(dim.score_sum,0)
+				from content_popularity_lifetime_facts facts
+				join content_rating_global_stats global on global.entity_type='mod'
+				left join content_popularity_rating_dimension_facts dim on dim.object_route_id=facts.object_route_id
+				  and dim.dimension_code='quality' where facts.object_route_id=$1`, routeID).
+				Scan(&n, &score, &gn, &gs, &dn, &ds)
+			if err != nil || n != count || gn != count || dn != count || score != total || gs != total || ds != dimensions {
+				t.Fatalf("route=%d/%d global=%d/%d quality=%d/%d, want %d/%d quality %d: %v",
+					n, score, gn, gs, dn, ds, count, total, dimensions, err)
+			}
+		}
+		exec(`update users set security_score=30 where id=957003`)
+		assertTotals(0, 0, 0)
+		exec(`update content_rating_scores set score=2 where rating_id=957082 and dimension_code='quality'`)
+		exec(`update users set security_score=80 where id=957003`)
+		assertTotals(1, 5, 2)
+		exec(`update content_creator_bindings set permission_granting=false where id=957040`)
+		assertTotals(2, 8, 5)
+		exec(`update content_creator_bindings set permission_granting=true where id=957040`)
+		assertTotals(1, 5, 2)
+		exec(`update creator_claims set status='revoked' where id=957030`)
+		assertTotals(2, 8, 5)
+		exec(`update creator_claims set status='approved' where id=957030`)
+		assertTotals(1, 5, 2)
+		exec(`update mods set review_status='pending' where id=957010`)
+		assertTotals(3, 12, 9)
+		exec(`update mods set review_status='approved' where id=957010`)
+		assertTotals(1, 5, 2)
+		exec(`update content_creator_bindings set permission_granting=false where id=957040;
+			insert into creators(id,kind,name,normalized_name,created_by,review_status)
+				values(957090,'team','Rating contributors','rating contributors',957004,'approved');
+			insert into creator_team_members(team_id,member_creator_id,role_id,status)
+				values(957090,957020,2,'pending');
+			insert into content_creator_bindings(id,subject_type,subject_id,creator_id,
+				name_snapshot,role_snapshot,status,permission_granting,approved_by,approved_at)
+				values(957091,'mod',957010,957090,'Rating contributors','Developer','approved',true,957004,now())`)
+		assertTotals(2, 8, 5)
+		exec(`update creator_team_members set status='approved' where team_id=957090`)
+		assertTotals(1, 5, 2)
+		exec(`update creators set review_status='rejected' where id=957090`)
+		assertTotals(2, 8, 5)
+		exec(`update creators set review_status='approved' where id=957090`)
+		assertTotals(1, 5, 2)
+		exec(`insert into content_ratings(object_route_id,author_id,overall_score)
+			select object_route_id,author_id,2 from content_ratings where id=957082
+			on conflict(object_route_id,author_id) do nothing`)
+		assertTotals(1, 5, 2)
+		exec(`update content_ratings set status='hidden' where id=957082`)
+		assertTotals(0, 0, 0)
+		exec(`update content_ratings set status='published' where id=957082`)
+		assertTotals(1, 5, 2)
+		exec(`update users set security_score=30 where id=957003`)
+		exec(`delete from content_ratings where id=957082`)
+		assertTotals(0, 0, 0)
+		var remainingWeight float64
+		if err := pool.QueryRow(ctx, `select sum(rating_value)::double precision
+			from content_popularity_events_daily where object_route_id=$1`, routeID).Scan(&remainingWeight); err != nil || remainingWeight != 0 {
+			t.Fatalf("removed rating trend has residual weight %v: %v", remainingWeight, err)
+		}
+	})
 }
 
 func assertMultiDeveloperPopularityFacts(t *testing.T, ctx context.Context, pool *pgxpool.Pool, routeID int64, stage string) {

@@ -13,6 +13,8 @@ func ratingSchemaStatements() []string {
 			object_route_id bigint not null references public_routes(id) on delete cascade,
 			author_id bigint not null references users(id) on delete cascade,
 			overall_score smallint not null check(overall_score between 1 and 5),
+			counted boolean not null default false,
+			trend_weight numeric not null default 0 check(trend_weight>=0),
 			message text not null default '' check(char_length(message) <= 2000),
 			status text not null default 'published' check(status in ('published','hidden')),
 			created_at timestamptz not null default now(),
@@ -219,6 +221,7 @@ func ratingSchemaStatements() []string {
 		$$ language sql stable strict`,
 	}
 	statements = append(statements, popularityFactProjectionStatements()...)
+	statements = append(statements, ratingEligibilityStatements()...)
 	return append(statements, []string{
 		`create or replace function record_popularity_event(target_route_id bigint,event_kind text,event_value numeric) returns void as $$
 		begin
@@ -330,20 +333,17 @@ func ratingSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create or replace function refresh_popularity_from_rating() returns trigger as $$
 		declare
-			route_id bigint; trust numeric; old_published boolean; new_published boolean;
+			route_id bigint; old_weight numeric:=0; new_weight numeric:=0;
 			old_metric boolean:=false; new_metric boolean:=false;
 			old_route_type text; new_route_type text;
 		begin
 			route_id:=case when tg_op='DELETE' then old.object_route_id else new.object_route_id end;
 			if tg_op<>'INSERT' then select entity_type into old_route_type from public_routes where id=old.object_route_id; end if;
 			if tg_op<>'DELETE' then select entity_type into new_route_type from public_routes where id=new.object_route_id; end if;
-			trust:=coalesce(content_user_trust(case when tg_op='DELETE' then old.author_id else new.author_id end),0.2);
-			old_published:=tg_op<>'INSERT' and old.status='published'
-				and not content_target_user_is_developer(old.object_route_id,old.author_id);
-			new_published:=tg_op<>'DELETE' and new.status='published'
-				and not content_target_user_is_developer(new.object_route_id,new.author_id);
-			old_metric:=tg_op<>'INSERT' and old.status='published' and content_popularity_actor_eligible(old.object_route_id,old.author_id);
-			new_metric:=tg_op<>'DELETE' and new.status='published' and content_popularity_actor_eligible(new.object_route_id,new.author_id);
+			if tg_op<>'INSERT' then old_weight:=old.trend_weight; end if;
+			if tg_op<>'DELETE' then new_weight:=new.trend_weight; end if;
+			old_metric:=tg_op<>'INSERT' and old.counted;
+			new_metric:=tg_op<>'DELETE' and new.counted;
 			if old_metric and new_metric and old.object_route_id=new.object_route_id then
 				perform adjust_content_popularity_lifetime_facts(
 					new.object_route_id,0,0,0,0,0,0,0,new.overall_score-old.overall_score);
@@ -371,13 +371,14 @@ func ratingSchemaStatements() []string {
 			if new_metric and (not old_metric or old.object_route_id is distinct from new.object_route_id) then
 				perform adjust_content_popularity_rating_dimensions(new.object_route_id,new.id,1);
 			end if;
-			if not old_published and new_published then perform record_popularity_event(route_id,'rating',2*trust);
-			elsif old_published and not new_published then perform record_popularity_event(route_id,'rating',-2*trust); end if;
+			if old_weight<>new_weight then perform record_popularity_event(route_id,'rating',new_weight-old_weight); end if;
 			perform enqueue_content_stats_refresh(route_id,true,true);
 			if tg_op='DELETE' then return old; end if; return new;
 		end;
 		$$ language plpgsql`,
-		`create trigger trg_content_ratings_popularity before insert or update or delete on content_ratings
+		`create trigger trg_content_ratings_popularity after insert or update on content_ratings
+			for each row execute function refresh_popularity_from_rating()`,
+		`create trigger trg_content_ratings_remove_popularity before delete on content_ratings
 			for each row execute function refresh_popularity_from_rating()`,
 		contentPopularityCommentRefreshFunctionStatement(),
 		commentPopularityTriggerDefinitions["trg_comments_popularity_insert"],
