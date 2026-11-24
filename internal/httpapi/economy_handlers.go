@@ -17,6 +17,7 @@ import (
 )
 
 const economyConfigSettingKey = "economy.config"
+const economyConfigLockKey = "mcmods-cn-economy-configuration"
 
 const (
 	maxCurrencyAmount       int64 = 1_000_000_000_000
@@ -276,11 +277,7 @@ func (s *Server) checkIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if err = lockEconomyConfigurationTx(r.Context(), tx); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to lock economy configuration")
-		return
-	}
-	config, err := loadEconomyConfig(r.Context(), tx)
+	config, err := loadEconomyRewardConfigTx(r.Context(), tx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load economy configuration")
 		return
@@ -1188,8 +1185,17 @@ func normalizeEconomyConfig(payload economyConfigPayload) (economyConfigPayload,
 }
 
 func lockEconomyConfigurationTx(ctx context.Context, tx pgx.Tx) error {
-	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('mcmods-cn-economy-configuration'))`)
+	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, economyConfigLockKey)
 	return err
+}
+
+// Rewards use one stable policy through commit. Different accounts and downloads
+// coordinate their own balances and counters without blocking other policy readers.
+func loadEconomyRewardConfigTx(ctx context.Context, tx pgx.Tx) (economyConfigPayload, error) {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock_shared(hashtext($1))`, economyConfigLockKey); err != nil {
+		return economyConfigPayload{}, err
+	}
+	return loadEconomyConfig(ctx, tx)
 }
 
 func referencedEconomyCurrencyCodes(payload economyConfigPayload) []string {
@@ -1323,23 +1329,4 @@ func checkedCurrencyBalance(current, delta int64) (int64, error) {
 		return current, errCurrencyOutOfRange
 	}
 	return current + delta, nil
-}
-
-func (s *Server) recordOwnedContentDownload(
-	ctx context.Context,
-	objectType, objectPublicID string,
-	ownerID, downloaderID int64,
-) error {
-	if ownerID <= 0 || ownerID == downloaderID {
-		return nil
-	}
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if err = s.recordOwnedContentDownloadTx(ctx, tx, objectType, objectPublicID, ownerID, downloaderID); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
 }

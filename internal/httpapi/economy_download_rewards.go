@@ -11,10 +11,7 @@ func (s *Server) recordOwnedContentDownloadTx(ctx context.Context, tx pgx.Tx, ob
 	if ownerID <= 0 || ownerID == downloaderID {
 		return nil
 	}
-	if err := lockEconomyConfigurationTx(ctx, tx); err != nil {
-		return err
-	}
-	config, err := loadEconomyConfig(ctx, tx)
+	config, err := loadEconomyRewardConfigTx(ctx, tx)
 	if err != nil {
 		return err
 	}
