@@ -170,6 +170,14 @@ python3 -B tools/testing/isolated_environment.py --state "$state" run -- \
 每项都必须收到运行和通过事件。跳过、漏选、子项失败或包未正常结束都会使专项失败。
 CI 上传的 JSON Lines 仅含包、测试名、结果、秒数。私有鉴权环境和复制的二进制随服务清理。
 
+公开下载专项需要能直接访问 GitHub Release 及其 CDN 的干净检出。它按生产下载策略获取固定的 NATS 2.10.22 Linux 发行文件及官方 SHA256SUMS，在新目录保存 HTTP 状态、文件大小和摘要。GitHub 托管 Linux 取回的 5,741,798 字节与官方 SHA-256 相符，本地出口出现过 TCP 连接被拒。该结果只覆盖公开、无凭据下载。[实际托管运行](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45408177314)
+
+```sh
+evidence_parent=$(mktemp -d)
+MCMODS_RUN_PUBLIC_CDN=1 MCMODS_AUDIT_PUBLIC_CDN_DIR="$evidence_parent/public-cdn" \
+  go test -count=1 -v -run '^TestAuditDGR003OfficialPublicGitHubCDNChecksumIntegration$' ./internal/httpapi
+```
+
 ### AI 配置的真实浏览器联调
 
 用上面的专用 PostgreSQL 环境，在后端创建新的运行目录。夹具自动创建三个合成身份。
@@ -258,10 +266,26 @@ MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_JOURNEY_DIR/runtime.json" node --tes
 
 把 `MCMODS_AUDIT_OWNED_ENV_DIR` 指向本次隔离环境的私有资源清单目录。观察器核对容器所有者、实际数据库 OID、角色、回环绑定及 schema 标记。设置 `MCMODS_RUN_FINAL_GAME_JOURNEY=1`，执行下列三步。浏览器审核完成后独立观察器继续检查授权到期及回收终态，取得 `terminal-acceptance.json` 才给夹具写入 STOP。完整环境变量、OSS 协议和证据字段见[固定小包验收协议](audit/final-game-native-protocol.md)。
 
+在第一个终端从后端根目录启动 Go 夹具。保持前端、可信 TLS 网关和隔离服务运行，等待本次运行的就绪记录。
+
 ```sh
 go test ./internal/httpapi -run '^TestAuditFinalGameJourneyFixture$' -v -count=1 -timeout=105m
-MCMODS_AUDIT_JOURNEY_RUNTIME="$MCMODS_AUDIT_FINAL_GAME_DIR/runtime.json" node --test browser-tests/audit-game-live.mts
-python tools/audit/final-game/observe.py "$MCMODS_AUDIT_FINAL_GAME_DIR/runtime.json" ACTUAL_BROWSER_REPORT "$MCMODS_AUDIT_FINAL_GAME_DIR/observation"
+```
+
+第二个终端加载同一套验收环境，从后端根目录运行以下命令。浏览器脚本在安装了锁文件依赖的前端检出中执行。观察器需要 Python 3 和 Pillow。它读取该次浏览器实际保存的报告，并在真实授权到期后写入终态。最后的 STOP 会让第一个终端核验同一份终态记录并退出。
+
+```sh
+set -eu
+runtime="$MCMODS_AUDIT_FINAL_GAME_DIR/runtime.json"
+(
+  cd "$MCMODS_AUDIT_FRONTEND_REPO"
+  MCMODS_AUDIT_JOURNEY_RUNTIME="$runtime" node --test browser-tests/audit-game-live.mts
+)
+report=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["reportPath"])' \
+  "$MCMODS_AUDIT_FINAL_GAME_DIR/browser-journey-latest.json")
+python3 tools/audit/final-game/observe.py "$runtime" "$report" "$MCMODS_AUDIT_FINAL_GAME_DIR/observation"
+test -s "$MCMODS_AUDIT_FINAL_GAME_DIR/terminal-acceptance.json"
+touch "$MCMODS_AUDIT_FINAL_GAME_DIR/STOP"
 ```
 
 ## 临时 schema 安装回归
