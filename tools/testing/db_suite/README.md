@@ -12,7 +12,7 @@ remain visible on stderr and cannot become test package names; a failed
 
 Use an owned loopback test database. Initialize a new empty PostgreSQL 18.6
 database with `go run ./cmd/db-initialize` using the same configuration as the
-API. This installs generation 171. The CI profile uses the installed schema
+API. This installs generation 172. The CI profile uses the installed schema
 and fixtures create the accounts they need. Set the following variables for
 the owned database.
 
