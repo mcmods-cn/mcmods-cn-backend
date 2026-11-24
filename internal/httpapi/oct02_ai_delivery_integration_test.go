@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"mcmods-cn-backend/internal/security"
@@ -14,10 +15,13 @@ import (
 
 func oct02AIDeliveryPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	pool := oct02AITestPool(t)
+	pool := oct02AIWorkerTestPool(t)
 	_, err := pool.Exec(context.Background(), `alter table ai_tasks add column priority integer default 0,
 	 add column concurrency_key text,add column queued_at timestamptz default now();
-	 alter table users add column username text default 'fixture';
+	 alter table users add column username text default 'fixture',add column auth_version bigint not null default 1;
+	 create table auth_sessions(like public.auth_sessions including defaults including constraints);
+	 insert into permissions values(4,'ai.read'),(5,'ai.task.enqueue');
+	 insert into user_permissions select 42,id,true,'manual',null from permissions where id in (4,5);
 	 create table nats_outbox(id bigint generated always as identity primary key,event_id text unique,event_type text,
 	 subject text,aggregate_type text,aggregate_id text,payload jsonb,status text,published_at timestamptz,
 	 attempts integer default 10,last_error text default '',available_at timestamptz default now(),
@@ -29,6 +33,10 @@ func oct02AIDeliveryPool(t *testing.T) *pgxpool.Pool {
 	 values('delivery-event','ai.task.requested','ai','ai_task','ai_delivery_fixture','{"taskId":1}','dead');
 	 insert into dead_letter_events(event_id,failure_stage) values('delivery-event','publish');`)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(context.Background(), `insert into auth_sessions(session_hash,user_id,auth_version,expires_at)
+		values($1,42,1,now()+interval '1 hour')`, security.SessionFingerprint(oct02AIDeliveryClaims().SessionID)); err != nil {
 		t.Fatal(err)
 	}
 	return pool
@@ -44,7 +52,7 @@ func oct02RetryAIDelivery(server *Server, claims security.Claims) *httptest.Resp
 }
 
 func oct02AIDeliveryClaims() security.Claims {
-	return security.Claims{Subject: 42, PermissionRules: []security.PermissionRule{
+	return security.Claims{Subject: 42, PublicSubject: "u00000042", AuthVersion: 1, SessionID: "ai-delivery-operator", ExpiresAt: time.Now().Add(time.Hour).Unix(), PermissionRules: []security.PermissionRule{
 		{Code: "ai.read", Allow: true}, {Code: "ai.task.enqueue", Allow: true},
 	}}
 }
@@ -197,5 +205,54 @@ func TestOCT02AIDeadPublisherIsVisibleIntegration(t *testing.T) {
 	failure, ok := list.Data[0]["delivery_failure"].(map[string]any)
 	if !ok || len(failure) != 3 || failure["stage"] != "publish" || failure["retryable"] != true || failure["deadLetterId"] != "1" {
 		t.Fatalf("task list did not expose bounded publisher recovery metadata: %#v", failure)
+	}
+}
+
+func TestAIDeliveryRetryChecksOperatorAfterPublisherLockIntegration(t *testing.T) {
+	pool := oct02AIDeliveryPool(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	barrier, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer barrier.Rollback(ctx)
+	var blocker int32
+	if err = barrier.QueryRow(ctx, `select pg_backend_pid() from nats_outbox where event_id='delivery-event' for update`).Scan(&blocker); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan int, 1)
+	go func() { done <- oct02RetryAIDelivery(&Server{db: pool}, oct02AIDeliveryClaims()).Code }()
+	for {
+		var waiting bool
+		if err = pool.QueryRow(ctx, `select exists(select 1 from pg_stat_activity where datname=current_database() and $1=any(pg_blocking_pids(pid)))`, blocker).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case code := <-done:
+			t.Fatalf("operator returned before the publisher lock was released: %d", code)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if _, err = pool.Exec(ctx, `update user_permissions set expires_at=clock_timestamp()-interval '1 second' where permission_id=5 and user_id=42`); err != nil {
+		t.Fatal(err)
+	}
+	if err = barrier.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case code := <-done:
+		if code != http.StatusForbidden {
+			t.Fatalf("retry after operator grant expiry returned HTTP %d", code)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	var pending, audits bool
+	if err = pool.QueryRow(ctx, `select exists(select 1 from nats_outbox where status='pending'),exists(select 1 from app_logs where action='ai_delivery_retried')`).Scan(&pending, &audits); err != nil || pending || audits {
+		t.Fatalf("ineligible replay pending=%v auditable=%v error=%v", pending, audits, err)
 	}
 }

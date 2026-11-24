@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 // t is an application-owned ai_tasks alias. Read only the latest event: an old
@@ -25,7 +27,14 @@ const aiTaskDeliveryFailureProjectionSQL = `(select case when event.status='dead
 
 var errAITaskDeliveryRetryUnavailable = errors.New("AI task publisher delivery cannot be retried")
 
-func retryAITaskDeliveryTx(ctx context.Context, tx pgx.Tx, taskUID string, actorID int64) (string, error) {
+var errAITaskDeliveryActor = errors.New("resolve current AI delivery operator")
+var errAITaskDeliveryDenied = errors.New("AI delivery retry permission denied")
+
+func canRetryAITaskDelivery(claims security.Claims) bool {
+	return claims.Subject > 0 && claimsAllow(claims, "ai.read") && claimsAllow(claims, "ai.task.enqueue")
+}
+
+func retryAITaskDeliveryTx(ctx context.Context, tx pgx.Tx, taskUID string, claims security.Claims) (string, error) {
 	var taskID int64
 	var eligible bool
 	if err := tx.QueryRow(ctx, `select id,status='queued' and started_at is null and input_tokens=0 and output_tokens=0
@@ -74,6 +83,15 @@ func retryAITaskDeliveryTx(ctx context.Context, tx pgx.Tx, taskUID string, actor
 	if tag.RowsAffected() != 1 {
 		return "", errAITaskDeliveryRetryUnavailable
 	}
+	// The original task, dead letter and publisher row are now locked. An
+	// operator can have lost either grant while waiting for any of them.
+	operator, err := resolveCurrentWriteActorTx(ctx, tx, claims)
+	if err != nil {
+		return "", errors.Join(errAITaskDeliveryActor, err)
+	}
+	if !canRetryAITaskDelivery(operator) {
+		return "", errAITaskDeliveryDenied
+	}
 	if _, err = tx.Exec(ctx, `update dead_letter_events set replayed_at=now() where id=$1`, deadID); err != nil {
 		return "", err
 	}
@@ -82,13 +100,13 @@ func retryAITaskDeliveryTx(ctx context.Context, tx pgx.Tx, taskUID string, actor
 	}
 	_, err = tx.Exec(ctx, `insert into app_logs(category,level,action,target,payload)
 	 values('security','warning','ai_delivery_retried',$1,jsonb_build_object(
-	 'actorUserId',$2::bigint,'eventId',$3::text,'deadLetterId',$4::bigint))`, taskUID, actorID, eventID, deadID)
+	 'actorUserId',$2::bigint,'eventId',$3::text,'deadLetterId',$4::bigint))`, taskUID, operator.Subject, eventID, deadID)
 	return eventID, err
 }
 
 func (s *Server) retryAITaskDelivery(w http.ResponseWriter, r *http.Request) {
 	claims := currentClaims(r)
-	if claims.Subject <= 0 || !claimsAllow(claims, "ai.read") || !claimsAllow(claims, "ai.task.enqueue") {
+	if !canRetryAITaskDelivery(claims) {
 		writeAPIError(w, http.StatusForbidden, "AI_DELIVERY_RETRY_FORBIDDEN", "permission denied", 0, nil)
 		return
 	}
@@ -103,7 +121,15 @@ func (s *Server) retryAITaskDelivery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	eventID, err := retryAITaskDeliveryTx(r.Context(), tx, taskUID, claims.Subject)
+	eventID, err := retryAITaskDeliveryTx(r.Context(), tx, taskUID, claims)
+	if errors.Is(err, errAITaskDeliveryActor) {
+		writeCurrentWriteActorFailure(w, err)
+		return
+	}
+	if errors.Is(err, errAITaskDeliveryDenied) {
+		writeAPIError(w, http.StatusForbidden, "AI_DELIVERY_RETRY_FORBIDDEN", "permission denied", 0, nil)
+		return
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeAPIError(w, http.StatusNotFound, "AI_TASK_NOT_FOUND", "AI task not found", 0, nil)
 		return
