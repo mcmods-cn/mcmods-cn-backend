@@ -84,4 +84,23 @@ func TestRoleTrackUpdateRejectsAnEditForTheOldCodeIntegration(t *testing.T) {
 	if got := readTrack(renamed.Code); !reflect.DeepEqual(got, renamed) {
 		t.Fatalf("blocked rename changed referenced roles: got %#v, want %#v", got, renamed)
 	}
+	renamed.Description = "Current level and manual progression"
+	f.require(t, f.reviewer, http.MethodPut, basePath+"/"+renamed.Code, renamed, http.StatusOK)
+	reordered := renamed
+	reordered.Roles = []string{renamed.Roles[1], renamed.Roles[0]}
+	t.Run("level members keep the published order", func(t *testing.T) {
+		f.require(t, f.reviewer, http.MethodPut, basePath+"/"+renamed.Code, reordered, http.StatusConflict)
+	})
+	t.Run("the selected level track stays available", func(t *testing.T) {
+		f.require(t, f.reviewer, http.MethodDelete, basePath+"/"+renamed.Code, nil, http.StatusConflict)
+	})
+	if got := readTrack(renamed.Code); !reflect.DeepEqual(got, renamed) {
+		t.Fatalf("active level track changed: got %#v, want %#v", got, renamed)
+	}
+	f.require(t, f.reviewer, http.MethodPut, levelPath, levelConfigPayload{
+		RoleTrackCode: other.Code, LevelThresholds: []int64{20, 40},
+	}, http.StatusOK)
+	f.require(t, f.reviewer, http.MethodPut, basePath+"/"+renamed.Code, reordered, http.StatusOK)
+	f.require(t, f.reviewer, http.MethodDelete, basePath+"/"+renamed.Code, nil, http.StatusOK)
+
 }

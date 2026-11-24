@@ -71,17 +71,10 @@ func (s *Server) saveRoleTrack(w http.ResponseWriter, r *http.Request, currentCo
 			payload.Description,
 		)
 	} else {
-		// Role application also locks the track before its members.
-		var lockedCode string
-		if err = tx.QueryRow(r.Context(), `select code from permission_role_tracks where code=$1 for update`, currentCode).Scan(&lockedCode); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				writeError(w, http.StatusNotFound, "权限组线路不存在")
-			} else {
-				writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
-			}
+		if !lockRoleTrackForEdit(w, r, tx, currentCode, payload.Code, payload.Roles) {
 			return
 		}
-		if _, err := tx.Exec(r.Context(), `delete from permission_role_track_roles where track_code = $1`, lockedCode); err != nil {
+		if _, err := tx.Exec(r.Context(), `delete from permission_role_track_roles where track_code = $1`, currentCode); err != nil {
 			writeError(w, http.StatusInternalServerError, "保存线路权限组失败")
 			return
 		}
@@ -131,15 +124,54 @@ func (s *Server) saveRoleTrack(w http.ResponseWriter, r *http.Request, currentCo
 	writeJSON(w, http.StatusOK, payload)
 }
 
+// Level jobs snapshot ordered role IDs but day-to-day experience uses the active
+// track. Hold the same track row as a level configuration write until commit.
+func lockRoleTrackForEdit(w http.ResponseWriter, r *http.Request, tx pgx.Tx, code, nextCode string, nextRoles []string) bool {
+	var lockedCode string
+	if err := tx.QueryRow(r.Context(), `select code from permission_role_tracks where code=$1 for update`, code).Scan(&lockedCode); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "权限组线路不存在")
+		} else {
+			writeError(w, http.StatusInternalServerError, "读取权限组线路失败")
+		}
+		return false
+	}
+
+	// Read the active configuration in a new statement after the row lock.
+	var breaksLevels bool
+	err := tx.QueryRow(r.Context(), `select exists(
+		select 1 from level_system_config where role_track_code=$1 and
+		($2::text<>$1 or $3::text[] is distinct from array(
+			select role.code from permission_role_track_roles member join roles role on role.id=member.role_id
+			where member.track_code=$1 order by member.position)))`, lockedCode, nextCode, nextRoles).Scan(&breaksLevels)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取等级配置失败")
+		return false
+	}
+	if breaksLevels {
+		writeAPIError(w, http.StatusConflict, "ROLE_TRACK_USED_BY_LEVELS", "请先在等级设置中切换或停用此线路，再更改线路代码、成员或删除线路", 0, nil)
+		return false
+	}
+	return true
+}
+
 func (s *Server) deleteRoleTrack(w http.ResponseWriter, r *http.Request) {
 	code := strings.TrimSpace(r.PathValue("code"))
-	tag, err := s.db.Exec(r.Context(), `delete from permission_role_tracks where code = $1`, code)
+	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "删除权限组线路失败")
 		return
 	}
-	if tag.RowsAffected() == 0 {
-		writeError(w, http.StatusNotFound, "权限组线路不存在")
+	defer tx.Rollback(r.Context())
+	if !lockRoleTrackForEdit(w, r, tx, code, "", nil) {
+		return
+	}
+	if _, err = tx.Exec(r.Context(), `delete from permission_role_tracks where code=$1`, code); err != nil {
+		writeError(w, http.StatusInternalServerError, "删除权限组线路失败")
+		return
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "删除权限组线路失败")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
