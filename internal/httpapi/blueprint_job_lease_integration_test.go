@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"mcmods-cn-backend/internal/config"
@@ -460,8 +461,16 @@ func TestBlueprintRetryAndOutboxCommitOrRollbackTogetherIntegration(t *testing.T
 		insert into blueprint_jobs(id,public_id,blueprint_id,operation,status) values(50,'active050',32,'normalize','queued')`); err != nil {
 		t.Fatal(err)
 	}
-	server := &Server{db: pool}
-	jobPublicID, err := server.retryBlueprintJob(ctx, "retrysucc", 7, 9)
+	retry := func(blueprintID int64) (string, error) {
+		var jobID string
+		err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			var err error
+			jobID, err = queueBlueprintRetryTx(ctx, tx, blueprintID, 9)
+			return err
+		})
+		return jobID, err
+	}
+	jobPublicID, err := retry(30)
 	if err != nil || jobPublicID == "" {
 		t.Fatalf("successful retry = %q/%v", jobPublicID, err)
 	}
@@ -481,7 +490,7 @@ func TestBlueprintRetryAndOutboxCommitOrRollbackTogetherIntegration(t *testing.T
 		t.Fatal(err)
 	}
 	beforeFailure := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox")
-	_, err = server.retryBlueprintJob(ctx, "retryfail", 7, 9)
+	_, err = retry(31)
 	requireAccessFixturePGError(t, err, "23514", "reject_retry_event", "")
 	if after := accessFixtureBusinessRows(t, ctx, pool, "blueprints", "blueprint_jobs", "oss_files", "blueprint_job_artifacts", "oss_object_deletion_outbox", "nats_outbox"); after != beforeFailure {
 		t.Fatal("specific retry fault changed business, deletion or outbox rows")
@@ -490,7 +499,7 @@ func TestBlueprintRetryAndOutboxCommitOrRollbackTogetherIntegration(t *testing.T
 	if err = pool.QueryRow(ctx, `select count(*) from blueprint_jobs where blueprint_id=31`).Scan(&jobs); err != nil || jobs != 0 {
 		t.Fatalf("failed retry job count = %d, error = %v", jobs, err)
 	}
-	if _, err = server.retryBlueprintJob(ctx, "retrybusy", 7, 9); !errors.Is(err, errBlueprintNotRetryable) {
+	if _, err = retry(32); !errors.Is(err, errBlueprintNotRetryable) {
 		t.Fatalf("active duplicate retry = %v, want conflict", err)
 	}
 	assertBlueprintStatus(t, ctx, pool, 32, "failed")

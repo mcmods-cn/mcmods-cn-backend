@@ -259,55 +259,21 @@ func (s *Server) enqueueBlueprintJob(ctx context.Context, blueprintID, createdBy
 	return jobPublicID, nil
 }
 
-func (s *Server) retryBlueprintJob(ctx context.Context, publicID string, ownerID, actorID int64, requests ...*http.Request) (string, error) {
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-	var blueprintID int64
-	var status string
-	if err = tx.QueryRow(ctx, `select id,status from blueprints where public_id=$1 and owner_id=$2 for update`, publicID, ownerID).Scan(&blueprintID, &status); errors.Is(err, pgx.ErrNoRows) {
-		return "", errBlueprintNotFound
-	} else if err != nil {
-		return "", err
-	}
-	if status != "failed" {
-		return "", errBlueprintNotRetryable
-	}
-	var active bool
-	if err = tx.QueryRow(ctx, `select exists(select 1 from blueprint_jobs
-		where blueprint_id=$1 and operation='normalize' and target_format='' and status in ('queued','processing'))`, blueprintID).Scan(&active); err != nil {
-		return "", err
-	}
-	if active {
-		return "", errBlueprintNotRetryable
-	}
-	tag, err := tx.Exec(ctx, `update blueprints set status='queued',last_error='',updated_at=now() where id=$1 and status='failed'`, blueprintID)
+func queueBlueprintRetryTx(ctx context.Context, tx pgx.Tx, blueprintID, actorID int64) (string, error) {
+	tag, err := tx.Exec(ctx, `update blueprints set status='queued',last_error='',updated_at=now()
+		where id=$1 and status='failed' and not exists (
+			select 1 from blueprint_jobs where blueprint_id=$1 and operation='normalize' and target_format='' and status in ('queued','processing'))`, blueprintID)
 	if err != nil {
 		return "", err
 	}
 	if tag.RowsAffected() != 1 {
 		return "", errBlueprintNotRetryable
 	}
-	jobPublicID, err := enqueueBlueprintJobTx(ctx, tx, blueprintID, actorID, "normalize", "")
-	if err != nil {
-		if isUniqueViolation(err) {
-			return "", errBlueprintNotRetryable
-		}
-		return "", err
+	jobID, err := enqueueBlueprintJobTx(ctx, tx, blueprintID, actorID, "normalize", "")
+	if isBlueprintActiveJobConflict(err) {
+		return "", errBlueprintNotRetryable
 	}
-	// Direct Worker/integration callers have no HTTP activity. Actual requests
-	// attach their existing middleware event to the same job/outbox transaction.
-	if len(requests) > 0 && requests[0] != nil {
-		if err = enqueueRequestActivityTx(requests[0], tx); err != nil {
-			return "", errors.Join(errBlueprintActivityPersistence, err)
-		}
-	}
-	if err = tx.Commit(ctx); err != nil {
-		return "", err
-	}
-	return jobPublicID, nil
+	return jobID, err
 }
 
 func (s *Server) userOwnsPendingBlueprintObject(ctx context.Context, ownerID int64, objectKey string) bool {
@@ -1125,16 +1091,32 @@ func isBlueprintActiveJobConflict(err error) bool {
 
 func (s *Server) retryBlueprint(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
-	ownerID, allowed := s.blueprintOwnerAccess(r, publicID)
-	if !allowed {
+	ctx := r.Context()
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建重试任务失败")
+		return
+	}
+	defer tx.Rollback(ctx)
+	var blueprintID, ownerID int64
+	err = tx.QueryRow(ctx, `select id,owner_id from blueprints where public_id=$1 and status<>'deleted' for update`, publicID).Scan(&blueprintID, &ownerID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusForbidden, "没有权限重试该蓝图")
 		return
 	}
-	jobID, err := s.retryBlueprintJob(r.Context(), publicID, ownerID, currentClaims(r).Subject, r)
-	if errors.Is(err, errBlueprintNotFound) {
-		writeError(w, http.StatusNotFound, "蓝图不存在")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "读取蓝图状态失败")
 		return
 	}
+	actor, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if actor.Subject != ownerID && !claimsAllow(actor, "admin.*") {
+		writeError(w, http.StatusForbidden, "没有权限重试该蓝图")
+		return
+	}
+	jobID, err := queueBlueprintRetryTx(ctx, tx, blueprintID, actor.Subject)
 	if errors.Is(err, errBlueprintNotRetryable) {
 		writeError(w, http.StatusConflict, "蓝图不处于可重试状态或已有处理任务")
 		return
@@ -1143,11 +1125,15 @@ func (s *Server) retryBlueprint(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusTooManyRequests, "BLUEPRINT_JOB_CONCURRENCY_LIMIT", "too many blueprint jobs are already active", 60, nil)
 		return
 	}
-	if errors.Is(err, errBlueprintActivityPersistence) {
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "创建重试任务失败")
+		return
+	}
+	if err = enqueueRequestActivityTx(r, tx); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to persist blueprint activity")
 		return
 	}
-	if err != nil {
+	if err = tx.Commit(ctx); err != nil {
 		writeError(w, http.StatusInternalServerError, "创建重试任务失败")
 		return
 	}
@@ -1179,15 +1165,6 @@ func (s *Server) downloadBlueprintVariant(w http.ResponseWriter, r *http.Request
 		return s.recordOwnedContentDownloadTx(ctx, tx, "blueprint", publicID, ownerID, claims.Subject)
 	}))
 	s.presignOSSFileWithRequest(w, r, ossPresignRequest{ObjectKey: objectKey})
-}
-
-func (s *Server) blueprintOwnerAccess(r *http.Request, publicID string) (int64, bool) {
-	var ownerID int64
-	if s.db.QueryRow(r.Context(), `select owner_id from blueprints where public_id=$1 and status<>'deleted'`, publicID).Scan(&ownerID) != nil {
-		return 0, false
-	}
-	claims := currentClaims(r)
-	return ownerID, claims.Subject == ownerID || claimsAllow(claims, "admin.*")
 }
 
 func categoryForResourceKind(kind string) string {

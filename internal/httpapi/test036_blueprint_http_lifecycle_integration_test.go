@@ -471,6 +471,31 @@ func TestTEST036GoldenUploadNormalizeReviewConvertAndDownloadFullHTTPIntegration
 	}
 }
 
+func TestBlueprintOwnerCanRetryFailedNormalizationOnceOverHTTP(t *testing.T) {
+	f := newTEST036Fixture(t)
+	var id int64
+	var publicID string
+	err := f.db.QueryRow(f.ctx, `insert into blueprints(owner_id,title,source_format,status,review_status,original_object_key,last_error)
+		values($1,'Retry fixture','nbt','failed','pending','synthetic/retry.nbt','earlier attempt') returning id,public_id`, f.userIDs[f.editor]).Scan(&id, &publicID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := "/api/v1/blueprints/" + publicID + "/retry"
+	f.require(t, f.otherEditor, http.MethodPost, endpoint, nil, http.StatusForbidden)
+	f.require(t, f.editor, http.MethodPost, endpoint, nil, http.StatusAccepted)
+	f.require(t, f.editor, http.MethodPost, endpoint, nil, http.StatusConflict)
+	var status string
+	var jobs, events int
+	err = f.db.QueryRow(f.ctx, `select b.status,
+		(select count(*) from blueprint_jobs where blueprint_id=b.id),
+		(select count(*) from nats_outbox o join blueprint_jobs j on o.aggregate_id=j.public_id
+		 where o.aggregate_type='blueprint_job' and o.event_type='blueprint.conversion.requested' and j.blueprint_id=b.id)
+		from blueprints b where b.id=$1`, id).Scan(&status, &jobs, &events)
+	if err != nil || status != "queued" || jobs != 1 || events != 1 {
+		t.Fatalf("retry status=%q jobs=%d events=%d error=%v", status, jobs, events, err)
+	}
+}
+
 func TestBlueprintDetailScopesProcessingNotesAndStorageMetadata(t *testing.T) {
 	f := newTEST036Fixture(t)
 	var publicID string
