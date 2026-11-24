@@ -92,7 +92,7 @@ advisory lock 保护的事务中读取、比较及更新，回复返回新版本
 | costLimitCny | 按管理员配置 CNY 价格换算的额度；0 表示不设上限 |
 
 所有作用域使用同一个 PostgreSQL 事务 advisory lock，检查预算与写入请求账目
-原子完成。没有调用供应商之前先留下 `ai_task_logs.event=provider_request_usage`
+原子完成。取得预算锁后，Worker 核对准备请求时读取的加密配置，并持设置行共享锁直到预算提交。期间已保存的新供应商、密钥、价格或额度会使旧请求在发送前终止；已获准入的在途请求继续结算。没有调用供应商之前先留下 `ai_task_logs.event=provider_request_usage`
 记录。账目 `task_id` 为 NULL，通过 Payload 中的任务 ID 关联，避免删除任务
 级联删除预算事实。保留策略不得删除当前最长预算周期内的这些记录，否则
 会重置已消费的预算。现有 logs.retention 仅清理 app_logs 等，不清理 ai_task_logs，最近 30 天统计窗口

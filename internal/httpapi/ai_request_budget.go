@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const aiRequestBudgetEvent = "provider_request_usage"
@@ -83,6 +86,16 @@ func (worker *AIWorker) reserveProviderRequestBudget(ctx context.Context, prepar
 	// atomic across overlapping site, provider, model and user limits.
 	if _, err = tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('ai-provider-request-budget'))`); err != nil {
 		return 0, budget, err
+	}
+	// Settings can change while this request waits for the budget. Hold the
+	// same stored row through admission; release it before contacting the provider.
+	var currentSettings []byte
+	err = tx.QueryRow(ctx, `select value from system_settings where key='ai.config' for share`).Scan(&currentSettings)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, budget, err
+	}
+	if !bytes.Equal(prepared.settingsSnapshot, currentSettings) {
+		return 0, budget, fmt.Errorf("AI provider settings changed before request admission: %w", errAIExecutionPolicy)
 	}
 	if budget.TaskID != 0 {
 		var attempts int64

@@ -58,6 +58,7 @@ type anthropicCompletionResponse struct {
 }
 
 type preparedAITask struct {
+	settingsSnapshot  []byte
 	provider          aiProviderConfig
 	model             aiModelConfig
 	prompt            string
@@ -94,7 +95,11 @@ func (worker *AIWorker) prepareTask(
 		taskType != aiTaskNotificationTranslation && taskType != aiTaskContentTranslation {
 		return preparedAITask{}, fmt.Errorf("unsupported AI task type: %s", taskType)
 	}
-	cfg := aiConfigFromDatabase(ctx, worker.db, worker.settingsEncryptionKey)
+	setting, err := readAIConfigSetting(ctx, worker.db, worker.settingsEncryptionKey)
+	if err != nil {
+		return preparedAITask{}, errors.New("AI provider settings are unavailable")
+	}
+	cfg := setting.config
 	provider, model, ok := resolveAIModel(cfg, providerCode+"/"+modelID)
 	if !ok {
 		return preparedAITask{}, errors.New("AI task provider or model is unavailable")
@@ -136,7 +141,7 @@ func (worker *AIWorker) prepareTask(
 		provider: provider, model: model, prompt: prompt, timeout: timeout,
 		maxOutputTokens: maxOutputTokens, reservationTokens: reservationTokens,
 		taskType: taskType, rawPayload: rawPayload,
-		quotas: cfg.Quotas,
+		quotas: cfg.Quotas, settingsSnapshot: setting.encrypted,
 	}, nil
 }
 
