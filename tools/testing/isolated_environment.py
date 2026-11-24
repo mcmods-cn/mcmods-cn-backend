@@ -224,9 +224,19 @@ def down(state):
     record = read_resource_record(state)
     # Check every resource before removing any. Remove only recorded container
     # IDs and their own anonymous volumes; never a user-supplied path or DB.
+    remaining = []
     for container_id in record["containers"].values():
-        verify_container(container_id, record["owner"])
-    for container_id in record["containers"].values():
+        try:
+            verify_container(container_id, record["owner"])
+        except subprocess.CalledProcessError:
+            # A previous down can stop after removing part of the inventory.
+            # Only a successful, empty lookup for an exact ID confirms absence.
+            if not re.fullmatch(r"[0-9a-f]{64}", container_id) or docker(
+                    "container", "ls", "-aq", "--no-trunc", "--filter", "id=" + container_id, capture=True).strip():
+                raise
+            continue
+        remaining.append(container_id)
+    for container_id in remaining:
         docker("rm", "-f", "-v", container_id, capture=True)
     if "typesense" in record["containers"]:
         for source in NATIVE_BINARIES.values():

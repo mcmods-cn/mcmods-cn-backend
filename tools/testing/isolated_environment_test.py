@@ -123,6 +123,41 @@ class EnvironmentOwnershipTests(unittest.TestCase):
                 self.assertEqual([call.args[0] for call in docker.call_args_list], ["inspect"])
             self.assertTrue((state / "resources.json").exists())
 
+    def test_down_resumes_only_after_confirming_missing_containers(self):
+        removed, remaining = "1" * 64, "2" * 64
+        for lookup in ("absent", "still present", "daemon error"):
+            with self.subTest(lookup=lookup), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory) / "services"
+                state.mkdir()
+                record = state / "resources.json"
+                record.write_text(json.dumps({"owner": OWNER, "database": DATABASE,
+                                              "containers": {"redis": remaining, "nats": removed}}))
+                removals = []
+
+                def fake_docker(*args, **kwargs):
+                    if args == ("inspect", remaining):
+                        return json.dumps([{"Config": {"Labels": {environment.LABEL: OWNER}}}])
+                    if args == ("inspect", removed):
+                        raise subprocess.CalledProcessError(1, args)
+                    if args[0] == "container":
+                        self.assertEqual(args[1:], ("ls", "-aq", "--no-trunc", "--filter", "id=" + removed))
+                        if lookup == "daemon error":
+                            raise subprocess.CalledProcessError(1, args)
+                        return "" if lookup == "absent" else removed
+                    self.assertEqual(args, ("rm", "-f", "-v", remaining))
+                    removals.append(remaining)
+
+                with patch.object(environment, "docker", side_effect=fake_docker):
+                    if lookup == "absent":
+                        environment.down(state)
+                        self.assertEqual(removals, [remaining])
+                        self.assertFalse(state.exists())
+                    else:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            environment.down(state)
+                        self.assertEqual(removals, [])
+                        self.assertTrue(record.exists())
+
     def test_down_refuses_an_invalid_owner_before_inspection_or_removal(self):
         for owner in (None, "", "not-an-owner-label"):
             with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
