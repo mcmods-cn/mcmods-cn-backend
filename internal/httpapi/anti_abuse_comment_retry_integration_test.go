@@ -47,3 +47,35 @@ func TestCommentSubmissionIdentities(t *testing.T) {
 		})
 	}
 }
+
+func TestCommentReceiptsSurviveUnavailableDetailProjectionIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "comment.create")
+	// The HTTP fixture owns this schema. Annotation requires this column only after commit.
+	if _, err := f.db.Exec(f.ctx, "alter table comment_attachments rename column processing_status to temporarily_unavailable"); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/comment-targets/mod/" + f.modCode + "/comments"
+	submission := createCommentRequest{Body: "Ordinary comment about the latest game version", IdempotencyKey: "receipt-key"}
+	type receipt struct {
+		ID                 string `json:"id"`
+		Status             string `json:"status"`
+		Moderation         bool   `json:"moderation"`
+		DetailsUnavailable bool   `json:"detailsUnavailable"`
+	}
+	first := decodeTEST022Data[receipt](t, f.require(t, f.editor, http.MethodPost, path, submission, 201))
+	if first.ID == "" || first.Status != "published" || first.Moderation || !first.DetailsUnavailable {
+		t.Fatalf("unexpected committed receipt %+v", first)
+	}
+	retried := decodeTEST022Data[receipt](t, f.require(t, f.editor, http.MethodPost, path, submission, 200))
+	if retried != first {
+		t.Fatalf("retry changed the persisted receipt: first=%+v retry=%+v", first, retried)
+	}
+	if _, err := f.db.Exec(f.ctx, "update comments set status='pending' where public_id=$1", first.ID); err != nil {
+		t.Fatal(err)
+	}
+	pending := decodeTEST022Data[receipt](t, f.require(t, f.editor, http.MethodPost, path, submission, 200))
+	if pending.ID != first.ID || pending.Status != "pending" || !pending.Moderation || pending.DetailsUnavailable {
+		t.Fatalf("unexpected pending receipt %+v", pending)
+	}
+}

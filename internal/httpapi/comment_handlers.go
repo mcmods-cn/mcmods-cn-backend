@@ -450,13 +450,14 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	var existingID int64
+	var existingPublicID, existingStatus string
 	var existingTargetMatches bool
-	if err = tx.QueryRow(r.Context(), `select coalesce(existing.id,0),coalesce(
+	if err = tx.QueryRow(r.Context(), `select coalesce(existing.id,0),coalesce(existing.public_id,''),coalesce(existing.status,''),coalesce(
 		existing.target_type=$3::text and existing.target_id=$4::bigint
 		and existing.target_version_id is not distinct from $5::bigint,false)
 		from (values (1)) seed(value) left join comments existing
 		  on existing.author_id=$1 and existing.idempotency_key=$2`,
-		claims.Subject, request.IdempotencyKey, target.Type, target.InternalID, target.VersionID).Scan(&existingID, &existingTargetMatches); err != nil {
+		claims.Subject, request.IdempotencyKey, target.Type, target.InternalID, target.VersionID).Scan(&existingID, &existingPublicID, &existingStatus, &existingTargetMatches); err != nil {
 		writeError(w, http.StatusInternalServerError, "发布评论失败")
 		return
 	}
@@ -471,17 +472,7 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 			writeError(w, http.StatusInternalServerError, "发布评论失败")
 			return
 		}
-		items, _ := s.queryCommentItems(r.Context(), []int64{existingID}, false, 0, claims)
-		if len(items) > 0 {
-			writeJSON(w, http.StatusOK, items[0])
-			return
-		}
-		var existingPublicID, existingStatus string
-		if s.db.QueryRow(r.Context(), `select public_id,status from comments where id=$1`, existingID).Scan(&existingPublicID, &existingStatus) == nil {
-			writeJSON(w, http.StatusOK, map[string]any{"id": existingPublicID, "status": existingStatus, "moderation": existingStatus == "pending"})
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to load idempotent comment result")
+		s.writeCommittedComment(w, r, http.StatusOK, existingID, existingPublicID, existingStatus)
 		return
 	}
 	if submission != nil && submission.replayOnly {
@@ -542,17 +533,26 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request, target co
 		return
 	}
 	skipRequestActivity(r)
+	httpStatus := http.StatusCreated
 	if request.Status == "pending" {
-		writeJSON(w, http.StatusAccepted, map[string]any{"id": publicID, "status": "pending", "moderation": true})
-		return
+		httpStatus = http.StatusAccepted
 	}
+	s.writeCommittedComment(w, r, httpStatus, commentID, publicID, request.Status)
+}
 
-	items, _ := s.queryCommentItems(r.Context(), []int64{commentID}, false, 0, claims)
-	if len(items) > 0 {
-		writeJSON(w, http.StatusCreated, items[0])
+// Keep the committed outcome available when enriching it with detail fails.
+func (s *Server) writeCommittedComment(w http.ResponseWriter, r *http.Request, httpStatus int, internalID int64, publicID, status string) {
+	if status == "pending" {
+		writeJSON(w, httpStatus, map[string]any{"id": publicID, "status": status, "moderation": true})
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]string{"id": publicID})
+	if status == "published" {
+		if items, err := s.queryCommentItems(r.Context(), []int64{internalID}, false, 0, currentClaims(r)); err == nil && len(items) == 1 {
+			writeJSON(w, httpStatus, items[0])
+			return
+		}
+	}
+	writeJSON(w, httpStatus, map[string]any{"id": publicID, "status": status, "moderation": false, "detailsUnavailable": true})
 }
 
 func commentIdempotencyLockKey(userID int64, idempotencyKey string) string {
