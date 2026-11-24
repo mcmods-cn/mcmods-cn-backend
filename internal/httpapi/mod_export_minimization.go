@@ -88,13 +88,7 @@ func minimizeExportLocaleText(raw json.RawMessage) json.RawMessage {
 	if json.Unmarshal(raw, &values) != nil {
 		return json.RawMessage(`{}`)
 	}
-	result := make(map[string]string)
-	for locale, value := range values {
-		if canonical, ok := exportContentLocale(locale); ok {
-			result[canonical] = value
-		}
-	}
-	encoded, _ := json.Marshal(result)
+	encoded, _ := json.Marshal(selectExportLocales(values))
 	return encoded
 }
 

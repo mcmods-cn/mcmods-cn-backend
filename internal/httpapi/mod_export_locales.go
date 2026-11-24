@@ -53,7 +53,11 @@ func canonicalExportLocaleTag(value string) (string, bool) {
 
 func supportedExportNames(value any) map[string]any {
 	raw, _ := value.(map[string]any)
-	return selectCatalogLocales(raw, func(key string, _ any) string {
+	return selectExportLocales(raw)
+}
+
+func selectExportLocales[T any](values map[string]T) map[string]T {
+	return selectCatalogLocales(values, func(key string, _ T) string {
 		locale, _ := exportContentLocale(key)
 		return locale
 	})

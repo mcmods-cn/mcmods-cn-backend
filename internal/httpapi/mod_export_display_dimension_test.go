@@ -58,3 +58,17 @@ func TestFlatGeneratorStructureOverridesUseRegistryReferences(t *testing.T) {
 		t.Fatal("dimension settings leaked into another codec")
 	}
 }
+
+func TestImportedAdvancementTitleRetainsCanonicalLocaleWhenAliasIsPresent(t *testing.T) {
+	source := map[string]any{"title_names": map[string]string{"en_us": "Fallback title", "en-US": "Published title", "ja_jp": "日本語", "es-MX": "unavailable"}}
+	for range 100 {
+		display := minimizeAdvancementDisplay(source).(map[string]any)
+		var titles map[string]string
+		if err := json.Unmarshal(display["title_names"].(json.RawMessage), &titles); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(titles, map[string]string{"en-US": "Published title", "ja-JP": "日本語"}) {
+			t.Fatalf("stored display titles = %#v", titles)
+		}
+	}
+}
