@@ -505,6 +505,67 @@ func TestWithdrawnBlueprintConversionStopsBeforeCreatingArtifacts(t *testing.T) 
 	}
 }
 
+func TestBlueprintFailureNotificationUsesCurrentVisibility(t *testing.T) {
+	f := newTEST036Fixture(t)
+	for _, path := range []string{"worker", "recovery"} {
+		for _, visibility := range []string{"published", "withdrawn"} {
+			t.Run(path+"/"+visibility, func(t *testing.T) {
+				var id int64
+				var publicID string
+				err := f.db.QueryRow(f.ctx, `insert into blueprints(owner_id,title,source_format,status,review_status)
+					values($1,'Conversion notice test','nbt','ready','approved') returning id,public_id`, f.userIDs[f.editor]).Scan(&id, &publicID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw := f.require(t, f.otherEditor, http.MethodPost, "/api/v1/blueprints/"+publicID+"/convert",
+					map[string]string{"format": "schem"}, http.StatusAccepted)
+				queued := decodeTEST022Data[map[string]string](t, raw)
+				var jobID int64
+				if err = f.db.QueryRow(f.ctx, "update blueprint_jobs set max_attempts=1 where public_id=$1 returning id", queued["jobId"]).Scan(&jobID); err != nil {
+					t.Fatal(err)
+				}
+				worker := f.worker("notice-" + path)
+				job, claimed, err := worker.claimBlueprintJob(f.ctx, jobID)
+				if err != nil || !claimed {
+					t.Fatalf("claim %d: claimed=%t err=%v", jobID, claimed, err)
+				}
+				if visibility == "withdrawn" {
+					if _, err = f.db.Exec(f.ctx, "update blueprints set status='deleted' where id=$1", id); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if path == "worker" {
+					terminal, failErr := worker.failBlueprintJob(f.ctx, job, errors.New("synthetic conversion failure"))
+					if failErr != nil || !terminal {
+						t.Fatalf("failed job: terminal=%t err=%v", terminal, failErr)
+					}
+				} else {
+					if _, err = f.db.Exec(f.ctx, "update blueprint_jobs set lease_expires_at=now()-interval '1 second' where id=$1", jobID); err != nil {
+						t.Fatal(err)
+					}
+					requeued, exhausted, recoverErr := worker.recoverStaleBlueprintJobs(f.ctx)
+					if recoverErr != nil || requeued != 0 || exhausted != 1 {
+						t.Fatalf("recover: requeued=%d exhausted=%d err=%v", requeued, exhausted, recoverErr)
+					}
+				}
+				var status string
+				var notices int
+				err = f.db.QueryRow(f.ctx, `select j.status,(select count(*) from nats_outbox
+					where aggregate_type='blueprint' and aggregate_id=$2 and event_type='blueprint.notification.blueprint_conversion_failure'
+					and (payload->>'recipientId')::bigint=$3) from blueprint_jobs j where j.id=$1`,
+					jobID, publicID, f.userIDs[f.otherEditor]).Scan(&status, &notices)
+				expected := 1
+				if visibility == "withdrawn" {
+					expected = 0
+				}
+				if err != nil || status != "failed" || notices != expected {
+					t.Fatalf("status=%q notices=%d want=%d err=%v", status, notices, expected, err)
+				}
+			})
+		}
+	}
+}
+
 func TestBlueprintOwnerCanRetryFailedNormalizationOnceOverHTTP(t *testing.T) {
 	f := newTEST036Fixture(t)
 	var id int64
