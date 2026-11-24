@@ -103,11 +103,11 @@ func (s *Server) publishSystemNotification(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) deleteSystemNotification(w http.ResponseWriter, r *http.Request) {
-	notificationID, ok := s.pathNotificationID(w, r)
+	publicID, ok := notificationPublicID(w, r)
 	if !ok {
 		return
 	}
-	tag, err := s.db.Exec(r.Context(), `delete from notifications where id = $1 and recipient_id is null and kind = 'system'`, notificationID)
+	tag, err := s.db.Exec(r.Context(), `delete from notifications where public_id = $1 and recipient_id is null and kind = 'system'`, publicID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "删除系统通知失败")
 		return
@@ -138,18 +138,18 @@ func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) markNotificationRead(w http.ResponseWriter, r *http.Request) {
-	notificationID, ok := s.pathNotificationID(w, r)
+	publicID, ok := notificationPublicID(w, r)
 	if !ok {
 		return
 	}
 	claims := currentClaims(r)
-	tag, err := s.db.Exec(r.Context(), markNotificationReadSQL, notificationID, claims.Subject)
+	tag, err := s.db.Exec(r.Context(), markNotificationReadSQL, publicID, claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "更新通知状态失败")
 		return
 	}
 	if tag.RowsAffected() == 0 {
-		// Marking an already-read item is intentionally idempotent.
+		// An absent or inaccessible item has the same read receipt as an already-read item.
 		writeJSON(w, http.StatusOK, map[string]bool{"read": true})
 		return
 	}
@@ -207,7 +207,7 @@ func (s *Server) aiDailyBalance(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
-	notificationID, ok := s.pathNotificationID(w, r)
+	publicID, ok := notificationPublicID(w, r)
 	if !ok {
 		return
 	}
@@ -223,13 +223,14 @@ func (s *Server) translateNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	claims := currentClaims(r)
 	var title, body, sourceLocale, kind string
+	var notificationID int64
 	err := s.db.QueryRow(
 		r.Context(),
-		`select title, body, source_locale, kind from notifications
-		 where id = $1 and (recipient_id is null or recipient_id = $2)`,
-		notificationID,
+		`select id, title, body, source_locale, kind from notifications
+		 where public_id = $1 and (recipient_id is null or recipient_id = $2)`,
+		publicID,
 		claims.Subject,
-	).Scan(&title, &body, &sourceLocale, &kind)
+	).Scan(&notificationID, &title, &body, &sourceLocale, &kind)
 	if err == pgx.ErrNoRows {
 		writeError(w, http.StatusNotFound, "通知不存在")
 		return
@@ -442,20 +443,11 @@ func remainingTokens(limit int64, used int64) int64 {
 	return limit - used
 }
 
-func (s *Server) pathNotificationID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+func notificationPublicID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
 	if !validCatalogPublicID(publicID) {
 		writeError(w, http.StatusBadRequest, "通知 ID 不正确")
-		return 0, false
+		return "", false
 	}
-	var notificationID int64
-	if err := s.db.QueryRow(r.Context(), `select id from notifications where public_id=$1`, publicID).Scan(&notificationID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "notification not found")
-		} else {
-			writeError(w, http.StatusInternalServerError, "failed to load notification")
-		}
-		return 0, false
-	}
-	return notificationID, true
+	return publicID, true
 }

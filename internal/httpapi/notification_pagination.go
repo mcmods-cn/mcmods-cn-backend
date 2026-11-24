@@ -212,7 +212,7 @@ const markNotificationReadSQL = `insert into notification_receipts(notification_
 select n.id,$2,clock_timestamp(),n.revision_xid from notifications n
 left join notification_receipts receipt on receipt.notification_id=n.id and receipt.user_id=$2
 left join notification_read_watermarks watermark on watermark.user_id=$2
-where n.id=$1 and (n.recipient_id is null or n.recipient_id=$2) and ` + notificationUnreadPredicateSQL + `
+where n.public_id=$1 and (n.recipient_id is null or n.recipient_id=$2) and ` + notificationUnreadPredicateSQL + `
 on conflict(notification_id,user_id) do update set read_at=excluded.read_at,read_revision_xid=excluded.read_revision_xid
 where (notification_receipts.read_at is null or notification_receipts.read_revision_xid is distinct from excluded.read_revision_xid)
  and (notification_receipts.read_revision_xid is null

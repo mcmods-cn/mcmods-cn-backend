@@ -28,6 +28,8 @@ func TestTEST021NotificationHandlersEnforceVisibilityReadStateAndCacheRepairInte
 	if err != nil {
 		t.Fatal(err)
 	}
+	counter := &integrationQueryCounter{}
+	poolConfig.ConnConfig.Tracer = counter
 	poolConfig.MaxConns = 1
 	poolConfig.MinConns = 1
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
@@ -98,9 +100,13 @@ func TestTEST021NotificationHandlersEnforceVisibilityReadStateAndCacheRepairInte
 	if summary := invokeTEST021UnreadSummary(t, ctx, server, userA); summary.Notifications != 3 || summary.Total != 3 {
 		t.Fatalf("initial user A unread=%+v", summary)
 	}
+	counter.queries.Store(0)
 	markOne := invokeTEST021NotificationMutation(ctx, server, userA, newDirectID, false)
 	if markOne.Code != http.StatusOK || !strings.Contains(markOne.Body.String(), `"read":true`) {
 		t.Fatalf("mark one status=%d body=%s", markOne.Code, markOne.Body.String())
+	}
+	if got := counter.queries.Load(); got != 1 {
+		t.Fatalf("single read required %d SQL calls, want one scoped mutation", got)
 	}
 	if summary := invokeTEST021UnreadSummary(t, ctx, server, userA); summary.Notifications != 2 || summary.Total != 2 {
 		t.Fatalf("post mark-one user A unread=%+v", summary)
@@ -112,6 +118,18 @@ func TestTEST021NotificationHandlersEnforceVisibilityReadStateAndCacheRepairInte
 	var foreignReceipts int
 	if err = pool.QueryRow(ctx, `select count(*) from notification_receipts where notification_id=$1 and user_id=$2`, foreignInternalID, userA).Scan(&foreignReceipts); err != nil || foreignReceipts != 0 {
 		t.Fatalf("foreign notification receipt count=%d err=%v", foreignReceipts, err)
+	}
+
+	// A delayed retry can arrive after the user's notification has been removed.
+	// Marking it read should have the same receipt as marking an already read item.
+	removedID, removedPublicID := insertNotification(userA, "review", "removed", base)
+	if _, err = pool.Exec(ctx, `delete from notifications where id=$1`, removedID); err != nil {
+		t.Fatal(err)
+	}
+	removedMark := invokeTEST021NotificationMutation(ctx, server, userA, removedPublicID, false)
+	if removedMark.Code != markOne.Code || removedMark.Body.String() != markOne.Body.String() {
+		t.Fatalf("idempotent mark on removed item = %d %s, want %d %s",
+			removedMark.Code, removedMark.Body.String(), markOne.Code, markOne.Body.String())
 	}
 
 	markAll := invokeTEST021NotificationMutation(ctx, server, userA, "", true)

@@ -38,7 +38,7 @@ func TestNotificationPagesAndReadWatermarkStayBoundedAtOneMillionRowsIntegration
 	if _, err = pool.Exec(ctx, `
 		create temporary table users(id bigint primary key,public_id text not null,username text not null,status text not null default 'active');
 		create temporary table notifications(
-			id bigint primary key,public_id text not null,recipient_id bigint,kind text not null,title text not null,body text not null,
+			id bigint primary key,public_id text not null unique,recipient_id bigint,kind text not null,title text not null,body text not null,
 			source_locale text not null,data jsonb not null,created_at timestamptz not null,updated_at timestamptz not null,
             revision_xid xid8 not null default pg_current_xact_id()
 		);
@@ -240,7 +240,7 @@ func TestNotificationPagesAndReadWatermarkStayBoundedAtOneMillionRowsIntegration
 	`); err != nil {
 		t.Fatal(err)
 	}
-	readTag, err := pool.Exec(ctx, markNotificationReadSQL, int64(4), int64(3))
+	readTag, err := pool.Exec(ctx, markNotificationReadSQL, "n00000004", int64(3))
 	if err != nil || readTag.RowsAffected() != 1 {
 		t.Fatalf("read one broadcast affected=%d err=%v", readTag.RowsAffected(), err)
 	}
@@ -251,7 +251,7 @@ func TestNotificationPagesAndReadWatermarkStayBoundedAtOneMillionRowsIntegration
 	if err = pool.QueryRow(ctx, markAllNotificationsReadSQL, int64(3)).Scan(&secondReadBefore); err != nil {
 		t.Fatal(err)
 	}
-	readTag, err = pool.Exec(ctx, markNotificationReadSQL, int64(8), int64(3))
+	readTag, err = pool.Exec(ctx, markNotificationReadSQL, "n00000008", int64(3))
 	if err != nil || readTag.RowsAffected() != 0 {
 		t.Fatalf("watermark-read item changed the derivative affected=%d err=%v", readTag.RowsAffected(), err)
 	}
