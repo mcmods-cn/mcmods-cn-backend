@@ -349,6 +349,22 @@ func TestInitializeRejectsUnknownAndDriftedSchemasIntegration(t *testing.T) {
 	if err := Initialize(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
+	// pg_dump reconstructs triggers from pg_get_triggerdef. A logical restore
+	// must reproduce the installed catalog without changing the drift guard.
+	var triggerDDL string
+	if err := pool.QueryRow(ctx, `select pg_get_triggerdef(oid) from pg_trigger
+		where tgrelid='catalog_import_revisions'::regclass and tgname='trg_catalog_import_revisions_metrics'`).Scan(&triggerDDL); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, "drop trigger trg_catalog_import_revisions_metrics on catalog_import_revisions"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, triggerDDL); err != nil {
+		t.Fatal(err)
+	}
+	if err := Initialize(ctx, pool); err != nil {
+		t.Fatalf("restored import metrics trigger differs from its installed baseline: %v", err)
+	}
 	if _, err := pool.Exec(ctx, `drop index `+CatalogTagPrefixIndexName); err != nil {
 		t.Fatal(err)
 	}

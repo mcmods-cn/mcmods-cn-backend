@@ -172,7 +172,8 @@ func contentMetricsSchemaStatements() []string {
 		$$ language plpgsql`,
 		`create trigger trg_catalog_import_revisions_metrics after update of status,is_active,activated_at
 			on catalog_import_revisions for each row when (
-				(old.status,old.is_active,old.activated_at) is distinct from (new.status,new.is_active,new.activated_at))
+				old.status is distinct from new.status or old.is_active is distinct from new.is_active
+				or old.activated_at is distinct from new.activated_at)
 			execute function enqueue_metrics_from_import_resolution()`,
 		`create index idx_content_unique_views_route_recent_user
 			on content_unique_views(object_route_id,last_seen_at desc,viewer_user_id)
