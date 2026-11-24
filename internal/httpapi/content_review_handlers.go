@@ -74,7 +74,7 @@ func (s *Server) reviewContentRevision(w http.ResponseWriter, r *http.Request) {
 	var claims security.Claims
 	authorizeAfterLock := func() bool {
 		var active bool
-		claims, active = requireCurrentReviewActor(w, r, tx)
+		claims, active = requireCurrentWriteActor(w, r, tx)
 		if !active {
 			return false
 		}

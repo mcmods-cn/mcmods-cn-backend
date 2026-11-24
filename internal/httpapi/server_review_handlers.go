@@ -249,7 +249,7 @@ func (s *Server) reviewMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存服务器审核结果失败")
 		return
 	}
-	claims, active := requireCurrentReviewActor(w, r, tx)
+	claims, active := requireCurrentWriteActor(w, r, tx)
 	if !active {
 		return
 	}

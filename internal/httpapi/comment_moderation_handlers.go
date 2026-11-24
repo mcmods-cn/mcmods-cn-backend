@@ -151,7 +151,7 @@ func (s *Server) reviewPendingComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "failed to load comment review")
 		return
 	}
-	claims, active := requireCurrentReviewActor(w, r, tx)
+	claims, active := requireCurrentWriteActor(w, r, tx)
 	if !active {
 		return
 	}

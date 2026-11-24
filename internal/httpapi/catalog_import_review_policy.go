@@ -10,8 +10,8 @@ import (
 )
 
 func catalogReviewerAllowedTx(ctx context.Context, tx pgx.Tx, claims security.Claims, projectID string, submittedBy int64) (bool, error) {
-	claims, err := resolveCurrentReviewActorTx(ctx, tx, claims)
-	if errors.Is(err, errReviewAccountBanned) {
+	claims, err := resolveCurrentWriteActorTx(ctx, tx, claims)
+	if errors.Is(err, errWriteAccountBanned) {
 		return false, nil
 	}
 	if err != nil {

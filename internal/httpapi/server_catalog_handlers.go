@@ -17,6 +17,7 @@ import (
 
 	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/database"
+	"mcmods-cn-backend/internal/security"
 	"mcmods-cn-backend/internal/serverprobe"
 )
 
@@ -186,12 +187,11 @@ func writeServerSettingsUnavailable(w http.ResponseWriter) {
 	writeAPIError(w, http.StatusServiceUnavailable, "SERVER_SETTINGS_UNAVAILABLE", "服务器设置暂时无法读取", 0, nil)
 }
 
-func (s *Server) serverCreationReviewRequired(r *http.Request) bool {
+func serverCreationReviewRequired(r *http.Request, db reviewConfigQueryRower, claims security.Claims) bool {
 	if antiAbuseModerationRequired(r) {
 		return true
 	}
-	claims := currentClaims(r)
-	return loadReviewConfig(r.Context(), s.db).ServerCreate &&
+	return loadReviewConfig(r.Context(), db).ServerCreate &&
 		!claimsAllow(claims, "server.create.no-review") &&
 		!claimsAllow(claims, "admin.*")
 }
@@ -204,7 +204,7 @@ func (s *Server) publicServerSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, serverSubmissionSettings{
 		serverCatalogSettings: settings,
-		ReviewRequired:        s.serverCreationReviewRequired(r),
+		ReviewRequired:        serverCreationReviewRequired(r, s.db, currentClaims(r)),
 	})
 }
 
@@ -295,7 +295,7 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims := currentClaims(r)
-	reviewRequired := s.serverCreationReviewRequired(r)
+	reviewRequired := serverCreationReviewRequired(r, s.db, claims)
 	if err := normalizeAndValidateServerRequest(&request, settings, reviewRequired); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -318,6 +318,18 @@ func (s *Server) createMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	claims, active := requireCurrentWriteActor(w, r, tx)
+	if !active {
+		return
+	}
+	if !claimsAllow(claims, "server.create") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	if reviewRequired != serverCreationReviewRequired(r, tx, claims) {
+		writeAPIError(w, http.StatusConflict, "SERVER_REVIEW_REQUIREMENT_CHANGED", "服务器审核要求已更改，请核对证明材料后重新提交", 0, nil)
+		return
+	}
 	proofFiles := make([]reviewAttachmentFile, 0)
 	if reviewRequired {
 		proofFiles, err = resolveServerProofFiles(r.Context(), tx, claims.Subject, request.ProofFileIDs, settings)
@@ -443,7 +455,10 @@ func (s *Server) updateMinecraftServer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "读取服务器失败")
 		return
 	}
-	claims := currentClaims(r)
+	claims, active := requireCurrentWriteActor(w, r, tx)
+	if !active {
+		return
+	}
 	if !claimsAllow(claims, "project.edit."+publicID) &&
 		!claimsAllow(claims, "server.review") &&
 		!claimsAllow(claims, "admin.*") {

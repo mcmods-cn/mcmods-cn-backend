@@ -46,7 +46,7 @@ flowchart LR
   C -->|父评论可见范围| L
 ```
 
-- 普通项目修订共用 `createContentRevisionTx`。同一项目行锁确认类型、公开 ID 和基线。项目、社区内容和服务器的审核入口在锁住提交后调用 `requireCurrentReviewActor`，重新核对当前会话以及当前目标的适用权限。治理隐藏由 `checkProjectRevisionModerationTx` 约束普通批准、驳回及自动发布。资料目录由 `publishCatalogRevisionsTx` 统一应用审核和投影。[审核权限入口](../internal/httpapi/review_permissions.go)
+- 普通项目修订共用 `createContentRevisionTx`。同一项目行锁确认类型、公开 ID 和基线。项目、社区内容和服务器的审核入口在锁住提交后调用 `requireCurrentWriteActor`，重新核对当前会话以及当前目标的适用权限。治理隐藏由 `checkProjectRevisionModerationTx` 约束普通批准、驳回及自动发布。资料目录由 `publishCatalogRevisionsTx` 统一应用审核和投影。[审核权限入口](../internal/httpapi/review_permissions.go)
 - 评论衍生日志以 `comment_scope_id` 绑定父评论，准备工作在租约内读取自有文件。发布、绑定、附件就绪与租约终态在同一事务中完成。metadata、chunk、下载都检查当前父评论和目标范围。
 
 - 多数站内对象用 bigint 关联，用全局注册的随机 `public_id` 对外访问。项目路由可有 slug，技术字段另有 Minecraft 的 `namespace:path`、供应商 ID、包哈希、导入 UUID 和事件 ID。前端不得用导入源 ID 推导站内身份。[双 ID 架构](dual-id-architecture.md)

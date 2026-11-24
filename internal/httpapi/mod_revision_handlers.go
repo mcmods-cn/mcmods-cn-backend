@@ -356,7 +356,7 @@ func (s *Server) reviewModRevision(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "revision has already been reviewed")
 		return
 	}
-	claims, authorized := requireCurrentReviewActor(w, r, tx)
+	claims, authorized := requireCurrentWriteActor(w, r, tx)
 	if !authorized {
 		return
 	}
