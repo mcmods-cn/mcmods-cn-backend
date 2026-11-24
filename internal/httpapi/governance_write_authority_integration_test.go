@@ -134,3 +134,48 @@ func governanceReviewTestActor(t *testing.T, ctx context.Context, db *pgxpool.Po
 	claims.PermissionRules = access[id].Permissions
 	return claims
 }
+
+func TestBanCreationWaitsForAnOngoingReleaseBeforeLockingAccountsIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	actorID, subjectID := f.userIDs[f.reviewer], f.userIDs[f.editor]
+	grantTEST044Permissions(t, f.ctx, f.db, actorID, "ban.create")
+	var subject string
+	if err := f.db.QueryRow(f.ctx, `select public_id from users where id=$1`, subjectID).Scan(&subject); err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]string{"userId": subject, "reasonCode": "harassment"}
+	f.require(t, f.reviewer, http.MethodPost, "/api/v1/admin/bans", body, http.StatusCreated)
+	release, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release.Rollback(f.ctx)
+	var oldKey string
+	if err = release.QueryRow(f.ctx, `update ban_records set status='revoked',revoked_at=now(),revoked_by=$2,revoke_reason='reviewed'
+		where user_id=$1 and status='active' returning id::text`, subjectID, actorID).Scan(&oldKey); err != nil {
+		t.Fatal(err)
+	}
+	next := auditCompletionAsyncJSON(f, f.reviewer, http.MethodPost, "/api/v1/admin/bans", body)
+	auditCompletionAwaitLocks(t, f, 1)
+	if _, err = release.Exec(f.ctx, `select id from users where id=$1 for no key update nowait`, subjectID); err != nil {
+		t.Fatalf("creation acquired the account needed to finish the ongoing release: %v", err)
+	}
+	if _, err = release.Exec(f.ctx, `delete from user_role_bindings where user_id=$1 and source='governance_ban' and source_key=$2`, subjectID, oldKey); err != nil {
+		t.Fatal(err)
+	}
+	if err = release.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	got := <-next
+	if got.err != nil || got.status != http.StatusCreated {
+		t.Fatalf("second ban returned HTTP %d %s, %v", got.status, got.raw, got.err)
+	}
+	var active, revoked, bindings int
+	err = f.db.QueryRow(f.ctx, `select count(*) filter(where ban.status='active'),count(*) filter(where ban.status='revoked'),
+		(select count(*) from user_role_bindings grant_row join ban_records current_ban on current_ban.id::text=grant_row.source_key
+		where grant_row.source='governance_ban' and grant_row.user_id=$1 and current_ban.status='active')
+		from ban_records ban where ban.user_id=$1`, subjectID).Scan(&active, &revoked, &bindings)
+	if err != nil || active != 1 || revoked != 1 || bindings != 1 {
+		t.Fatalf("active=%d revoked=%d active bindings=%d: %v", active, revoked, bindings, err)
+	}
+}
