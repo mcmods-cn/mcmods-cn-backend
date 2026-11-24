@@ -2,8 +2,13 @@ package httpapi
 
 import (
 	"bytes"
+	"encoding/json"
+	"maps"
 	"net/http"
+	"slices"
 	"testing"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 func TestKnownSettingFieldsDistinguishNullFromAbsent(t *testing.T) {
@@ -175,4 +180,41 @@ func TestServerSettingsDistinguishUnconfiguredFromUnreadableIntegration(t *testi
 	if got != want {
 		t.Fatalf("recovered settings = %+v, want %+v", got, want)
 	}
+}
+
+func TestAdminAggregateIncludesOnlyAuthorizedServiceConfigurationIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	const path = "/api/v1/admin/config"
+	actor := f.userIDs[f.editor]
+	grantTEST044Permissions(t, f.ctx, f.db, actor, "admin.config.read")
+	check := func(wantAI, wantOSS bool) {
+		t.Helper()
+		data := decodeTEST022Data[map[string]json.RawMessage](t, f.require(t, f.editor, http.MethodGet, path, nil, http.StatusOK))
+		_, ai := data["ai"]
+		_, oss := data["oss"]
+		if ai != wantAI || oss != wantOSS {
+			t.Fatalf("configuration fields: ai=%v, oss=%v, want %v/%v", ai, oss, wantAI, wantOSS)
+		}
+		var auth struct {
+			RequireEmailVerification bool
+			PasswordMinLength        int
+			ReservedUsernames        []string
+		}
+		if err := json.Unmarshal(data["auth"], &auth); err != nil || !auth.RequireEmailVerification || auth.PasswordMinLength != security.MinPasswordBytes || !slices.Equal(auth.ReservedUsernames, slices.Sorted(maps.Keys(reservedUsernames))) {
+			t.Fatal("reported registration policy differs from registration validation", err)
+		}
+	}
+	check(false, false)
+	if _, err := f.db.Exec(f.ctx, "insert into system_settings(key,value) values('ai.config','null') on conflict(key) do update set value=excluded.value"); err != nil {
+		t.Fatal(err)
+	}
+	check(false, false)
+	grantTEST044Permissions(t, f.ctx, f.db, actor, "oss.read")
+	check(false, true)
+	grantTEST044Permissions(t, f.ctx, f.db, actor, "ai.read")
+	f.require(t, f.editor, http.MethodGet, path, nil, http.StatusServiceUnavailable)
+	if _, err := f.db.Exec(f.ctx, "delete from system_settings where key='ai.config'"); err != nil {
+		t.Fatal(err)
+	}
+	check(true, true)
 }

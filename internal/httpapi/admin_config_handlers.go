@@ -3,11 +3,14 @@ package httpapi
 import (
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/mailer"
+	"mcmods-cn-backend/internal/security"
 )
 
 type mailConfigPayload struct {
@@ -48,9 +51,9 @@ func (s *Server) adminAuthMethods() map[string]any {
 		"usernamePasswordLogin":    true,
 		"userIDPasswordLogin":      true,
 		"emailCodeLogin":           true,
-		"requireEmailVerification": false,
-		"passwordMinLength":        8,
-		"reservedUsernames":        []string{"admin", "root", "system", "api", "login", "register", "mods", "mod", "users", "settings"},
+		"requireEmailVerification": true,
+		"passwordMinLength":        security.MinPasswordBytes,
+		"reservedUsernames":        slices.Sorted(maps.Keys(reservedUsernames)),
 		"tokenTTLHours":            int(s.cfg.JWTTTL.Hours()),
 	}
 }
@@ -89,11 +92,6 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "OAUTH_SETTINGS_UNAVAILABLE", "third-party login settings are temporarily unavailable", 0, nil)
 		return
 	}
-	aiCfg, err := readAIConfigSetting(r.Context(), s.db, s.cfg.SettingsEncryptionKey)
-	if err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "AI_SETTINGS_UNAVAILABLE", "AI settings are temporarily unavailable", 0, nil)
-		return
-	}
 	markdown := defaultMarkdownConfig()
 	if err = s.readEditableSetting(r.Context(), markdownConfigSettingKey, &markdown); err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "MARKDOWN_SETTINGS_UNAVAILABLE", "Markdown settings are temporarily unavailable", 0, nil)
@@ -104,26 +102,19 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "PROFILE_SETTINGS_UNAVAILABLE", "profile settings are temporarily unavailable", 0, nil)
 		return
 	}
-	oss, err := s.ossConfigFromSettingsStrictWithQueryer(r.Context(), s.db)
-	if err != nil {
-		writeAPIError(w, http.StatusServiceUnavailable, "OSS_SETTINGS_UNAVAILABLE", "OSS settings are temporarily unavailable", 0, nil)
-		return
-	}
 	yggdrasil, err := s.readYggdrasilRuntime(r.Context(), s.db)
 	if err != nil {
 		writeYggdrasilSettingsUnavailable(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	result := map[string]any{
 		"general":   general,
 		"auth":      s.adminAuthMethods(),
 		"oauth":     redactOAuthConfig(oauthCfg),
 		"mail":      redactMailConfig(mailCfg),
-		"oss":       redactOSSConfig(oss),
 		"markdown":  normalizeMarkdownConfig(markdown),
 		"profile":   normalizeProfileConfig(profile),
 		"yggdrasil": yggdrasil.redacted(),
-		"ai":        aiCfg.view(),
 		"permissions": map[string]any{
 			"mode":              "RBAC + user override",
 			"temporaryGrant":    true,
@@ -139,7 +130,25 @@ func (s *Server) adminConfig(w http.ResponseWriter, r *http.Request) {
 			"sslMode": s.cfg.DB.SSLMode,
 		},
 		"features": s.adminFeatures(),
-	})
+	}
+	claims := currentClaims(r)
+	if claimsAllow(claims, "ai.read") {
+		ai, err := readAIConfigSetting(r.Context(), s.db, s.cfg.SettingsEncryptionKey)
+		if err != nil {
+			writeAIConfigUnavailable(w)
+			return
+		}
+		result["ai"] = ai.view()
+	}
+	if claimsAllow(claims, "oss.read") {
+		oss, err := s.ossConfigFromSettingsStrictWithQueryer(r.Context(), s.db)
+		if err != nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "OSS_SETTINGS_UNAVAILABLE", "OSS settings are temporarily unavailable", 0, nil)
+			return
+		}
+		result["oss"] = redactOSSConfig(oss)
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) updateMailConfig(w http.ResponseWriter, r *http.Request) {
