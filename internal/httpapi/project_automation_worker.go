@@ -37,7 +37,7 @@ const (
 
 var errRedistributionNotAllowed = errors.New("license is not approved for redistribution")
 
-var errChangelogParentUnavailable = errors.New("changelog target is not approved")
+var errProjectAutomationParentUnavailable = errors.New("automation target is not approved")
 
 var errProjectMirrorScanRejected = errors.New("automated project mirror failed security scan")
 
@@ -280,6 +280,12 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 			return nil, providerFailureCode(loadErr), loadErr
 		}
 		result, updateErr := worker.mergeCompatibility(ctx, job, files)
+		if errors.Is(updateErr, errProjectAutomationParentUnavailable) {
+			return result, "update_conflict", updateErr
+		}
+		if errors.Is(updateErr, errAutomationPermissionDenied) {
+			return result, "automation_permission_denied", updateErr
+		}
 		result, maintenanceErr := worker.withMaintenanceResult(ctx, job, result, latestProviderFileActivity(files))
 		if updateErr == nil && maintenanceErr != nil {
 			return result, "maintenance_status_update_failed", maintenanceErr
@@ -291,7 +297,7 @@ func (worker *ProjectAutomationWorker) execute(ctx context.Context, job projectA
 			return nil, providerFailureCode(loadErr), loadErr
 		}
 		result, updateErr := worker.syncChangelogs(ctx, job, releases)
-		if errors.Is(updateErr, errChangelogParentUnavailable) {
+		if errors.Is(updateErr, errProjectAutomationParentUnavailable) {
 			return result, "update_conflict", updateErr
 		}
 		if errors.Is(updateErr, errAutomationPermissionDenied) {
@@ -426,26 +432,50 @@ func (worker *ProjectAutomationWorker) mergeCompatibility(ctx context.Context, j
 	if err = lockProjectAutomationRunTx(ctx, tx, job); err != nil {
 		return nil, err
 	}
-	added := int64(0)
+	aggregate := simpleProjectAggregate
 	if job.ProjectType == "mod" {
-		for _, pair := range pairs {
-			command, execErr := tx.Exec(ctx, `insert into mod_loader_compatibilities(mod_id,loader,minecraft_version)
-				values($1,$2,$3) on conflict do nothing`, job.InternalID, pair[0], pair[1])
-			if execErr != nil {
-				return nil, execErr
+		aggregate = "mod"
+	}
+	target, err := lockProjectRevisionTargetTx(ctx, tx, aggregate, job.InternalID)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && (target.reviewStatus != "approved" || target.publicID != job.ProjectPublicID || target.projectType != job.ProjectType) {
+		return nil, errProjectAutomationParentUnavailable
+	}
+	if err != nil {
+		return nil, err
+	}
+	if _, err = authorizeAutomationProject(ctx, tx, job.ActorID, job.ProjectPublicID, false, true); err != nil {
+		return nil, err
+	}
+	var added int64
+	if job.ProjectType == "mod" {
+		if len(pairs) > 0 {
+			pairLoaders := make([]string, 0, len(pairs))
+			pairVersions := make([]string, 0, len(pairs))
+			for _, pair := range pairs {
+				pairLoaders = append(pairLoaders, pair[0])
+				pairVersions = append(pairVersions, pair[1])
 			}
-			added += command.RowsAffected()
+			tag, err := tx.Exec(ctx, `insert into mod_loader_compatibilities(mod_id,loader,minecraft_version)
+                select $1,item.loader,item.version from unnest($2::text[],$3::text[]) item(loader,version)
+                order by item.loader,item.version on conflict do nothing`, job.InternalID, pairLoaders, pairVersions)
+			if err != nil {
+				return nil, err
+			}
+			added = tag.RowsAffected()
 		}
 	} else {
-		versionList, loaderList := mapKeys(recognizedVersions), mapKeys(recognizedLoaders)
-		command, execErr := tx.Exec(ctx, `update simple_projects set
-			minecraft_versions=(select coalesce(array_agg(distinct value order by value),'{}'::text[]) from unnest(minecraft_versions||$3::text[]) value),
-			loaders=(select coalesce(array_agg(distinct value order by value),'{}'::text[]) from unnest(loaders||$4::text[]) value),updated_at=now()
-			where id=$1 and project_type=$2`, job.InternalID, job.ProjectType, versionList, loaderList)
-		if execErr != nil {
-			return nil, execErr
+		err = tx.QueryRow(ctx, `with additions as (
+            select array(select v from unnest($3::text[]) v where v<>all(p.minecraft_versions) order by v) versions,
+                array(select l from unnest($4::text[]) l where l<>all(p.loaders) order by l) loaders
+            from simple_projects p where p.id=$1 and p.project_type=$2
+        ), updated as (
+            update simple_projects p set minecraft_versions=p.minecraft_versions||a.versions,loaders=p.loaders||a.loaders,updated_at=now()
+            from additions a where p.id=$1 and p.project_type=$2 and (cardinality(a.versions)>0 or cardinality(a.loaders)>0)
+            returning cardinality(a.versions)+cardinality(a.loaders) as added
+        ) select coalesce(max(added),0) from updated`, job.InternalID, job.ProjectType, mapKeys(recognizedVersions), mapKeys(recognizedLoaders)).Scan(&added)
+		if err != nil {
+			return nil, err
 		}
-		added = command.RowsAffected()
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return nil, err
@@ -654,7 +684,7 @@ func (worker *ProjectAutomationWorker) syncChangelogs(ctx context.Context, job p
 		_, status, err := changelogProjectState(ctx, tx, target, true)
 		if errors.Is(err, pgx.ErrNoRows) || (err == nil && status != "approved") {
 			_ = tx.Rollback(ctx)
-			return nil, errChangelogParentUnavailable
+			return nil, errProjectAutomationParentUnavailable
 		}
 		if err != nil {
 			_ = tx.Rollback(ctx)

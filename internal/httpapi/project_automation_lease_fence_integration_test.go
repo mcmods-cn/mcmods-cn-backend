@@ -32,6 +32,7 @@ func TestOCT02ProjectAutomationLateAttemptCannotMutateCurrentRunIntegration(t *t
 		t.Fatal(err)
 	}
 	job := projectAutomationJob{RunID: run, SettingID: setting, RouteID: route, InternalID: mod, ProjectType: "mod", ProjectPublicID: "autolease", Kind: "minecraft_versions", SourceType: "modrinth", ExternalID: "synthetic", Interval: "week"}
+	job.ActorID = configureSeededAutomationFixture(t, ctx, pool, "project.edit", "project.no-review")
 	// JSON accommodates the old job shape when this regression runs on the
 	// fixed baseline; the new claim token is intentionally stale.
 	if err := json.Unmarshal([]byte(`{"LeaseOwner":"old-attempt"}`), &job); err != nil {
