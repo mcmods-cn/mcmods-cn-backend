@@ -2,7 +2,6 @@ package httpapi
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -320,13 +319,4 @@ func (s *Server) updateNotificationSettings(w http.ResponseWriter, r *http.Reque
 	}
 	getNotificationSettings := r.Clone(r.Context())
 	s.getNotificationSettings(w, getNotificationSettings)
-}
-
-func (s *Server) pathUserIdentity(w http.ResponseWriter, r *http.Request) (publicIdentity, bool) {
-	identity, err := s.resolvePublicIdentity(r.Context(), strings.TrimSpace(r.PathValue("id")), "user")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
-		return publicIdentity{}, false
-	}
-	return identity, true
 }

@@ -18,9 +18,8 @@ type adminBalanceAdjustmentRequest struct {
 }
 
 func (s *Server) adminUserBalances(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user")
+	identity, ok := s.pathUserIdentity(w, r)
+	if !ok {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `select currency.public_id,currency.code,currency.name,currency.icon,
@@ -54,9 +53,8 @@ func (s *Server) adminUserBalances(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) adjustAdminUserBalance(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid user")
+	identity, ok := s.pathUserIdentity(w, r)
+	if !ok {
 		return
 	}
 	var request adminBalanceAdjustmentRequest

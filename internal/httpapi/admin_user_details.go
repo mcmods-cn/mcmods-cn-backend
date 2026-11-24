@@ -34,9 +34,8 @@ type adminUserLoginDetails struct {
 }
 
 func (s *Server) adminUserDetails(w http.ResponseWriter, r *http.Request) {
-	identity, err := s.resolvePublicIdentity(r.Context(), r.PathValue("id"), "user")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
+	identity, ok := s.pathUserIdentity(w, r)
+	if !ok {
 		return
 	}
 

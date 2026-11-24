@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -11,28 +13,30 @@ import (
 type publicIdentity struct {
 	InternalID int64
 	PublicID   string
-	EntityType string
 }
 
 type revisionQuery interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func (s *Server) resolvePublicIdentity(ctx context.Context, publicID string, allowedTypes ...string) (publicIdentity, error) {
-	var identity publicIdentity
-	publicID = strings.ToLower(strings.TrimSpace(publicID))
-	if publicID == "" {
-		return identity, pgx.ErrNoRows
+func (s *Server) pathUserIdentity(w http.ResponseWriter, r *http.Request) (publicIdentity, bool) {
+	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("id")))
+	if !validCatalogPublicID(publicID) {
+		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
+		return publicIdentity{}, false
 	}
-	err := s.db.QueryRow(
-		ctx,
-		`select internal_id,public_id,entity_type
-		 from public_routes
-		 where public_id=$1 and (cardinality($2::text[])=0 or entity_type=any($2::text[]))`,
-		publicID,
-		allowedTypes,
-	).Scan(&identity.InternalID, &identity.PublicID, &identity.EntityType)
-	return identity, err
+	var identity publicIdentity
+	err := s.db.QueryRow(r.Context(), `select internal_id, public_id from public_routes
+		where entity_type='user' and public_id=$1`, publicID).Scan(&identity.InternalID, &identity.PublicID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, http.StatusBadRequest, "用户 ID 不正确")
+		return publicIdentity{}, false
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "暂时无法读取用户，请稍后重试")
+		return publicIdentity{}, false
+	}
+	return identity, true
 }
 
 func (s *Server) publicIDForInternal(ctx context.Context, entityType string, internalID int64) (string, error) {
@@ -64,7 +68,7 @@ func resolveRevisionPublicID(ctx context.Context, query revisionQuery, publicID 
 	return &internalID, nil
 }
 
-func revisionPublicIDForInternal(ctx context.Context, query revisionQuery, internalID *int64) (*string, error) {
+func revisionPublicIDValue(ctx context.Context, query revisionQuery, internalID *int64) (*string, error) {
 	if internalID == nil {
 		return nil, nil
 	}
@@ -73,10 +77,6 @@ func revisionPublicIDForInternal(ctx context.Context, query revisionQuery, inter
 		return nil, err
 	}
 	return &publicID, nil
-}
-
-func revisionPublicIDValue(ctx context.Context, query revisionQuery, internalID *int64) (*string, error) {
-	return revisionPublicIDForInternal(ctx, query, internalID)
 }
 
 func ossFilePublicIDForInternal(ctx context.Context, query revisionQuery, internalID *int64) (*string, error) {
