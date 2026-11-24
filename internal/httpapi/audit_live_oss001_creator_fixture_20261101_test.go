@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"mcmods-cn-backend/internal/security"
 )
 
@@ -233,16 +237,12 @@ func TestAuditLiveOSS001CreatorAvatar20261101Fixture(t *testing.T) {
 			if _, err = os.Stat(stopPath); err == nil {
 				drafts := []map[string]any{}
 				for _, profile := range profiles {
-					var stored string
-					var fileID *string
-					err = f.db.QueryRow(f.ctx, `select payload->>'avatarUrl',payload->>'avatarFileId' from user_drafts where user_id=$1 and draft_key=$2`, f.userIDs[f.editor], "creator:"+profile["publicId"].(string)).Scan(&stored, &fileID)
+					observation, err := auditOSS001CurrentDraft(f.ctx, f.db, f.userIDs[f.editor], "creator:"+profile["publicId"].(string))
 					if err != nil {
-						drafts = append(drafts, map[string]any{"kind": profile["kind"], "draftFound": false})
-						continue
+						t.Fatal("could not observe the current creator draft:", err)
 					}
-					parsed, _ := url.Parse(stored)
-					signed := parsed != nil && (parsed.Query().Has("x-oss-signature") || parsed.Query().Has("Signature") || parsed.Query().Has("signature"))
-					drafts = append(drafts, map[string]any{"kind": profile["kind"], "draftFound": true, "avatarFileId": fileID, "avatarUrlNonempty": stored != "", "temporarySignaturePersisted": signed, "avatarUrlSHA256": fmt.Sprintf("%x", sha256.Sum256([]byte(stored)))})
+					observation["kind"] = profile["kind"]
+					drafts = append(drafts, observation)
 				}
 				runtime["draftObservations"] = drafts
 				runtime["finalOwnedDatabaseFacts"] = auditOSS001NativeFinalFacts(t, f)
@@ -254,5 +254,41 @@ func TestAuditLiveOSS001CreatorAvatar20261101Fixture(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
+	}
+}
+
+func auditOSS001CurrentDraft(ctx context.Context, db *pgxpool.Pool, owner int64, key string) (map[string]any, error) {
+	var stored string
+	var fileID *string
+	err := db.QueryRow(ctx, `select coalesce(payload->>'avatarUrl',''),payload->>'avatarFileId'
+		from user_drafts where user_id=$1 and draft_key=$2 and submitted_at is null`, owner, key).Scan(&stored, &fileID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return map[string]any{"draftFound": false}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"draftFound": true, "avatarFileId": fileID, "avatarUrlNonempty": stored != "",
+		"temporarySignaturePersisted": temporaryCreatorAvatarReference(stored),
+		"avatarUrlSHA256":             fmt.Sprintf("%x", sha256.Sum256([]byte(stored))),
+	}, nil
+}
+
+func TestAuditOSS001CurrentDraftReceiptDistinguishesAbsenceFromReadFailure(t *testing.T) {
+	f := newAuditFixGRFixture(t, 90*time.Second)
+	key := "creator:" + f.modCode
+	owner := f.userIDs[f.editor]
+	if got, err := auditOSS001CurrentDraft(f.ctx, f.db, owner, key); err != nil || got["draftFound"] != false {
+		t.Fatalf("missing draft observation: %v, %v", got, err)
+	}
+	auditOSS001DraftToolSave(t, f, f.editor, key, "author", map[string]any{"name": "Private draft without an avatar"})
+	if got, err := auditOSS001CurrentDraft(f.ctx, f.db, owner, key); err != nil || got["draftFound"] != true || got["avatarUrlNonempty"] != false {
+		t.Fatalf("draft with optional avatar omitted: %v, %v", got, err)
+	}
+	cancelled, cancel := context.WithCancel(f.ctx)
+	cancel()
+	if got, err := auditOSS001CurrentDraft(cancelled, f.db, owner, key); err == nil || got != nil {
+		t.Fatalf("cancelled query returned a usable observation: %v, %v", got, err)
 	}
 }

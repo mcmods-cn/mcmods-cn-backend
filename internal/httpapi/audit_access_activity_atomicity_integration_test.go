@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
 	"reflect"
 	"strings"
@@ -96,15 +95,11 @@ func TestAuditCMP003ShopActivityRollsBackMoneyAndConsumptionFullHTTPIntegration(
 	}
 	// The durable intent is a real persisted row; its consumer/reward recovery is
 	// covered separately. This test does not label an outbox row as a worker ACK.
-	var raw []byte
-	if err := f.db.QueryRow(f.ctx, `select to_jsonb(event)::text from activity_event_outbox event where user_id=$1 and action_id=$2`, f.userIDs[f.editor], activity.ActionUse).Scan(&raw); err != nil {
-		t.Fatal(err)
-	}
-	var event map[string]any
-	if err := json.Unmarshal(raw, &event); err != nil {
-		t.Fatal(err)
-	}
-	if event["object_public_id"] == "" {
-		t.Fatal("shop activity lost object identity")
+	var matches int
+	if err := f.db.QueryRow(f.ctx, `select count(*) from activity_event_outbox event
+		join shop_items item on item.public_id=event.object_public_id
+		where event.user_id=$1 and event.action_id=$2 and event.object_type_id=$3 and item.code='project_heat_boost'`,
+		f.userIDs[f.editor], activity.ActionUse, activity.ObjectShopItem).Scan(&matches); err != nil || matches != 1 {
+		t.Fatalf("activity did not reference the consumed shop item: matches=%d err=%v", matches, err)
 	}
 }
