@@ -16,7 +16,6 @@ import (
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/querycache"
-	"mcmods-cn-backend/internal/security"
 )
 
 func TestApprovedModpackCreationAppliesAssociationsExactlyOnceIntegration(t *testing.T) {
@@ -46,11 +45,7 @@ func TestApprovedModpackCreationAppliesAssociationsExactlyOnceIntegration(t *tes
 		}
 	}()
 
-	var actorID int64
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-		values('perf020_actor','perf020@example.invalid','test-only',true) returning id`).Scan(&actorID); err != nil {
-		t.Fatal(err)
-	}
+	claims := newCurrentWriteTestActor(t, ctx, pool, "perf020", "modpack.create", "content.no-review")
 	if _, err = pool.Exec(ctx, `insert into mods(project_code,slug,primary_name,review_status)
 		select 'p'||lpad(value::text,8,'0'),'perf020-mod-'||value,'PERF020 Mod '||value,'approved'
 		from generate_series(1,16) value`); err != nil {
@@ -77,10 +72,6 @@ func TestApprovedModpackCreationAppliesAssociationsExactlyOnceIntegration(t *tes
 		t.Fatal(err)
 	}
 
-	claims := security.Claims{Subject: actorID, PermissionRules: []security.PermissionRule{
-		{Code: "modpack.create", Allow: true},
-		{Code: "content.no-review", Allow: true},
-	}}
 	server := &Server{cfg: loaded, db: pool, cache: querycache.New(config.RedisConfig{})}
 	approved := invokeProjectHandler[modpackResponse](t, ctx, claims, http.MethodPost, "/api/v1/modpacks",
 		perf020ModpackSnapshot("perf020-approved", 16), http.StatusCreated, server.createModpack)

@@ -45,7 +45,7 @@ func TestCommunityPostExplicitSourceLocalePersistsThroughCreateAndEditIntegratio
 	}()
 
 	server := &Server{db: pool}
-	claims := newCommunityEditTestActor(t, ctx, pool, "bug091")
+	claims := newCurrentWriteTestActor(t, ctx, pool, "bug091", "community.tutorial.create", "community.no-review")
 
 	ambiguous := invokeBUG091CommunityPostMutation(t, ctx, server, claims, http.MethodPost, "", "", "", "printf setup")
 	if ambiguous.Code != http.StatusBadRequest {

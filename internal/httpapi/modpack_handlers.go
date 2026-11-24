@@ -384,14 +384,6 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid modpack")
 		return
 	}
-	reviewRequired := loadReviewConfig(r.Context(), s.db).ModpackCreate && !claimsAllow(claims, "content.no-review") && !claimsAllow(claims, "admin.*")
-	if antiAbuseModerationRequired(r) {
-		reviewRequired = true
-	}
-	reviewStatus := "approved"
-	if reviewRequired {
-		reviewStatus = "pending"
-	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	publicID, err := availableModUniqueID(r.Context(), s.db)
 	if err != nil {
@@ -426,6 +418,10 @@ func (s *Server) createModpack(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeError(w, http.StatusServiceUnavailable, "project icon validation is unavailable")
 		}
+		return
+	}
+	claims, reviewStatus, allowed := currentProjectCreation(w, r, tx, "modpack")
+	if !allowed {
 		return
 	}
 	var modpackID int64

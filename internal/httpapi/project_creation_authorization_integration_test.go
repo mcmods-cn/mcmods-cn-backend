@@ -48,23 +48,14 @@ func TestProjectCreationAndImportEntrypointsDoNotGrantAuthorizationIntegration(t
 	}()
 
 	nonce := strconv.FormatInt(time.Now().UnixNano(), 36)
-	var actorID, authVersion, permissionVersion int64
-	if err = pool.QueryRow(ctx, `insert into users(username,email,password_hash,email_verified)
-		values($1,$2,'test-only',true) returning id,auth_version,permission_version`,
-		"creation_"+nonce, nonce+"@creation.test").Scan(&actorID, &authVersion, &permissionVersion); err != nil {
-		t.Fatal(err)
-	}
+	grants := []string{"project.create", "project.create.*", "modpack.create", "server.create", "server.create.no-review"}
+	claims := newCurrentWriteTestActor(t, ctx, pool, "creation-"+nonce, grants...)
+	actorID := claims.Subject
+	var authVersion, permissionVersion int64
 	var baselineRoleBindings int
-	if err = pool.QueryRow(ctx, `select count(*)::int from user_role_bindings`).Scan(&baselineRoleBindings); err != nil {
+	if err = pool.QueryRow(ctx, `select auth_version,permission_version,(select count(*) from user_role_bindings) from users where id=$1`, actorID).Scan(&authVersion, &permissionVersion, &baselineRoleBindings); err != nil {
 		t.Fatal(err)
 	}
-	claims := security.Claims{Subject: actorID, PermissionRules: []security.PermissionRule{
-		{Code: "project.create", Allow: true},
-		{Code: "project.create.*", Allow: true},
-		{Code: "modpack.create", Allow: true},
-		{Code: "server.create", Allow: true},
-		{Code: "server.create.no-review", Allow: true},
-	}}
 	server := &Server{
 		cfg: loaded, db: pool, cache: querycache.New(config.RedisConfig{}),
 		serverProbe: func(_ context.Context, address string) (serverprobe.Result, error) {
@@ -93,7 +84,7 @@ func TestProjectCreationAndImportEntrypointsDoNotGrantAuthorizationIntegration(t
 				t.Fatal(err)
 			}
 			assertProjectCreationAuthorizationUnchanged(t, ctx, pool, actorID, authVersion, permissionVersion,
-				baselineRoleBindings, "mod", projectID)
+				baselineRoleBindings, len(grants), "mod", projectID)
 			assertProjectManagementDenied(t, ctx, claims, "/api/v1/mods/"+siteID+"/editor", func(request *http.Request) {
 				request.SetPathValue("siteId", siteID)
 			}, server.modEditorDetail)
@@ -117,7 +108,7 @@ func TestProjectCreationAndImportEntrypointsDoNotGrantAuthorizationIntegration(t
 				t.Fatal(err)
 			}
 			assertProjectCreationAuthorizationUnchanged(t, ctx, pool, actorID, authVersion, permissionVersion,
-				baselineRoleBindings, "modpack", projectID)
+				baselineRoleBindings, len(grants), "modpack", projectID)
 			assertProjectManagementDenied(t, ctx, claims, "/api/v1/modpacks/"+siteID+"/editor", func(request *http.Request) {
 				request.SetPathValue("siteId", siteID)
 			}, server.modpackEditor)
@@ -142,7 +133,7 @@ func TestProjectCreationAndImportEntrypointsDoNotGrantAuthorizationIntegration(t
 					t.Fatal(err)
 				}
 				assertProjectCreationAuthorizationUnchanged(t, ctx, pool, actorID, authVersion, permissionVersion,
-					baselineRoleBindings, projectType, projectID)
+					baselineRoleBindings, len(grants), projectType, projectID)
 				assertProjectManagementDenied(t, ctx, claims,
 					"/api/v1/content-projects/"+projectType+"/"+siteID+"/editor", func(request *http.Request) {
 						request.SetPathValue("projectType", projectType)
@@ -168,7 +159,7 @@ func TestProjectCreationAndImportEntrypointsDoNotGrantAuthorizationIntegration(t
 			t.Fatal(err)
 		}
 		assertProjectCreationAuthorizationUnchanged(t, ctx, pool, actorID, authVersion, permissionVersion,
-			baselineRoleBindings, "minecraft_server", projectID)
+			baselineRoleBindings, len(grants), "minecraft_server", projectID)
 		request := newProjectHandlerRequest(t, ctx, claims, http.MethodPut, "/api/v1/servers/"+result.ID,
 			updateMinecraftServerRequest{Name: "Authorization Server", MinecraftVersions: []string{"1.21.1"},
 				Languages: []string{"zh-CN"}, PrimaryTag: "survival"})
@@ -230,7 +221,7 @@ func TestProjectCreationAndImportEntrypointsDoNotGrantAuthorizationIntegration(t
 				t.Fatalf("metadata import changed projects %d -> %d or jobs=%d", projectsBefore, projectsAfter, jobsAfter)
 			}
 			assertProjectCreationAuthorizationUnchanged(t, ctx, pool, actorID, authVersion, permissionVersion,
-				baselineRoleBindings, "", 0)
+				baselineRoleBindings, len(grants), "", 0)
 		})
 	}
 }
@@ -276,7 +267,7 @@ func assertProjectManagementDenied(t *testing.T, ctx context.Context, claims sec
 }
 
 func assertProjectCreationAuthorizationUnchanged(t *testing.T, ctx context.Context, pool *pgxpool.Pool,
-	actorID, wantAuthVersion, wantPermissionVersion int64, wantRoleBindings int, projectType string, projectID int64) {
+	actorID, wantAuthVersion, wantPermissionVersion int64, wantRoleBindings, wantDirectPermissions int, projectType string, projectID int64) {
 	t.Helper()
 	var authVersion, permissionVersion int64
 	var actorRoleBindings, allRoleBindings, directPermissions, editorAssignments, creatorClaims, effectiveAccess int
@@ -292,7 +283,7 @@ func assertProjectCreationAuthorizationUnchanged(t *testing.T, ctx context.Conte
 		t.Fatal(err)
 	}
 	if authVersion != wantAuthVersion || permissionVersion != wantPermissionVersion || actorRoleBindings != 0 ||
-		allRoleBindings != wantRoleBindings || directPermissions != 0 || editorAssignments != 0 || creatorClaims != 0 || effectiveAccess != 0 {
+		allRoleBindings != wantRoleBindings || directPermissions != wantDirectPermissions || editorAssignments != 0 || creatorClaims != 0 || effectiveAccess != 0 {
 		t.Fatalf("authorization changed: auth=%d permission=%d actorRoles=%d allRoles=%d direct=%d editors=%d claims=%d effective=%d",
 			authVersion, permissionVersion, actorRoleBindings, allRoleBindings, directPermissions, editorAssignments, creatorClaims, effectiveAccess)
 	}

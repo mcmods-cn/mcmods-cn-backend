@@ -43,7 +43,7 @@ func TestCommunityPostAutomaticApprovalRejectsAStaleRevisionIntegration(t *testi
 			t.Errorf("drop BUG-090 ephemeral schema: %v", dropErr)
 		}
 	}()
-	claims := newCommunityEditTestActor(t, ctx, pool, "bug090")
+	claims := newCurrentWriteTestActor(t, ctx, pool, "bug090", "community.tutorial.create", "community.no-review")
 	authorID := claims.Subject
 	setupTx, err := pool.Begin(ctx)
 	if err != nil {

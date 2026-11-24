@@ -189,18 +189,6 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := currentClaims(r)
-	reviewRequired := loadReviewConfig(r.Context(), s.db).ModCreate && !projectMutationBypassesReview(claims)
-	if antiAbuseModerationRequired(r) {
-		reviewRequired = true
-	}
-	reviewStatus := "approved"
-	var publishedAt *time.Time
-	if reviewRequired {
-		reviewStatus = "pending"
-	} else {
-		now := time.Now().UTC()
-		publishedAt = &now
-	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	var err error
 	if req.SiteID == "" {
@@ -270,6 +258,10 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "failed to validate project icon")
 		return
 	}
+	claims, reviewStatus, allowed := currentProjectCreation(w, r, tx, "mod")
+	if !allowed {
+		return
+	}
 	var modID int64
 	err = tx.QueryRow(
 		r.Context(),
@@ -277,11 +269,11 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 			project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 			official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
 			body_markdown, search_keywords, submission_method, review_status, submitted_by, published_at
-		 ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+		 ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,case when $19='approved' then now() else null end)
 		 returning id`,
 		uniqueID, req.SiteID, req.PrimaryName, req.SecondaryName, req.Abbreviation, req.Summary, req.Environment, req.PrimaryCategory,
 		req.OfficialStatus, req.SourceStatus, req.License, req.CurseForgeProjectID, req.ModrinthProjectID, req.GitHubProjectPath, req.IconURL,
-		req.BodyMarkdown, req.SearchKeywords, req.SubmissionMethod, reviewStatus, claims.Subject, publishedAt,
+		req.BodyMarkdown, req.SearchKeywords, req.SubmissionMethod, reviewStatus, claims.Subject,
 	).Scan(&modID)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -351,7 +343,7 @@ func (s *Server) createMod(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存审核版本失败")
 		return
 	}
-	if !reviewRequired {
+	if reviewStatus == "approved" {
 		if err = applyModSnapshot(r.Context(), tx, modID, createdRevision.RevisionID, claims.Subject,
 			canManageAuthors, canManageTeams, req); err != nil {
 			writeError(w, http.StatusInternalServerError, "发布模组版本失败")

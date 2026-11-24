@@ -26,7 +26,7 @@ func TestProjectEditUsesNewApprovalGrantAfterLockIntegration(t *testing.T) {
 	input.Summary = "Approved by the current editor grant"
 	status, body := runLockedEdit(t, f, f.otherEditor, http.MethodPut, "/api/v1/modpacks/"+project.SiteID,
 		map[string]any{"snapshot": input, "baseRevisionId": project.SubmissionRevisionID},
-		"select id from modpacks where public_id=$1 for update", project.PublicID, func() {
+		"select id from modpacks where public_id=$1 for update", []any{project.PublicID}, func() {
 			grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.otherEditor], "content.no-review")
 		})
 	if status != http.StatusCreated {
@@ -45,7 +45,7 @@ func TestProjectEditUsesNewApprovalGrantAfterLockIntegration(t *testing.T) {
 	}
 }
 
-func runLockedEdit(t *testing.T, f test013Fixture, token, method, path string, body any, lockSQL, key string, change func()) (int, []byte) {
+func runLockedEdit(t *testing.T, f test013Fixture, token, method, path string, body any, lockSQL string, args []any, change func()) (int, []byte) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(f.ctx, 15*time.Second)
 	defer cancel()
@@ -54,7 +54,7 @@ func runLockedEdit(t *testing.T, f test013Fixture, token, method, path string, b
 		t.Fatal(err)
 	}
 	defer holder.Rollback(context.Background())
-	if _, err = holder.Exec(ctx, lockSQL, key); err != nil {
+	if _, err = holder.Exec(ctx, lockSQL, args...); err != nil {
 		t.Fatal(err)
 	}
 	pid := holder.Conn().PgConn().PID()
@@ -120,11 +120,11 @@ func runLockedEdit(t *testing.T, f test013Fixture, token, method, path string, b
 	}
 }
 
-func newCommunityEditTestActor(t *testing.T, ctx context.Context, pool *pgxpool.Pool, suffix string) security.Claims {
+func newCurrentWriteTestActor(t *testing.T, ctx context.Context, pool *pgxpool.Pool, suffix string, grants ...string) security.Claims {
 	t.Helper()
 	cfg := config.Load()
 	id, _, token := createTEST044User(t, ctx, pool, cfg, suffix, "UTC")
-	grantTEST044Permissions(t, ctx, pool, id, "community.tutorial.create", "community.no-review")
+	grantTEST044Permissions(t, ctx, pool, id, grants...)
 	claims, err := security.ParseToken(cfg.JWTSecret, token)
 	if err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func TestCommunityEditRetriesAfterReviewPolicyChangesDuringLockIntegration(t *te
 	update := communityPostMutationRequest{communityPostSnapshot: snapshot, BaseRevisionID: &post.RevisionID}
 	path := "/api/v1/community/posts/" + post.ID
 	status, raw := runLockedEdit(t, f.test013Fixture, f.editor, http.MethodPut, path, update,
-		"select pg_advisory_xact_lock(hashtext($1))", communityPostAggregate+":"+post.ID, func() { f.reviewPolicy(t, false) })
+		"select pg_advisory_xact_lock(hashtext($1))", []any{communityPostAggregate + ":" + post.ID}, func() { f.reviewPolicy(t, false) })
 	var conflict struct {
 		Code string `json:"code"`
 	}
@@ -169,5 +169,35 @@ func TestCommunityEditRetriesAfterReviewPolicyChangesDuringLockIntegration(t *te
 	saved := decodeTEST022Data[test042Mutation](t, f.require(t, f.editor, http.MethodPut, path, update, http.StatusOK))
 	if saved.ReviewStatus != "approved" || saved.RevisionID == post.RevisionID {
 		t.Fatalf("fresh policy retry did not publish: %#v", saved)
+	}
+}
+
+// Hold allocation of the public ID while an administrator opens creation.
+// This is before the business transaction and after validation of this normal request.
+func TestProjectCreationReadsModerationAfterPreparationIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "modpack.create")
+	if _, err := f.db.Exec(f.ctx, `insert into system_settings(key,value) values($1,'{"modpackCreate":true}')
+		on conflict(key) do update set value=jsonb_set(system_settings.value,'{modpackCreate}','true')`, reviewConfigSettingKey); err != nil {
+		t.Fatal(err)
+	}
+	input := perf020ModpackSnapshot("creation-policy", 0)
+	status, body := runLockedEdit(t, f, f.editor, http.MethodPost, "/api/v1/modpacks", input,
+		"lock table public_routes in access exclusive mode", nil, func() {
+			var allocating bool
+			if err := f.db.QueryRow(f.ctx, `select exists(select from pg_stat_activity where datname=current_database()
+				and cardinality(pg_blocking_pids(pid))>0 and query like 'select exists(select 1 from public_routes where public_id =%')`).Scan(&allocating); err != nil || !allocating {
+				t.Fatalf("creation did not wait for public ID allocation: %t, %v", allocating, err)
+			}
+			if _, err := f.db.Exec(f.ctx, `update system_settings set value=jsonb_set(value,'{modpackCreate}','false') where key=$1`, reviewConfigSettingKey); err != nil {
+				t.Fatal(err)
+			}
+		})
+	if status != http.StatusCreated {
+		t.Fatalf("create response %d: %s", status, body)
+	}
+	created := decodeTEST022Data[modpackResponse](t, body)
+	if created.ReviewStatus != "approved" || created.PublishedRevisionID == nil {
+		t.Fatalf("creation used an earlier moderation policy: %s, published=%v", created.ReviewStatus, created.PublishedRevisionID)
 	}
 }

@@ -386,14 +386,6 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	config := loadReviewConfig(r.Context(), s.db)
-	reviewStatus := "approved"
-	if simpleProjectReviewRequired(config, projectType, "create") && !projectMutationBypassesReview(claims) {
-		reviewStatus = "pending"
-	}
-	if antiAbuseModerationRequired(r) {
-		reviewStatus = "pending"
-	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
 	publicID, err := availableModUniqueID(r.Context(), s.db)
 	if err != nil {
@@ -436,6 +428,10 @@ func (s *Server) createSimpleProject(w http.ResponseWriter, r *http.Request, pro
 		} else {
 			writeError(w, http.StatusServiceUnavailable, "project icon validation is unavailable")
 		}
+		return
+	}
+	claims, reviewStatus, allowed := currentProjectCreation(w, r, tx, projectType)
+	if !allowed {
 		return
 	}
 	localization := defaultSimpleProjectLocalization(snapshot)

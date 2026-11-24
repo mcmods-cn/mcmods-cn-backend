@@ -1223,7 +1223,12 @@ func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, candidateI
 	actor = currentActor
 	finalizedStatus := ""
 	var eligibilityErr error
-	hook := func(hookContext context.Context, tx pgx.Tx, result projectCreationTransactionResult) error {
+	loadActor := func(hookContext context.Context, tx pgx.Tx) (security.Claims, error) {
+		current, err := authorizeAutomationProject(hookContext, tx, actor.Subject, "", true, false)
+		eligibilityErr = err
+		return current, err
+	}
+	finish := func(hookContext context.Context, tx pgx.Tx, result projectCreationTransactionResult) error {
 		if eligibilityErr = lockSeedCrawlerRunLeaseTx(hookContext, tx, actor.Subject); eligibilityErr != nil {
 			return eligibilityErr
 		}
@@ -1269,7 +1274,7 @@ func (worker *SeedCrawlerWorker) submitSeedDraft(ctx context.Context, candidateI
 		return nil
 	}
 	request := httptest.NewRequest(http.MethodPost, "/internal/seed-crawler", bytes.NewReader(raw)).WithContext(
-		withProjectCreationTransactionHook(context.WithValue(ctx, claimsContextKey, actor), hook),
+		withProjectCreationTransactionHook(context.WithValue(ctx, claimsContextKey, actor), projectCreationTransactionHook{actor: loadActor, finish: finish}),
 	)
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
