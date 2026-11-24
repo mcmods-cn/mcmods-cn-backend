@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"sync"
