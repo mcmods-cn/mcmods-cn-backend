@@ -14,6 +14,9 @@ await context.addCookies([{name:'mcmods-ui-locale',value:'en-US',url:origin}]);
 await context.route(u=>/^https?:$/.test(u.protocol)&&u.origin!==origin,r=>r.abort());
 const q=await context.newPage();const captures=[];
 q.on('response',r=>{let p=new URL(r.url()).pathname;if(p.startsWith('/api/')||p.startsWith(cfg.ossBucketPathPrefix))captures.push([r.request().method(), p.startsWith(cfg.ossBucketPathPrefix)?'private-object':p.replace(/\b[a-z0-9]{9,}\b/g,'[id]'),r.status()])});
+q.on('response',r=>{if(r.request().resourceType()==='script')captures.push(['script',new URL(r.url()).pathname,r.status()])});
+q.on('requestfailed',r=>{const u=new URL(r.url());if(['http:','https:'].includes(u.protocol))captures.push(['failed '+r.resourceType(),u.origin===origin?u.pathname:'external origin',r.failure()?.errorText])});
+q.on('pageerror',e=>captures.push(['page error',e.name,e.message.replace(/https?:\/\/[^ ]+/g,'[url]').slice(0,180)]));
 q.setDefaultNavigationTimeout(90000);
 q.setDefaultTimeout(40000);
 function response(method,p){return q.waitForResponse(r=>r.request().method()===method&&new URL(r.url()).pathname===p,{timeout:45000})}
@@ -24,7 +27,7 @@ try{
  await q.goto(origin+'/login?next='+encodeURIComponent(firstTarget),{waitUntil:'load'});
  const form=q.locator('main form'), account=form.getByLabel('Account',{exact:true}),password=form.locator('input[type=password]');
  // Confirm hydration and identify the login inputs through a real form-state transition.
- await form.getByRole('button',{name:'Email code',exact:true}).click();
+ await form.getByRole('button',{name:'Email code',exact:true}).click();await form.locator('input[type=password]').waitFor({state:'detached'});
  await form.getByRole('button',{name:'Password login',exact:true}).click();
  await account.fill(credentials.username);await password.fill(credentials.password);
  await form.getByText('Password strength:',{exact:false}).waitFor();

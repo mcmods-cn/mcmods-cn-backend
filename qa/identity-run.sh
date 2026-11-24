@@ -47,7 +47,18 @@ if test "$CASE" = creator; then
 fi
 NEXT_PUBLIC_YGGDRASIL_API_ROOT="$NEXT_PUBLIC_API_BASE_URL/api/yggdrasil/"
 if test "$CASE" = skin; then route="/skins/$(jq -r .skinPublicId "$state/runtime.json")"; fi
-cd "$FRONTEND_CHECKOUT"; node node_modules/next/dist/bin/next dev -H 127.0.0.1 -p "$port" > "$work/next.private" 2>&1 & front=$!
+cd "$FRONTEND_CHECKOUT"
+if test "$CASE" = creator; then
+  # Match the production TLS origin at build time. Serve the actual standalone assets.
+  npm run build > "$work/next-build.private" 2>&1
+  cp -a public .next/standalone/public
+  cp -a .next/static .next/standalone/.next/static
+  export HOSTNAME=127.0.0.1 PORT="$port"
+  node .next/standalone/server.js > "$work/next.private" 2>&1 &
+else
+  node node_modules/next/dist/bin/next dev -H 127.0.0.1 -p "$port" > "$work/next.private" 2>&1 &
+fi
+front=$!
 for i in $(seq 1 50); do (echo >/dev/tcp/127.0.0.1/"$port") 2>/dev/null && break; sleep 1; done
 curl --fail --silent --max-time 160 "$NEXT_PUBLIC_SITE_URL$route" >/dev/null
 set +e
