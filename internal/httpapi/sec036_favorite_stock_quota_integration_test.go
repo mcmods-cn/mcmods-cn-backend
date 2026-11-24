@@ -275,8 +275,22 @@ func TestSEC036FavoriteHandlersReturnStableQuotaCodesIntegration(t *testing.T) {
 
 	assertQuota(invoke(http.MethodPost, "/api/v1/users/me/favorite-collections", `{"name":"three"}`,
 		ownerIDs[0], server.createFavoriteCollection), "FAVORITE_COLLECTION_LIMIT")
-	assertQuota(invoke(http.MethodGet, "/api/v1/users/me/favorite-collections", "",
-		ownerIDs[1], server.favoriteCollections), "FAVORITE_COLLECTION_LIMIT")
+	list := invoke(http.MethodGet, "/api/v1/users/me/favorite-collections", "", ownerIDs[1], server.favoriteCollections)
+	if list.Code != http.StatusOK {
+		t.Fatalf("read existing folders at quota: status=%d", list.Code)
+	}
+	page := decodeTEST022Data[favoriteCollectionPageResponse](t, list.Body.Bytes())
+	names := make(map[string]bool, len(page.Items))
+	for _, item := range page.Items {
+		if item.IsDefault || item.ID == "" {
+			t.Fatalf("unexpected folder at quota: %#v", item)
+		}
+		names[item.Name] = true
+	}
+	if page.HasMore || len(page.Items) != 2 || !names["one"] || !names["two"] {
+		t.Fatalf("existing folders missing at quota: %#v", page)
+	}
+	assertSEC036Count(t, pool, `select count(*) from favorite_collections where user_id=`+fmt.Sprint(ownerIDs[1]), 2)
 
 	patchBody := fmt.Sprintf(`{"entityType":"mod","entityPublicId":%q,"addCollectionIds":[%q],"removeCollectionIds":[]}`,
 		modPublicIDs[2], secondCollectionPublicID)
