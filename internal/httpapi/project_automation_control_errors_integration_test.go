@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 )
 
@@ -13,7 +12,7 @@ func TestAutomationControlDistinguishesMissingSourcesAndUnavailableServicesInteg
 	f := newTEST017Fixture(t)
 	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "project.external_source.bind", "project.auto_update.view", "project.auto_update.run", "project.auto_update.view_logs")
 	s := f.origin.Config.Handler.(*Server)
-	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serveAutomationCurseForgeFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/mods/41":
 			_, _ = io.WriteString(w, `{"data":{"id":41,"isAvailable":true,"links":{"websiteUrl":"https://www.curseforge.com/minecraft/mc-mods/example"}}}`)
@@ -25,9 +24,8 @@ func TestAutomationControlDistinguishesMissingSourcesAndUnavailableServicesInteg
 			http.NotFound(w, r)
 		}
 	}))
-	t.Cleanup(mock.Close)
 	cfg := defaultModImportConfig()
-	cfg.CurseForge.Enabled, cfg.CurseForge.BaseURL, cfg.CurseForge.APIKey = true, mock.URL, "fixture"
+	cfg.CurseForge.Enabled, cfg.CurseForge.BaseURL, cfg.CurseForge.APIKey = true, "https://api.curseforge.com/v1", "fixture-only"
 	raw, err := s.sealSystemSetting(cfg)
 	if err != nil {
 		t.Fatal(err)

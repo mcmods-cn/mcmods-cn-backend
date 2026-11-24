@@ -3,7 +3,6 @@ package httpapi
 import (
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,7 +13,7 @@ func TestCurseForgeChangelogRetainsPublishedRevisionWhenProviderUnavailableInteg
 	_, worker, job, _ := f.managed(t, false)
 	job.Kind, job.SourceType, job.ExternalID = "changelog", "curseforge", "11"
 	var mode atomic.Int32
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serveAutomationCurseForgeFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/mods/11/files":
@@ -34,9 +33,8 @@ func TestCurseForgeChangelogRetainsPublishedRevisionWhenProviderUnavailableInteg
 			http.NotFound(w, r)
 		}
 	}))
-	defer provider.Close()
 	cfg := defaultModImportConfig()
-	cfg.CurseForge.Enabled, cfg.CurseForge.BaseURL, cfg.CurseForge.APIKey = true, provider.URL, "fixture"
+	cfg.CurseForge.Enabled, cfg.CurseForge.BaseURL, cfg.CurseForge.APIKey = true, "https://api.curseforge.com/v1", "fixture-only"
 	sealed, err := worker.server.sealSystemSetting(cfg)
 	if err != nil {
 		t.Fatal(err)

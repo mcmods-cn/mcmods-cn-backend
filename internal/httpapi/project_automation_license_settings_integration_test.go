@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -65,7 +64,7 @@ func TestProjectScheduleChangesPreserveApprovedRedistributionDecisionIntegration
 		schedule[2][change.field] = previous
 	}
 	// The agreement is attached to the currently bound external project.
-	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	serveAutomationCurseForgeFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/mods/22" {
 			_, _ = io.WriteString(w, `{"data":{"id":22,"isAvailable":true,"links":{"websiteUrl":"https://www.curseforge.com/minecraft/mc-mods/replacement"}}}`)
 			return
@@ -76,10 +75,9 @@ func TestProjectScheduleChangesPreserveApprovedRedistributionDecisionIntegration
 		}
 		_, _ = io.WriteString(w, `{"data":[{"id":22}]}`)
 	}))
-	defer provider.Close()
 	server := f.origin.Config.Handler.(*Server)
 	cfg := defaultModImportConfig()
-	cfg.CurseForge.Enabled, cfg.CurseForge.BaseURL, cfg.CurseForge.APIKey = true, provider.URL, "fixture"
+	cfg.CurseForge.Enabled, cfg.CurseForge.BaseURL, cfg.CurseForge.APIKey = true, "https://api.curseforge.com/v1", "fixture-only"
 	sealed, err := server.sealSystemSetting(cfg)
 	if err != nil {
 		t.Fatal(err)
