@@ -110,8 +110,22 @@ func TestBlueprintFileReceiptsKeepTheCurrentOriginalAndCoverIntegration(t *testi
 		t.Fatal(err)
 	}
 	before = quota()
-	for _, ticket := range []test037Ticket{original, a} {
-		retired := settle(ticket, 200)
+	for _, sample := range []struct {
+		ticket test037Ticket
+		fileID string
+	}{{original, first["id"].(string)}, {a, aID}} {
+		// A fresh request fails the existing project-directory check. An upload
+		// which passed that check before withdrawal still reaches the shared
+		// receipt projection, and must never restore the withdrawn association.
+		f.require(t, f.editor, http.MethodPost, complete, sample.ticket.completion(), http.StatusBadRequest)
+		fileID, err := f.server.resolveActiveOSSFileInternalIDForUploader(f.ctx, sample.fileID, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		retired := make(map[string]any)
+		if err = f.server.attachCompletedOSSUploadAssociations(f.ctx, retired, fileID, owner, sample.ticket.Source); err != nil {
+			t.Fatal(err)
+		}
 		if retired["blueprint"] != nil || retired["blueprintId"] != nil {
 			t.Errorf("withdrawn blueprint attached to file receipt: %#v", retired)
 		}
