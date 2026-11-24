@@ -464,12 +464,11 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	var kind, previousDescription string
 	var createdBy, baseRevisionID *int64
 	var currentAvatarFileID *string
+	var currentAvatarInternalID *int64
 	var currentAvatarURL, publishedRevision string
-	err = tx.QueryRow(r.Context(), `select id,kind,description_markdown,created_by,published_revision_id,
-		(select public_id from oss_files where id=creators.avatar_file_id),avatar_url,
-		coalesce((select public_id from content_revisions where id=creators.published_revision_id),'')
+	err = tx.QueryRow(r.Context(), `select id,kind,description_markdown,created_by,published_revision_id,avatar_file_id,avatar_url
 		from creators where public_id=$1 for update`, publicID).
-		Scan(&id, &kind, &previousDescription, &createdBy, &baseRevisionID, &currentAvatarFileID, &currentAvatarURL, &publishedRevision)
+		Scan(&id, &kind, &previousDescription, &createdBy, &baseRevisionID, &currentAvatarInternalID, &currentAvatarURL)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "creator not found")
 		return
@@ -488,6 +487,15 @@ func (s *Server) updateCreator(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.BaseRevisionID == nil {
 		writeAPIError(w, http.StatusPreconditionRequired, "CREATOR_REVISION_REQUIRED", "load the creator profile before editing", 0, nil)
+		return
+	}
+	// A publication can commit while the row lock is pending. Read the
+	// referenced objects in a fresh statement using the locked row's IDs.
+	if err = tx.QueryRow(r.Context(), `select
+		coalesce((select public_id from content_revisions where id=$1),''),
+		(select public_id from oss_files where id=$2)`, baseRevisionID, currentAvatarInternalID).
+		Scan(&publishedRevision, &currentAvatarFileID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load creator revision")
 		return
 	}
 	if *request.BaseRevisionID != publishedRevision {
@@ -559,7 +567,6 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	request.ProofMarkdown = strings.TrimSpace(request.ProofMarkdown)
-	claims := currentClaims(r)
 	tx, err := s.db.Begin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create claim")
@@ -576,6 +583,14 @@ func (s *Server) claimCreator(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load creator")
+		return
+	}
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if !claimsAllow(claims, "creator.claim") {
+		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
 	if kind != "author" {

@@ -99,3 +99,55 @@ func TestCreatorProfileEditUsesTheRevisionReadByTheEditorIntegration(t *testing.
 	}
 	f.require(t, f.otherEditor, http.MethodPut, path, update("Explicitly compared draft", a.Revision), http.StatusOK)
 }
+
+func TestCreatorProfileEditWaitsForFirstPublicationIntegration(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "creator.create")
+	created := decodeTEST022Data[struct {
+		PublicID string `json:"publicId"`
+		Status   string `json:"reviewStatus"`
+	}](t, f.require(t, f.editor, http.MethodPost, "/api/v1/creators", map[string]any{
+		"kind": "author", "name": "Unpublished author", "defaultLocale": "en-US",
+	}, http.StatusCreated))
+	if created.Status != "pending" {
+		t.Fatal("expected an unpublished profile")
+	}
+	path := "/api/v1/creators/" + created.PublicID
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "creator.edit."+created.PublicID)
+	auditOSS001PublishFixturePermissions(t, f, f.editor)
+
+	publication, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer publication.Rollback(f.ctx)
+	var creatorID int64
+	if err := publication.QueryRow(f.ctx, "select id from creators where public_id=$1 and published_revision_id is null for update", created.PublicID).Scan(&creatorID); err != nil {
+		t.Fatal(err)
+	}
+	waiter := auditCompletionAsyncJSON(f.test013Fixture, f.editor, http.MethodPut, path, map[string]any{
+		"kind": "author", "name": "Draft from before publication", "defaultLocale": "en-US", "baseRevisionId": "",
+	})
+	auditCompletionAwaitLocks(t, f.test013Fixture, 1)
+	revision, err := createContentRevisionTx(f.ctx, publication, createContentRevisionParams{
+		EntityType: "author", EntityID: creatorID, AggregateType: "creator", AggregateKey: created.PublicID,
+		Snapshot: []byte(`{"kind":"author","name":"First publication"}`), ActorID: f.userIDs[f.reviewer],
+		Source: "user", Status: "approved", Request: httptest.NewRequest(http.MethodPut, path, nil),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publication.Exec(f.ctx, `update creators set published_revision_id=$2,review_status='approved' where id=$1`, creatorID, revision.RevisionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := publication.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	result := <-waiter
+	if result.err != nil || result.status != http.StatusConflict {
+		t.Fatalf("stale unpublished edit after concurrent publication: status=%d err=%v body=%s", result.status, result.err, result.raw)
+	}
+	if f.number(t, "select count(*) from content_revisions where aggregate_type='creator' and aggregate_key=$1", created.PublicID) != 2 {
+		t.Fatal("a waiting edit added a revision after its baseline changed")
+	}
+}
