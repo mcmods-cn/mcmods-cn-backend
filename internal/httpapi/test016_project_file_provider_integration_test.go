@@ -124,6 +124,13 @@ func TestTEST016ModrinthIdentityLimitsAndFailureDegradationHTTPIntegration(t *te
 					version["files"] = files
 				}
 				if strings.HasPrefix(r.URL.Path, "/version_file/") {
+					requested := strings.TrimPrefix(r.URL.Path, "/version_file/")
+					algorithm := r.URL.Query().Get("algorithm")
+					if (requested == hash && algorithm != "sha1") || (requested == strings.Repeat("b", 128) && algorithm != "sha512") {
+						t.Error("provider received a hash with a mismatched algorithm")
+						http.NotFound(w, r)
+						return
+					}
 					_ = json.NewEncoder(w).Encode(version)
 					return
 				}
@@ -141,6 +148,7 @@ func TestTEST016ModrinthIdentityLimitsAndFailureDegradationHTTPIntegration(t *te
 					t.Fatalf("valid external metadata lost: %+v", list)
 				}
 				raw := f.require(t, "", http.MethodPost, base+"/modrinth/"+hash+"/download", nil, http.StatusOK)
+				f.require(t, "", http.MethodPost, base+"/modrinth/"+strings.Repeat("b", 128)+"/download", nil, http.StatusOK)
 				if !strings.Contains(string(raw), "https://cdn.example.invalid/external.jar") {
 					t.Fatalf("validated download URL missing: %s", raw)
 				}
@@ -151,6 +159,9 @@ func TestTEST016ModrinthIdentityLimitsAndFailureDegradationHTTPIntegration(t *te
 			} else {
 				if len(list.Items) != 0 || list.Warnings["modrinth"] == "" {
 					t.Fatalf("invalid provider response did not fail closed with warning: %+v", list)
+				}
+				if mode == "http-error" || mode == "invalid-json" || mode == "too-many-files" {
+					f.require(t, "", http.MethodPost, base+"/modrinth/"+hash+"/download", nil, http.StatusBadGateway)
 				}
 				if mode == "wrong-project" || mode == "unrequested-version" {
 					f.require(t, "", http.MethodPost, base+"/modrinth/"+hash+"/download", nil, http.StatusNotFound)

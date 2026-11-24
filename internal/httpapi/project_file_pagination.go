@@ -448,7 +448,22 @@ func modrinthVersionProjectFiles(version modrinthProjectVersion, providerProject
 	return result
 }
 
+var errExternalProjectFileNotFound = errors.New("external project file not found")
+
 func (s *Server) loadModrinthProjectFileByHash(ctx context.Context, projectID, fileID string, cfg modImportConfig) (providerProjectFile, error) {
+	fileID = strings.ToLower(strings.TrimSpace(fileID))
+	var algorithm string
+	switch len(fileID) {
+	case 40:
+		algorithm = "sha1"
+	case 128:
+		algorithm = "sha512"
+	default:
+		return providerProjectFile{}, errExternalProjectFileNotFound
+	}
+	if _, err := hex.DecodeString(fileID); err != nil {
+		return providerProjectFile{}, errExternalProjectFileNotFound
+	}
 	manifest, err := s.cachedModrinthProjectFileManifest(ctx, projectID, cfg)
 	if err != nil {
 		return providerProjectFile{}, err
@@ -458,30 +473,26 @@ func (s *Server) loadModrinthProjectFileByHash(ctx context.Context, projectID, f
 		return providerProjectFile{}, err
 	}
 	headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), "")
-	fileID = strings.ToLower(strings.TrimSpace(fileID))
+	endpoint, _ := url.Parse(cfg.Modrinth.BaseURL + "/version_file/" + url.PathEscape(fileID))
+	query := endpoint.Query()
+	query.Set("algorithm", algorithm)
+	endpoint.RawQuery = query.Encode()
 	var version modrinthProjectVersion
-	for _, algorithm := range []string{"sha1", "sha512"} {
-		endpoint, _ := url.Parse(cfg.Modrinth.BaseURL + "/version_file/" + url.PathEscape(fileID))
-		query := endpoint.Query()
-		query.Set("algorithm", algorithm)
-		endpoint.RawQuery = query.Encode()
-		err = getProviderJSONLimited(ctx, client, endpoint.String(), headers, projectFileProviderJSONLimit, &version)
-		if err == nil || !isProviderNotFound(err) {
-			break
-		}
-	}
-	if err != nil {
+	if err = getProviderJSONLimited(ctx, client, endpoint.String(), headers, projectFileProviderJSONLimit, &version); err != nil {
 		return providerProjectFile{}, err
 	}
-	if version.ProjectID != manifest.ID || modrinthManifestPosition(manifest, version.ID) < 0 || len(version.Files) > projectFileMaximumFilesPerVersion {
-		return providerProjectFile{}, errors.New("Modrinth file does not belong to the project")
+	if version.ProjectID != manifest.ID || modrinthManifestPosition(manifest, version.ID) < 0 {
+		return providerProjectFile{}, errExternalProjectFileNotFound
+	}
+	if len(version.Files) > projectFileMaximumFilesPerVersion {
+		return providerProjectFile{}, errors.New("Modrinth version contains too many files")
 	}
 	for _, file := range modrinthVersionProjectFiles(version, manifest.ID) {
-		if strings.EqualFold(file.ID, fileID) {
+		if (algorithm == "sha1" && strings.EqualFold(file.SHA1, fileID)) || (algorithm == "sha512" && strings.EqualFold(file.SHA512, fileID)) {
 			return file, nil
 		}
 	}
-	return providerProjectFile{}, errors.New("Modrinth file not found in the version")
+	return providerProjectFile{}, errExternalProjectFileNotFound
 }
 
 type curseForgeProjectFile struct {
@@ -603,7 +614,7 @@ func loadCurseForgeProjectFileByID(ctx context.Context, projectID, fileID string
 	}
 	numericFileID, err := strconv.ParseInt(strings.TrimSpace(fileID), 10, 64)
 	if err != nil || numericFileID <= 0 {
-		return providerProjectFile{}, errors.New("invalid CurseForge file ID")
+		return providerProjectFile{}, errExternalProjectFileNotFound
 	}
 	var response struct {
 		Data curseForgeProjectFile `json:"data"`
@@ -613,7 +624,7 @@ func loadCurseForgeProjectFileByID(ctx context.Context, projectID, fileID string
 		return providerProjectFile{}, err
 	}
 	if response.Data.ID != numericFileID || strconv.FormatInt(response.Data.ModID, 10) != numericID {
-		return providerProjectFile{}, errors.New("CurseForge returned the wrong file")
+		return providerProjectFile{}, errExternalProjectFileNotFound
 	}
 	return curseForgeProviderProjectFile(response.Data), nil
 }

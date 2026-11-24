@@ -598,14 +598,22 @@ func (s *Server) downloadProjectFile(w http.ResponseWriter, r *http.Request) {
 	if source == "curseforge" {
 		providerProjectID = project.CurseForgeProjectID
 	}
+	if providerProjectID == "" || (source == "curseforge" && cfg.CurseForge.APIKey == "") {
+		writeError(w, http.StatusNotFound, "external project file not found")
+		return
+	}
 	var selected providerProjectFile
 	if source == "modrinth" {
 		selected, err = s.loadModrinthProjectFileByHash(r.Context(), providerProjectID, fileID, cfg)
 	} else {
 		selected, err = loadCurseForgeProjectFileByID(r.Context(), providerProjectID, fileID, cfg)
 	}
-	if err != nil {
+	if errors.Is(err, errExternalProjectFileNotFound) || isProviderNotFound(err) {
 		writeError(w, http.StatusNotFound, "external project file not found")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "external download source is temporarily unavailable")
 		return
 	}
 	downloadURL := selected.DirectURL
@@ -789,7 +797,7 @@ func resolveCurseForgeProjectID(ctx context.Context, client *http.Client, projec
 		return "", errors.New("CurseForge returned too many projects")
 	}
 	if len(response.Data) == 0 {
-		return "", errors.New("CurseForge project not found")
+		return "", errExternalProjectFileNotFound
 	}
 	return strconv.FormatInt(response.Data[0].ID, 10), nil
 }
