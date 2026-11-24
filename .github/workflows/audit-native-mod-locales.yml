@@ -1,0 +1,100 @@
+name: Native Mod localization matrix
+on:
+  push:
+    branches: [audit/native-mod-locales-nov24]
+permissions:
+  contents: read
+
+jobs:
+  native-mod-locales:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ephemeral-synthetic-matrix-only
+          POSTGRES_DB: mcmods_native_locales
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mcmods_native_locales"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      APP_ENV: test
+      MCMODS_SKIP_DOTENV: "true"
+      DATABASE_URL: postgres://postgres:ephemeral-synthetic-matrix-only@127.0.0.1:5432/mcmods_native_locales?sslmode=disable
+      JWT_SECRET: synthetic-matrix-signing-key-this-is-not-a-deployment
+      SETTINGS_ENCRYPTION_KEY: synthetic-matrix-storage-key-this-is-not-a-deployment
+      NEXT_PUBLIC_API_BASE_URL: https://api.example.test
+      NEXT_PUBLIC_SITE_URL: https://www.example.test
+      NEXT_PUBLIC_YGGDRASIL_API_ROOT: https://api.example.test/api/yggdrasil/
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Check out only the QA driver from this branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          path: qa
+          persist-credentials: false
+          sparse-checkout: tools/testing/hosted_mod_locale
+      - name: Check out exact backend under test
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: bdd114dffbc2f2562dc1833970f9989646af7d8b
+          path: mcmods-cn-backend
+          persist-credentials: false
+      - name: Check out exact frontend under test
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: mcmods-cn/mcmods-cn-frontend
+          ref: 45a8b79f191dd3659ce9cd9474e59634c7193a4b
+          path: mcmods-cn-frontend
+          persist-credentials: false
+      - name: Record exact exporter source for the fixture manifest
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: mcmods-cn/mcmods_exporter
+          ref: 1e00e8b302d5c514cbc2204a556a610bc944c9da
+          path: mcmods_exporter
+          persist-credentials: false
+      - name: Set up the declared Go toolchain
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.26.11
+          cache: false
+      - name: Set up the declared Node toolchain
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Install the current baseline in the job-owned database
+        working-directory: mcmods-cn-backend
+        run: |
+          set -euo pipefail
+          owner=$(psql "$DATABASE_URL" -XAtc "SELECT current_user || '/' || current_database() || '/' || pg_get_userbyid(datdba) FROM pg_database WHERE datname=current_database()")
+          test "$owner" = postgres/mcmods_native_locales/postgres
+          go run -mod=readonly ./cmd/db-initialize
+      - name: Build the locked frontend and install its browser
+        working-directory: mcmods-cn-frontend
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          npx --no-install playwright install --with-deps chromium
+          cp -a public .next/standalone/
+          cp -a .next/static .next/standalone/.next/
+          git diff --exit-code
+      - name: Exercise the 32 normal submissions and PostgreSQL terminal check
+        run: python3 qa/tools/testing/hosted_mod_locale/run.py
+      - name: Archive only allowlisted synthetic terminal and per-case evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: normal-mod-locales-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            safe-evidence/summary.json
+            safe-evidence/native.json
+            safe-evidence/postgres-seal.json
+          if-no-files-found: warn
+          retention-days: 14
