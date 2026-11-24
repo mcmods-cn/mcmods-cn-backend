@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -135,6 +136,67 @@ func TestEconomyAndTaskReadErrorsAreObservableIntegration(t *testing.T) {
 	assertHandlerStatus(t, http.StatusInternalServerError, func(response *httptest.ResponseRecorder) {
 		server.adminTasks(response, httptest.NewRequest(http.MethodGet, "/api/v1/admin/tasks", nil).WithContext(ctx))
 	})
+}
+
+func TestOptionalEconomyMetadataRoundTripsThroughListsIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "economy.write", "shop.write", "task.write")
+	for _, test := range []struct {
+		name, admin, list, reader string
+		body                      map[string]any
+	}{
+		{"currency", "/api/v1/admin/economy/currencies", "/api/v1/economy/currencies", "", map[string]any{"code": "audit_coin", "name": "Audit coin"}},
+		{"item", "/api/v1/admin/shop/items", "/api/v1/shop/items", "", map[string]any{"code": "audit_background", "name": "Audit background", "itemType": "profile_background", "priceCurrency": "diamond", "priceAmount": 1}},
+		{"task", "/api/v1/admin/tasks", "/api/v1/users/me/tasks", f.denied, map[string]any{"code": "audit_task", "name": "Audit task", "refreshPeriod": "never", "condition": map[string]any{"action": "create", "objectType": "user", "metric": "count", "target": 1}, "rewards": map[string]any{"experience": 1}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			read := func(id string, wantTranslated bool) {
+				t.Helper()
+				raw := f.require(t, test.reader, http.MethodGet, test.list, nil, http.StatusOK)
+				var list struct {
+					Data struct {
+						Items []map[string]any `json:"items"`
+					} `json:"data"`
+				}
+				if err := json.Unmarshal(raw, &list); err != nil {
+					t.Fatal(err)
+				}
+				for _, item := range list.Data.Items {
+					if item["publicId"] != id {
+						continue
+					}
+					translations, ok := item["translations"].(map[string]any)
+					if !ok || (!wantTranslated && len(translations) != 0) || (wantTranslated && translations["en-US"] != "Edited") {
+						t.Fatalf("translations = %#v", item["translations"])
+					}
+					if test.name == "item" {
+						cfg, ok := item["config"].(map[string]any)
+						if !ok || len(cfg) != 0 {
+							t.Fatalf("shop config = %#v", item["config"])
+						}
+					}
+					return
+				}
+				t.Fatalf("missing saved %s in its list", test.name)
+			}
+			raw := f.require(t, f.editor, http.MethodPost, test.admin, test.body, http.StatusCreated)
+			var created struct {
+				Data struct {
+					PublicID string `json:"publicId"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(raw, &created); err != nil || !validCatalogPublicID(created.Data.PublicID) {
+				t.Fatalf("invalid creation receipt %s: %v", raw, err)
+			}
+			read(created.Data.PublicID, false)
+			test.body["translations"] = map[string]any{"en-US": "Edited"}
+			if test.name == "item" {
+				test.body["config"] = nil
+			}
+			f.require(t, f.editor, http.MethodPut, test.admin+"/"+created.Data.PublicID, test.body, http.StatusOK)
+			read(created.Data.PublicID, true)
+		})
+	}
 }
 
 func arch027UserRequest(ctx context.Context, userID int64, path string) *http.Request {
