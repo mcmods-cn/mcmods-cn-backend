@@ -38,6 +38,16 @@ func TestAuditFixCMP003CommentPinAndReactionActivityShareInteractionTransaction(
 		if count := auditFixActivityIntentCount(t, f.test013Fixture, f.editor, operation.action, activity.ObjectComment); count != prior+1 {
 			t.Fatalf("interaction activity=%d prior=%d", count, prior)
 		}
+		if operation.path != path+"/pin" {
+			replay := f.require(t, f.editor, operation.method, operation.path, operation.body, 200)
+			state := decodeTEST022Data[struct{ Active bool }](t, replay)
+			if state.Active != (operation.method == http.MethodPut) {
+				t.Fatalf("replayed reaction state=%v verb=%s", state.Active, operation.method)
+			}
+			if count := auditFixActivityIntentCount(t, f.test013Fixture, f.editor, operation.action, activity.ObjectComment); count != prior+1 {
+				t.Fatalf("replayed unchanged reaction produced another activity: count=%d want=%d", count, prior+1)
+			}
+		}
 	}
 	var reactions int
 	var pinned bool

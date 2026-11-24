@@ -990,7 +990,6 @@ func (s *Server) commentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	commentID := visible.ID
-	var err error
 	reaction := strings.TrimSpace(r.URL.Query().Get("reaction"))
 	if r.Method == http.MethodPut {
 		var request reactToCommentRequest
@@ -1008,17 +1007,19 @@ func (s *Server) commentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	query := `insert into comment_reactions(comment_id,user_id,reaction)
+		values($1,$2,$3) on conflict do nothing`
 	if r.Method == http.MethodDelete {
-		_, err = tx.Exec(r.Context(), `delete from comment_reactions where comment_id=$1 and user_id=$2 and reaction=$3`, commentID, claims.Subject, reaction)
-	} else {
-		_, err = tx.Exec(r.Context(), `insert into comment_reactions(comment_id,user_id,reaction)
-			values($1,$2,$3) on conflict do nothing`, commentID, claims.Subject, reaction)
+		query = `delete from comment_reactions where comment_id=$1 and user_id=$2 and reaction=$3`
 	}
+	result, err := tx.Exec(r.Context(), query, commentID, claims.Subject, reaction)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "更新评论表态失败")
 		return
 	}
-	if err = enqueueRequestActivityTx(r, tx); err != nil {
+	if result.RowsAffected() == 0 {
+		skipRequestActivity(r)
+	} else if err = enqueueRequestActivityTx(r, tx); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to persist comment interaction activity")
 		return
 	}
