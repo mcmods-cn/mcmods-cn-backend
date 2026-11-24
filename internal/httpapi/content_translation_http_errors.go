@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 )
@@ -21,7 +22,7 @@ func writeContentTranslationEnqueueError(w http.ResponseWriter, subjectID string
 	case errors.Is(err, errContentTranslationSize):
 		writeError(w, http.StatusServiceUnavailable, errContentTranslationSize.Error())
 	default:
-		slog.Error("could not queue content translation", "subject_id", subjectID, "error", err)
+		slog.Error("could not queue content translation", "subject_id", subjectID, "error_class", fmt.Sprintf("%T", err))
 		if errors.Is(err, errContentTranslationActivity) {
 			writeError(w, http.StatusServiceUnavailable, errContentTranslationActivity.Error())
 			return
