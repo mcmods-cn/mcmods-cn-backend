@@ -154,7 +154,7 @@ func normalizeActivityRetentionConfig(config activityRetentionConfig) (activityR
 }
 
 func (s *Server) getActivityRetentionConfig(w http.ResponseWriter, r *http.Request) {
-	config, err := s.activityRetentionConfig(r.Context())
+	config, err := loadActivityRetentionConfig(r.Context(), s.db)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load activity retention configuration")
 		return
@@ -194,20 +194,24 @@ func (s *Server) updateActivityRetentionConfig(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, config)
 }
 
-func (s *Server) activityRetentionConfig(ctx context.Context) (activityRetentionConfig, error) {
-	config := defaultActivityRetentionConfig()
+func loadActivityRetentionConfig(ctx context.Context, db activityRetentionQueryer) (activityRetentionConfig, error) {
 	var raw []byte
-	err := s.db.QueryRow(ctx, `select value from system_settings where key=$1`, activityRetentionSettingKey).Scan(&raw)
-	if err == pgx.ErrNoRows {
-		return config, nil
+	err := db.QueryRow(ctx, `select value from system_settings where key=$1`, activityRetentionSettingKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return defaultActivityRetentionConfig(), nil
 	}
 	if err != nil {
-		return config, err
+		return activityRetentionConfig{}, err
 	}
+	// A saved actions map replaces the installer defaults, including removed overrides.
+	var config *activityRetentionConfig
 	if err = json.Unmarshal(raw, &config); err != nil {
-		return defaultActivityRetentionConfig(), err
+		return activityRetentionConfig{}, err
 	}
-	return normalizeActivityRetentionConfig(config)
+	if config == nil {
+		return activityRetentionConfig{}, errors.New("activity retention configuration must be an object")
+	}
+	return normalizeActivityRetentionConfig(*config)
 }
 
 func parseCleanupBoundary(value string) (*time.Time, error) {
@@ -348,7 +352,7 @@ func (s *Server) previewActivityCleanup(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "at least one allowed activity action is required")
 		return
 	}
-	config, err := s.activityRetentionConfig(r.Context())
+	config, err := loadActivityRetentionConfig(r.Context(), s.db)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load activity cleanup policy")
 		return
@@ -526,7 +530,7 @@ func (s *Server) executeActivityCleanup(w http.ResponseWriter, r *http.Request) 
 			"activity cleanup preview predates exact membership protection; create a new preview", 0, nil)
 		return
 	}
-	config, err := s.activityRetentionConfig(r.Context())
+	config, err := loadActivityRetentionConfig(r.Context(), s.db)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to reload activity cleanup policy")
 		return
@@ -612,11 +616,11 @@ func deleteActivityEventsInBatches(ctx context.Context, db activityCleanupTransa
 	return deleted, ctx.Err()
 }
 
-type activityCleanupFinalizer interface {
+type activityRetentionQueryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func finalizeActivityCleanupRun(ctx context.Context, db activityCleanupFinalizer, runID, status, message string) (int64, error) {
+func finalizeActivityCleanupRun(ctx context.Context, db activityRetentionQueryer, runID, status, message string) (int64, error) {
 	if status != "completed" && status != "failed" {
 		return 0, errors.New("invalid activity cleanup final status")
 	}
@@ -673,18 +677,12 @@ func (worker *ActivityRetentionWorker) prune(ctx context.Context) {
 		defer cancel()
 		_, _ = conn.Exec(unlockCtx, `select pg_advisory_unlock(hashtext('mcmods-activity-retention'))`)
 	}()
-	config := defaultActivityRetentionConfig()
-	var raw []byte
-	if err := conn.QueryRow(ctx, `select value from system_settings where key=$1`, activityRetentionSettingKey).Scan(&raw); err == nil {
-		if json.Unmarshal(raw, &config) != nil {
-			return
-		}
-	} else if !errors.Is(err, pgx.ErrNoRows) {
+	config, err := loadActivityRetentionConfig(ctx, conn)
+	if err != nil {
 		log.Printf("load automatic activity retention policy: %v", err)
 		return
 	}
-	config, err = normalizeActivityRetentionConfig(config)
-	if err != nil || !config.Enabled {
+	if !config.Enabled {
 		return
 	}
 	var recentlyRan bool
