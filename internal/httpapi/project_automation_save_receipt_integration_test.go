@@ -1,7 +1,6 @@
 package httpapi
 
 import (
-	"encoding/json"
 	"net/http"
 	"testing"
 )
@@ -27,13 +26,10 @@ func TestAutomationSaveReceiptAndSettingsCommitTogetherIntegration(t *testing.T)
 	}
 	decode := func(raw []byte) map[string]string {
 		t.Helper()
-		var result struct {
+		result := decodeTEST022Data[struct {
 			Project  struct{ ID string }
 			Settings []struct{ UpdateKind, Interval string }
-		}
-		if err := json.Unmarshal(raw, &result); err != nil {
-			t.Fatal(err)
-		}
+		}](t, raw)
 		if result.Project.ID != f.modCode {
 			t.Fatalf("receipt project=%q", result.Project.ID)
 		}

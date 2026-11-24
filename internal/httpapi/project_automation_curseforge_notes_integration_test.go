@@ -11,6 +11,7 @@ import (
 func TestCurseForgeChangelogRetainsPublishedRevisionWhenProviderUnavailableIntegration(t *testing.T) {
 	f := newTEST017Fixture(t)
 	_, worker, job, _ := f.managed(t, false)
+	seedPublishedMaintenanceModRevision(t, f.ctx, f.db, job.InternalID, job.ProjectPublicID, f.userIDs[f.editor], "active")
 	job.Kind, job.SourceType, job.ExternalID = "changelog", "curseforge", "11"
 	var mode atomic.Int32
 	serveAutomationCurseForgeFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
