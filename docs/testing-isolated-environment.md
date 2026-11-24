@@ -186,7 +186,7 @@ node tools/testing/ai_configuration_browser.mjs "$MCMODS_AI_CONFIG_BROWSER_DIR" 
 
 使用已初始化的隔离环境、干净的三个仓库检出和已安装依赖的独立前端目录。
 [仓内固定的两种加载器样本](../internal/httpapi/testdata/game-20261121/provenance.json)记录生产提交、加载器、输入模组、原包大小与哈希。当前标准镜像与新版开发原包的验证组合及哈希见[当前验收](governance.md#当前版本与验收)。
-下列命令在后端根目录运行。两个仓库变量指向本机检出目录，前端使用空闲的回环端口。
+下列命令在后端根目录运行。将两个仓库变量指向本次构建实际使用的干净检出目录，尤其是在 worktree 中验收时。通用浏览器夹具默认查找后端旁边的同名仓库，要求显式指定前端的专项继续使用该专项变量。前端使用空闲的回环端口。
 
 ```sh
 export MCMODS_AUDIT_FRONTEND_REPO="$(cd ../mcmods-cn-frontend && pwd)"

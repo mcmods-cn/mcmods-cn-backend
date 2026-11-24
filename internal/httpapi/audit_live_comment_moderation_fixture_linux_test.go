@@ -472,14 +472,8 @@ func TestAuditLiveDefaultPolicyCommentModerationFixture(t *testing.T) {
 	if frontend == "" {
 		t.Fatal("declare exact clean frontend checkout")
 	}
-	revisions := map[string]any{}
-	for repo, checkout := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(backend)), "mcmods-cn-frontend": frontend, "mcmods_exporter": "/workspace/mcmods_exporter"} {
-		revision := auditJourneyRevision(checkout)
-		if revision["error"] != nil || revision["dirty"] != false {
-			t.Fatalf("clean exact source required: %s", repo)
-		}
-		revisions[repo] = revision
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(backend)), frontend)
+	revisions := checkouts.revisions(t)
 	directory := os.Getenv("MCMODS_AUDIT_COMMENT_DIR")
 	if !filepath.IsAbs(directory) {
 		t.Fatal("new absolute owned evidence directory required")

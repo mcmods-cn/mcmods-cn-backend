@@ -348,14 +348,8 @@ func TestAuditLiveModFormFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(top)), "mcmods-cn-frontend": frontend, "mcmods_exporter": "/workspace/mcmods_exporter"} {
-		pin := auditJourneyRevision(path)
-		if pin["error"] != nil || pin["dirty"] != false {
-			t.Fatalf("clean source required: %s", name)
-		}
-		revisions[name] = pin
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(top)), frontend)
+	revisions := checkouts.revisions(t)
 	t.Setenv("FRONTEND_ORIGIN", "http://127.0.0.1:3531")
 	unlockDDL := auditGlobalCatalogPGLock(t)
 	t.Cleanup(func() { unlockDDL() })

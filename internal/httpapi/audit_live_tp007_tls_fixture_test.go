@@ -33,14 +33,8 @@ func TestAuditLiveTP007TLSFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(rawTop)), "mcmods-cn-frontend": "/workspace/mcmods-cn-frontend", "mcmods_exporter": "/workspace/mcmods_exporter"} {
-		rev := auditJourneyRevision(path)
-		if rev["error"] != nil || rev["dirty"] != false {
-			t.Fatal("clean source required:", name)
-		}
-		revisions[name] = rev
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(rawTop)), "")
+	revisions := checkouts.revisions(t)
 	if pin := os.Getenv("MCMODS_AUDIT_EXPECT_BACKEND_COMMIT"); pin == "" || revisions["mcmods-cn-backend"].(map[string]any)["commit"] != pin {
 		t.Fatal("full actual backend pin required")
 	}

@@ -40,14 +40,8 @@ func TestAuditLiveTP008Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revisions := map[string]any{}
-	for name, location := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(top)), "mcmods-cn-frontend": "/workspace/mcmods-cn-frontend", "mcmods_exporter": "/workspace/mcmods_exporter"} {
-		revision := auditJourneyRevision(location)
-		if revision["error"] != nil || revision["dirty"] != false {
-			t.Fatalf("clean identified checkout required: %s", name)
-		}
-		revisions[name] = revision
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(top)), "")
+	revisions := checkouts.revisions(t)
 	if pin := os.Getenv("MCMODS_AUDIT_EXPECT_BACKEND_COMMIT"); pin != "" && revisions["mcmods-cn-backend"].(map[string]any)["commit"] != pin {
 		t.Fatal("backend pin mismatch")
 	}

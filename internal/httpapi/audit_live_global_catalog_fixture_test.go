@@ -36,22 +36,8 @@ func TestAuditLiveGlobalCatalogFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frontend := os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
-	if frontend == "" {
-		frontend = "/workspace/mcmods-cn-frontend"
-	}
-	exporter := os.Getenv("MCMODS_AUDIT_EXPORTER_REPO")
-	if exporter == "" {
-		exporter = "/workspace/mcmods_exporter"
-	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(top)), "mcmods-cn-frontend": frontend, "mcmods_exporter": exporter} {
-		revision := auditJourneyRevision(path)
-		if revision["error"] != nil || revision["dirty"] != false {
-			t.Fatalf("clean identified actual checkout required: %s", name)
-		}
-		revisions[name] = revision
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(top)), "")
+	revisions := checkouts.revisions(t)
 	if pin := os.Getenv("MCMODS_AUDIT_EXPECT_BACKEND_COMMIT"); pin != "" && revisions["mcmods-cn-backend"].(map[string]any)["commit"] != pin {
 		t.Fatal("actual compiled backend differs from full commit pin")
 	}

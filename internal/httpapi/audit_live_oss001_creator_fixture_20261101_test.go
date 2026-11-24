@@ -45,14 +45,9 @@ func TestAuditLiveOSS001CreatorAvatar20261101Fixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"backend": strings.TrimSpace(string(raw)), "frontend": frontend, "exporter": "/workspace/mcmods_exporter"} {
-		rev := auditJourneyRevision(path)
-		if rev["dirty"] != false || rev["error"] != nil {
-			t.Fatal("clean pinned source required", name)
-		}
-		revisions[name] = rev
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(raw)), frontend)
+	pins := checkouts.revisions(t)
+	revisions := map[string]any{"backend": pins["mcmods-cn-backend"], "frontend": pins["mcmods-cn-frontend"], "exporter": pins["mcmods_exporter"]}
 	if revisions["backend"].(map[string]any)["commit"] != os.Getenv("MCMODS_AUDIT_EXPECT_BACKEND_COMMIT") {
 		t.Fatal("exact full backend source pin required")
 	}

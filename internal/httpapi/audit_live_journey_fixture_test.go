@@ -45,22 +45,8 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 		t.Fatal("cannot identify actual compiled checkout:", err)
 	}
 	backendCheckout := strings.TrimSpace(string(checkout))
-	frontendCheckout := os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
-	if frontendCheckout == "" {
-		frontendCheckout = filepath.Join(filepath.Dir(backendCheckout), "mcmods-cn-frontend")
-	}
-	exporterCheckout := os.Getenv("MCMODS_AUDIT_EXPORTER_REPO")
-	if exporterCheckout == "" {
-		exporterCheckout = filepath.Join(filepath.Dir(backendCheckout), "mcmods_exporter")
-	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": backendCheckout, "mcmods-cn-frontend": frontendCheckout, "mcmods_exporter": exporterCheckout} {
-		revision := auditJourneyRevision(path)
-		if revision["error"] != nil || revision["dirty"] != false {
-			t.Fatalf("formal live fixture requires clean identified checkout: %s", name)
-		}
-		revisions[name] = revision
-	}
+	checkouts := auditLiveSourceCheckouts(backendCheckout, "")
+	revisions := checkouts.revisions(t)
 	if expected := os.Getenv("MCMODS_AUDIT_EXPECT_BACKEND_COMMIT"); expected != "" && revisions["mcmods-cn-backend"].(map[string]any)["commit"] != expected {
 		t.Fatal("actual backend checkout HEAD differs from pinned full commit")
 	}
@@ -80,7 +66,7 @@ func TestAuditLiveGameJourneyFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sample := loadJourneyGameSample(t, packageDirectory, exporterCheckout)
+	sample := loadJourneyGameSample(t, packageDirectory, checkouts.exporter)
 	frontendOrigin := os.Getenv("MCMODS_AUDIT_FRONTEND_ORIGIN")
 	if frontendOrigin == "" {
 		frontendOrigin = "http://127.0.0.1:3311"
@@ -409,23 +395,6 @@ func auditJourneyWriteJSON(t *testing.T, path string, value any) {
 	if err = os.Rename(temporary, path); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func auditJourneyRevision(directory string) map[string]any {
-	head, err := exec.Command("git", "-C", directory, "rev-parse", "HEAD").Output()
-	if err != nil {
-		return map[string]any{"error": "git revision unavailable"}
-	}
-	diff, err := exec.Command("git", "-C", directory, "diff", "--binary", "HEAD").Output()
-	if err != nil {
-		return map[string]any{"error": "git source diff unavailable"}
-	}
-	state, err := exec.Command("git", "-C", directory, "status", "--porcelain").Output()
-	if err != nil {
-		return map[string]any{"error": "git source status unavailable"}
-	}
-	digest := sha256.Sum256(diff)
-	return map[string]any{"checkoutPath": directory, "commit": strings.TrimSpace(string(head)), "dirty": len(state) > 0, "trackedDiffSha256": hex.EncodeToString(digest[:])}
 }
 
 // The delay occurs after the real server has authenticated and read its actual

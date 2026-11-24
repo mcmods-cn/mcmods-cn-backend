@@ -48,22 +48,8 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 		t.Fatal("cannot identify actual compiled checkout:", err)
 	}
 	backendCheckout := strings.TrimSpace(string(checkout))
-	frontendCheckout := os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
-	if frontendCheckout == "" {
-		frontendCheckout = "/workspace/mcmods-cn-frontend"
-	}
-	exporterCheckout := os.Getenv("MCMODS_AUDIT_EXPORTER_REPO")
-	if exporterCheckout == "" {
-		exporterCheckout = "/workspace/mcmods_exporter"
-	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": backendCheckout, "mcmods-cn-frontend": frontendCheckout, "mcmods_exporter": exporterCheckout} {
-		revision := auditJourneyRevision(path)
-		if revision["error"] != nil || revision["dirty"] != false {
-			t.Fatalf("formal live fixture requires clean identified checkout: %s", name)
-		}
-		revisions[name] = revision
-	}
+	checkouts := auditLiveSourceCheckouts(backendCheckout, "")
+	revisions := checkouts.revisions(t)
 	for name, key := range map[string]string{"mcmods-cn-backend": "MCMODS_AUDIT_EXPECT_BACKEND_COMMIT", "mcmods-cn-frontend": "MCMODS_AUDIT_EXPECT_FRONTEND_COMMIT", "mcmods_exporter": "MCMODS_AUDIT_EXPECT_EXPORTER_COMMIT"} {
 		expected := os.Getenv(key)
 		if len(expected) != 40 || revisions[name].(map[string]any)["commit"] != expected {
@@ -136,7 +122,7 @@ func TestAuditFinalGameJourneyFixture(t *testing.T) {
 			SHA256 string
 		}
 	}
-	if !filepath.IsAbs(manifestPath) || err != nil || len(manifestSHA) != 64 || hex.EncodeToString(manifestDigest[:]) != manifestSHA || json.Unmarshal(manifestBytes, &build) != nil || build.Source != frontendCheckout || build.SourceCommit != revisions["mcmods-cn-frontend"].(map[string]any)["commit"] || build.BuildID != "TEaEG88F59eszNYgSljzy" || build.EmbeddedAPIOrigin != frontendOrigin || build.EmbeddedSiteOrigin != frontendOrigin || !filepath.IsAbs(build.Deploy) {
+	if !filepath.IsAbs(manifestPath) || err != nil || len(manifestSHA) != 64 || hex.EncodeToString(manifestDigest[:]) != manifestSHA || json.Unmarshal(manifestBytes, &build) != nil || build.Source != checkouts.frontend || build.SourceCommit != revisions["mcmods-cn-frontend"].(map[string]any)["commit"] || build.BuildID != "TEaEG88F59eszNYgSljzy" || build.EmbeddedAPIOrigin != frontendOrigin || build.EmbeddedSiteOrigin != frontendOrigin || !filepath.IsAbs(build.Deploy) {
 		t.Fatal("exact clean-source3431 production artifact/manifest required; no runtime build-origin override")
 	}
 	buildID, err := os.ReadFile(filepath.Join(build.Deploy, ".next", "BUILD_ID"))

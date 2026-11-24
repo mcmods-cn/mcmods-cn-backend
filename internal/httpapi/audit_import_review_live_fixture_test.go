@@ -46,14 +46,8 @@ func auditGR004MaybeHoldBrowser(t *testing.T, f auditFixGRFixture, reviewer, rev
 	if !filepath.IsAbs(frontend) {
 		t.Fatal("clean absolute frontend checkout required")
 	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(top)), "mcmods-cn-frontend": frontend, "mcmods_exporter": "/workspace/mcmods_exporter"} {
-		r := auditJourneyRevision(path)
-		if r["error"] != nil || r["dirty"] != false {
-			t.Fatalf("clean checkout required: %s", name)
-		}
-		revisions[name] = r
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(top)), frontend)
+	revisions := checkouts.revisions(t)
 	var schema, jobID, sourceSHA string
 	if err := f.db.QueryRow(f.ctx, `select current_schema(),job.id,file.sha256 from catalog_import_revisions revision
 		join catalog_import_jobs job on job.id=revision.job_id

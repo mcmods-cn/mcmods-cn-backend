@@ -57,17 +57,8 @@ func TestAuditLiveCMP007MixedModpackFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 	frontend := os.Getenv("MCMODS_AUDIT_CMP007_FRONTEND_REPO")
-	if frontend == "" {
-		frontend = "/workspace/mcmods-cn-frontend"
-	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(top)), "mcmods-cn-frontend": frontend, "mcmods_exporter": "/workspace/mcmods_exporter"} {
-		rev := auditJourneyRevision(path)
-		if rev["error"] != nil || rev["dirty"] != false {
-			t.Fatalf("clean identified checkout required: %s", name)
-		}
-		revisions[name] = rev
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(top)), frontend)
+	revisions := checkouts.revisions(t)
 	frontendOrigin := "http://127.0.0.1:3351"
 	t.Setenv("FRONTEND_ORIGIN", frontendOrigin)
 	unlock := auditGlobalCatalogPGLock(t)

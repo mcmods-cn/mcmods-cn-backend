@@ -108,18 +108,8 @@ func TestAuditLiveRecipeGeometryFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	frontend := os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
-	if frontend == "" {
-		frontend = "/workspace/mcmods-cn-frontend"
-	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(top)), "mcmods-cn-frontend": frontend, "mcmods_exporter": "/workspace/mcmods_exporter"} {
-		r := auditJourneyRevision(path)
-		if r["error"] != nil || r["dirty"] != false {
-			t.Fatalf("clean checkout required: %s", name)
-		}
-		revisions[name] = r
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(top)), "")
+	revisions := checkouts.revisions(t)
 	directory := os.Getenv("MCMODS_AUDIT_RECIPE_GEOMETRY_DIR")
 	if !filepath.IsAbs(directory) {
 		t.Fatal("fresh absolute output directory required")

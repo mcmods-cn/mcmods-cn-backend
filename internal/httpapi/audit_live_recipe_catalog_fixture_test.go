@@ -33,17 +33,8 @@ func TestAuditLiveRecipeCatalogFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revisions := map[string]any{}
-	for name, path := range map[string]string{"mcmods-cn-backend": strings.TrimSpace(string(top)), "mcmods-cn-frontend": "/workspace/mcmods-cn-frontend", "mcmods_exporter": "/workspace/mcmods_exporter"} {
-		if name == "mcmods-cn-frontend" && os.Getenv("MCMODS_AUDIT_FRONTEND_REPO") != "" {
-			path = os.Getenv("MCMODS_AUDIT_FRONTEND_REPO")
-		}
-		r := auditJourneyRevision(path)
-		if r["error"] != nil || r["dirty"] != false {
-			t.Fatalf("clean checkout required: %s", name)
-		}
-		revisions[name] = r
-	}
+	checkouts := auditLiveSourceCheckouts(strings.TrimSpace(string(top)), "")
+	revisions := checkouts.revisions(t)
 	if pin := os.Getenv("MCMODS_AUDIT_EXPECT_BACKEND_COMMIT"); pin != "" && revisions["mcmods-cn-backend"].(map[string]any)["commit"] != pin {
 		t.Fatal("wrong compiled backend pin")
 	}
