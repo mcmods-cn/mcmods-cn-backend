@@ -6,11 +6,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"mcmods-cn-backend/internal/activity"
 	"mcmods-cn-backend/internal/config"
 	"mcmods-cn-backend/internal/database"
 	"mcmods-cn-backend/internal/querycache"
@@ -86,14 +88,20 @@ func TestModRevisionReviewReadbackFailureRollsBackIntegration(t *testing.T) {
 	defer cache.Close()
 	server := &Server{db: pool, cache: cache, cfg: cfg}
 	grantTEST044Permissions(t, ctx, pool, reviewerID, "project.review."+broken.projectID, "project.review."+valid.projectID)
-	review := func(target fixture) *httptest.ResponseRecorder {
+	review := func(target fixture, slug string) *httptest.ResponseRecorder {
 		t.Helper()
-		return performTEST044Request(ctx, server.requireAuth(server.reviewModRevision), reviewerToken,
-			http.MethodPatch, "/api/v1/mods/revisions/"+target.revisionID,
-			`{"status":"rejected","note":"readback check"}`, map[string]string{"revisionId": target.revisionID})
+		mux := http.NewServeMux()
+		mux.Handle("PATCH /api/v1/mods/{siteId}/revisions/{revisionId}", server.requireAuth(server.reviewModRevision))
+		request := httptest.NewRequestWithContext(context.WithValue(ctx, requestActivityContextKey, &requestActivity{}),
+			http.MethodPatch, "/api/v1/mods/"+slug+"/revisions/"+target.revisionID,
+			strings.NewReader(`{"status":"rejected","note":"readback check"}`))
+		request.Header.Set("Authorization", "Bearer "+reviewerToken)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		return response
 	}
 
-	brokenResponse := review(broken)
+	brokenResponse := review(broken, "readback-broken")
 	if brokenResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("readback decode failure returned %d: %s", brokenResponse.Code, brokenResponse.Body.String())
 	}
@@ -108,7 +116,19 @@ func TestModRevisionReviewReadbackFailureRollsBackIntegration(t *testing.T) {
 		t.Fatalf("failed readback committed status=%q rejectedEvents=%d", brokenStatus, brokenEvents)
 	}
 
-	validResponse := review(valid)
+	// A queue link opened before a rename must no longer select this revision.
+	if _, err = pool.Exec(ctx, `update mods set slug='renamed01' where project_code=$1`, valid.projectID); err != nil {
+		t.Fatal(err)
+	}
+	if stale := review(valid, "readback-valid"); stale.Code != http.StatusNotFound {
+		t.Fatalf("stale parent URL returned %d; wanted 404 and a pending revision", stale.Code)
+	}
+	var pending bool
+	if err = pool.QueryRow(ctx, `select status='pending' from change_requests where id=$1`, valid.changeRequestID).Scan(&pending); err != nil || !pending {
+		t.Fatalf("stale parent URL changed the review: %v", err)
+	}
+
+	validResponse := review(valid, "renamed01")
 	if validResponse.Code != http.StatusOK {
 		t.Fatalf("valid review returned %d: %s", validResponse.Code, validResponse.Body.String())
 	}
@@ -131,4 +151,10 @@ func TestModRevisionReviewReadbackFailureRollsBackIntegration(t *testing.T) {
 	if validStatus != "rejected" || validEvents != 1 {
 		t.Fatalf("valid review status=%q rejectedEvents=%d", validStatus, validEvents)
 	}
+	var activityID string
+	if err = pool.QueryRow(ctx, `select object_public_id from activity_event_outbox
+		where user_id=$1 and action_id=$2 and object_type_id=$3`, reviewerID, activity.ActionEdit, activity.ObjectReview).Scan(&activityID); err != nil || activityID != valid.revisionID {
+		t.Fatalf("review activity associated with %q, want revision %q: %v", activityID, valid.revisionID, err)
+	}
+
 }
