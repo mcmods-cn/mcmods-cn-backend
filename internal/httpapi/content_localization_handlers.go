@@ -79,7 +79,12 @@ type enqueuedContentTranslation struct {
 	Status  string
 }
 
-type contentVisibilityBypassKey struct{}
+type ownedLocalizationRouteKey struct{}
+
+func ownedLocalizationRoute(ctx context.Context) string {
+	kind, _ := ctx.Value(ownedLocalizationRouteKey{}).(string)
+	return kind
+}
 
 func (s *Server) catalogEntityContent(w http.ResponseWriter, r *http.Request) {
 	publicID := strings.ToLower(strings.TrimSpace(r.PathValue("publicId")))
@@ -179,7 +184,14 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	defer tx.Rollback(r.Context())
-	entity, revisionEntityID, err := loadEditableContentSubjectTx(r.Context(), tx, publicID)
+	// Skin editing already locks the account before locking an asset. Key-share
+	// keeps that order while allowing ordinary status/version updates; the
+	// actual session and grants are read after the target and revision locks.
+	if _, err = tx.Exec(r.Context(), `select id from users where id=$1 for key share`, currentClaims(r).Subject); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to read localization actor")
+		return
+	}
+	entity, ownerID, err := loadEditableContentSubjectTx(r.Context(), tx, publicID)
 	if errors.Is(err, pgx.ErrNoRows) || errors.Is(err, errCatalogEditorNotFound) {
 		writeError(w, http.StatusNotFound, "localized content subject does not exist")
 		return
@@ -218,27 +230,44 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, "failed to encode localized content revision")
 		return
 	}
-	claims := currentClaims(r)
-	reviewRequired := contentLocalizationReviewRequired(loadReviewConfig(r.Context(), tx), entity.EntityType)
-	if catalogMutationBypassesReview(claims) {
-		reviewRequired = false
-	}
-	reviewStatus := "approved"
-	if reviewRequired {
-		reviewStatus = "pending"
-	}
 	reason := strings.TrimSpace(request.Reason)
 	if reason == "" {
 		reason = "Localized content edit"
 	}
-	created, err := createContentRevisionTx(r.Context(), tx, createContentRevisionParams{
-		EntityType: entity.EntityType, EntityID: revisionEntityID, AggregateType: catalogAggregateLocalization,
+	params := createContentRevisionParams{
+		EntityType: entity.EntityType, EntityID: entity.EntityID, AggregateType: catalogAggregateLocalization,
 		AggregateKey: contentLocalizationAggregateKey(publicID, entity.EntityType, localization.Locale),
-		BaseRevision: currentRevisionID, Snapshot: rawSnapshot, Reason: reason, ActorID: claims.Subject,
-		Source: "user", Status: reviewStatus,
+		BaseRevision: currentRevisionID, Snapshot: rawSnapshot, Reason: reason, Source: "user",
 		Metadata: map[string]any{"publicId": publicID, "entityType": entity.EntityType, "locale": localization.Locale, "operation": "edit"},
 		Request:  r,
-	})
+	}
+	if err = lockContentRevisionTx(r.Context(), tx, &params); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "failed to lock localized content")
+		return
+	}
+	claims, ok := requireCurrentWriteActor(w, r, tx)
+	if !ok {
+		return
+	}
+	if kind := ownedLocalizationRoute(r.Context()); kind != "" {
+		if !canManageOwnedLocalization(kind, ownerID, claims) {
+			writeError(w, http.StatusForbidden, "permission denied")
+			return
+		}
+	} else if !claimsAllow(claims, "content.write") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
+	reviewStatus := "approved"
+	if contentLocalizationReviewRequired(loadReviewConfig(r.Context(), tx), entity.EntityType) && !catalogMutationBypassesReview(claims) {
+		reviewStatus = "pending"
+	}
+	params.ActorID, params.Status = claims.Subject, reviewStatus
+	created, err := insertLockedContentRevisionTx(r.Context(), tx, params)
+	if errors.Is(err, errReviewInProgress) {
+		writeError(w, http.StatusConflict, "a localization edit is already waiting for review")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create localized content revision")
 		return
@@ -278,53 +307,39 @@ func (s *Server) updateCatalogEntityContent(w http.ResponseWriter, r *http.Reque
 
 func loadEditableContentSubjectTx(ctx context.Context, tx pgx.Tx, publicID string) (catalogEntityLocalizationSet, int64, error) {
 	var entity catalogEntityLocalizationSet
-	if err := tx.QueryRow(ctx, `select route.internal_id,route.public_id,route.entity_type,subject.default_locale
-		from public_routes route join content_subjects subject
-		 on subject.subject_id=route.internal_id and subject.subject_type=route.entity_type
-		where route.public_id=$1 for update of subject`, publicID).Scan(
-		&entity.EntityID, &entity.PublicID, &entity.EntityType, &entity.DefaultLocale,
-	); err != nil {
+	if err := tx.QueryRow(ctx, `select internal_id,public_id,entity_type from public_routes where public_id=$1`,
+		publicID).Scan(&entity.EntityID, &entity.PublicID, &entity.EntityType); err != nil {
 		return entity, 0, err
 	}
+	kind := ownedLocalizationRoute(ctx)
+	if kind != "" && kind != entity.EntityType {
+		return entity, 0, pgx.ErrNoRows
+	}
+	// Domain editors lock the asset before replacing its localizations. Hold
+	// the same parent through revision creation, even for the first locale.
+	var row pgx.Row
 	switch entity.EntityType {
 	case "mod":
-		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from mods where id=$1 and review_status='approved')`, entity.EntityID).Scan(&exists); err != nil || !exists {
-			if err == nil {
-				err = pgx.ErrNoRows
-			}
-			return entity, 0, err
-		}
+		row = tx.QueryRow(ctx, `select 0 from mods where id=$1 and review_status='approved' for share`, entity.EntityID)
 	case "blueprint":
-		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from blueprints where id=$1 and status<>'deleted'
-			and ($2 or review_status in ('not_required','approved')))`, entity.EntityID, contentVisibilityBypassed(ctx)).Scan(&exists); err != nil || !exists {
-			if err == nil {
-				err = pgx.ErrNoRows
-			}
-			return entity, 0, err
-		}
+		row = tx.QueryRow(ctx, `select owner_id from blueprints where id=$1 and status<>'deleted'
+			and ($2 or review_status in ('not_required','approved')) for share`, entity.EntityID, kind == "blueprint")
 	case "skin":
-		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from skin_assets where id=$1 and status='active')`, entity.EntityID).Scan(&exists); err != nil || !exists {
-			if err == nil {
-				err = pgx.ErrNoRows
-			}
-			return entity, 0, err
-		}
+		row = tx.QueryRow(ctx, `select owner_id from skin_assets where id=$1 and status='active'
+			and ($2 or (visibility<>'private' and review_status='approved')) for share`, entity.EntityID, kind == "skin")
 	case "resource", "tag", "recipe_type", "recipe_template", "recipe":
-		var exists bool
-		if err := tx.QueryRow(ctx, `select exists(select 1 from catalog_entities where id=$1 and public_id=$2
-			and entity_type=$3 and status='active' and archived_at is null)`, entity.EntityID, entity.PublicID, entity.EntityType).Scan(&exists); err != nil || !exists {
-			if err == nil {
-				err = pgx.ErrNoRows
-			}
-			return entity, 0, err
-		}
+		row = tx.QueryRow(ctx, `select 0 from catalog_entities where id=$1 and public_id=$2 and entity_type=$3
+			and status='active' and archived_at is null for share`, entity.EntityID, entity.PublicID, entity.EntityType)
 	default:
 		return entity, 0, errCatalogEditorNotFound
 	}
-	return entity, entity.EntityID, nil
+	var ownerID int64
+	if err := row.Scan(&ownerID); err != nil {
+		return entity, 0, err
+	}
+	err := tx.QueryRow(ctx, `select default_locale from content_subjects where subject_id=$1 and subject_type=$2 for update`,
+		entity.EntityID, entity.EntityType).Scan(&entity.DefaultLocale)
+	return entity, ownerID, err
 }
 
 func contentLocalizationReviewRequired(config reviewConfig, entityType string) bool {
@@ -437,7 +452,7 @@ func (s *Server) catalogContentTranslationResult(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusInternalServerError, "translation task data is invalid")
 		return
 	}
-	entity, sourceErr := s.loadCatalogEntityLocalizations(r.Context(), payload.PublicID)
+	entity, sourceErr := loadVisibleLocalizationSubject(r.Context(), s.db, payload.PublicID)
 	if errors.Is(sourceErr, pgx.ErrNoRows) || (sourceErr == nil && entity.EntityType == "resource" && !claimsAllow(claims, "global_resource.view")) {
 		writeError(w, http.StatusNotFound, "translation source not found")
 		return
@@ -478,11 +493,11 @@ func loadVisibleLocalizationSubject(ctx context.Context, query databaseQuery, pu
 		  and (route.entity_type<>'mod' or exists(
 		    select 1 from mods where id=route.internal_id and review_status='approved'
 		  ))
-		  and (route.entity_type<>'blueprint' or $2 or exists(
+		  and (route.entity_type<>'blueprint' or $2='blueprint' or exists(
 		    select 1 from blueprints where id=route.internal_id and status<>'deleted'
 		      and review_status in ('not_required','approved')
 		  ))
-		  and (route.entity_type<>'skin' or $2 or exists(
+		  and (route.entity_type<>'skin' or $2='skin' or exists(
 		    select 1 from skin_assets where id=route.internal_id and status='active'
 		      and review_status='approved' and visibility<>'private'
 		  ))
@@ -496,7 +511,7 @@ func loadVisibleLocalizationSubject(ctx context.Context, query databaseQuery, pu
 		  and (route.entity_type<>'recipe' or exists(
 		    select 1 from recipes recipe join catalog_entities parent on parent.id=recipe.recipe_type_id
 		    where recipe.entity_id=route.internal_id and parent.status='active' and parent.archived_at is null
-		  ))`, publicID, contentVisibilityBypassed(ctx)).Scan(
+		  ))`, publicID, ownedLocalizationRoute(ctx)).Scan(
 		&result.EntityID, &result.PublicID, &result.EntityType, &result.CanonicalPath, &result.DefaultLocale,
 	)
 	if err != nil {
@@ -505,7 +520,7 @@ func loadVisibleLocalizationSubject(ctx context.Context, query databaseQuery, pu
 	// Public catalog localization routes use the same publication policy as
 	// their list/detail counterparts. Technical resource administration retains
 	// its separate global_resource.view permission boundary.
-	if !contentVisibilityBypassed(ctx) {
+	if ownedLocalizationRoute(ctx) == "" {
 		switch result.EntityType {
 		case "tag", "recipe_type", "recipe_template", "recipe":
 			visible, visibilityErr := catalogEntityIsPublic(ctx, query, result.EntityID, result.EntityType)
@@ -578,11 +593,6 @@ func (s *Server) catalogContentCanonicalPath(ctx context.Context, entityType, pu
 		}
 	}
 	return "/content/" + escapedID
-}
-
-func contentVisibilityBypassed(ctx context.Context) bool {
-	value, _ := ctx.Value(contentVisibilityBypassKey{}).(bool)
-	return value
 }
 
 func (s *Server) requestContentLocales(r *http.Request) (string, string) {

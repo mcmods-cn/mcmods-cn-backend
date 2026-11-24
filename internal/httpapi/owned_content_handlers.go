@@ -7,7 +7,20 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
+
+func canManageOwnedLocalization(kind string, ownerID int64, claims security.Claims) bool {
+	switch kind {
+	case "skin":
+		return claims.Subject == ownerID || isSkinAdmin(claims)
+	case "blueprint":
+		return claims.Subject == ownerID || claimsAllow(claims, "admin.*")
+	default:
+		return false
+	}
+}
 
 func (s *Server) ownedSkinContent(w http.ResponseWriter, r *http.Request) {
 	publicID := normalizedSkinPublicID(r.PathValue("publicId"))
@@ -22,11 +35,11 @@ func (s *Server) ownedSkinContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load skin asset")
 		return
 	}
-	if claims.Subject != ownerID && !isSkinAdmin(claims) {
+	if !canManageOwnedLocalization("skin", ownerID, claims) {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	r = r.WithContext(context.WithValue(r.Context(), contentVisibilityBypassKey{}, true))
+	r = r.WithContext(context.WithValue(r.Context(), ownedLocalizationRouteKey{}, "skin"))
 	if r.Method == http.MethodGet {
 		s.catalogEntityContent(w, r)
 		return
@@ -47,11 +60,11 @@ func (s *Server) ownedBlueprintContent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load blueprint")
 		return
 	}
-	if claims.Subject != ownerID && !claimsAllow(claims, "admin.*") {
+	if !canManageOwnedLocalization("blueprint", ownerID, claims) {
 		writeError(w, http.StatusForbidden, "permission denied")
 		return
 	}
-	r = r.WithContext(context.WithValue(r.Context(), contentVisibilityBypassKey{}, true))
+	r = r.WithContext(context.WithValue(r.Context(), ownedLocalizationRouteKey{}, "blueprint"))
 	if r.Method == http.MethodGet {
 		s.catalogEntityContent(w, r)
 		return

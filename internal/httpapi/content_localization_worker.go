@@ -71,11 +71,11 @@ func persistCatalogContentTranslationTx(
 	if alreadyRecorded {
 		return nil
 	}
-	entity, entityID, err := loadEditableContentSubjectTx(ctx, tx, payload.PublicID)
+	entity, _, err := loadEditableContentSubjectTx(ctx, tx, payload.PublicID)
 	if err != nil {
 		return fmt.Errorf("load translated content subject: %w", err)
 	}
-	entityType := entity.EntityType
+	entityType, entityID := entity.EntityType, entity.EntityID
 	if entityID != payload.EntityID {
 		return errors.New("content translation subject identity changed")
 	}

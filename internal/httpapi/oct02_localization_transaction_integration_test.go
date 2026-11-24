@@ -36,7 +36,16 @@ func TestOCT02HumanLocalizationReadsReviewPolicyWithinSingleConnectionTransactio
 	defer cancel()
 	r := httptest.NewRequest(http.MethodPut, "/api/v1/content/"+publicID, strings.NewReader(`{"locale":"en-US","name":"Synthetic localization","contentMarkdown":"Synthetic content","reason":"Synthetic single connection"}`))
 	r.SetPathValue("publicId", publicID)
-	r = r.WithContext(context.WithValue(ctx, claimsContextKey, security.Claims{Subject: f.userIDs[f.editor], PermissionRules: []security.PermissionRule{{Code: "admin.*", Allow: true}}}))
+	grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "content.write", "content.no-review")
+	server := f.origin.Config.Handler.(*Server)
+	claims, err := security.ParseToken(server.cfg.JWTSecret, f.editor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.resolveClaimsSubject(f.ctx, &claims); err != nil {
+		t.Fatal(err)
+	}
+	r = r.WithContext(context.WithValue(ctx, claimsContextKey, claims))
 	w := httptest.NewRecorder()
 	(&Server{db: pool}).updateCatalogEntityContent(w, r)
 	if w.Code != http.StatusOK {
