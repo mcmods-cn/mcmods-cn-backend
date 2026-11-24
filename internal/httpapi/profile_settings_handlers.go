@@ -111,7 +111,7 @@ func (s *Server) updateProfileConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getUserProfileSettings(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.loadUserProfileSettings(r.Context(), currentClaims(r).Subject)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取用户设置失败")
+		writeAPIError(w, http.StatusServiceUnavailable, "PROFILE_SETTINGS_UNAVAILABLE", "暂时无法读取用户设置，请稍后重试", 0, nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, settings)
@@ -356,7 +356,8 @@ func (s *Server) updateUserProfileSettings(w http.ResponseWriter, r *http.Reques
 	s.cache.Delete(r.Context(), publicUserCardCacheKey(claims.Subject))
 	settings, err := s.loadUserProfileSettings(r.Context(), claims.Subject)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "读取用户设置失败")
+		writeAPIError(w, http.StatusServiceUnavailable, "PROFILE_SETTINGS_REFRESH_FAILED", "用户设置已保存，请重新加载用户设置", 0,
+			map[string]any{"committed": true})
 		return
 	}
 	writeJSON(w, http.StatusOK, settings)
@@ -387,9 +388,13 @@ func (s *Server) loadUserProfileSettings(ctx context.Context, userID int64) (use
 	onlineActive := s.cache.UsersOnline(ctx, []int64{userID}, time.Now(), s.cache.Config().PresenceTTL)[userID]
 	response.OnlineStatus = mapPublicOnlineVisibility(response.ShowOnlineStatus, onlineActive)
 	response.CardStatisticOptions = append([]string(nil), publicCardStatisticOptionKeys...)
-	response.MessageReceive = s.userHasPermission(ctx, userID, "user.message.receive")
-	response.CanUpdateAvatar = s.userHasPermission(ctx, userID, "user.avatar.update")
-	response.CanUseAnimatedAvatar = s.userHasPermission(ctx, userID, "user.avatar.animated")
+	_, permissions, err := s.resolveUserRootPermissions(ctx, userID)
+	if err != nil {
+		return response, err
+	}
+	response.MessageReceive = permissionRulesAllow(permissions, "user.message.receive")
+	response.CanUpdateAvatar = permissionRulesAllow(permissions, "user.avatar.update")
+	response.CanUseAnimatedAvatar = permissionRulesAllow(permissions, "user.avatar.animated")
 	return response, nil
 }
 
