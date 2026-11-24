@@ -32,6 +32,10 @@ func completedOSSByteBindingForUploadTx(ctx context.Context, tx pgx.Tx, cfg ossC
 
 func (s *Server) writeCompletedReportEvidence(w http.ResponseWriter, r *http.Request, fileID int64, req ossCompleteUploadRequest) {
 	evidenceID, status, err := s.restoreReportEvidenceForCompletedOSSFile(r.Context(), fileID, currentClaims(r).Subject, req)
+	if errors.Is(err, errReportEvidenceRetired) {
+		writeError(w, http.StatusGone, "举报附件已进入清理流程")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "恢复已完成举报附件失败")
 		return

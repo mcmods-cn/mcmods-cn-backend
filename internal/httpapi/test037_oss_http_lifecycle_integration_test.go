@@ -543,6 +543,11 @@ func TestTEST037ReportUploadRegistrationAndBindingFaultsRollbackFullHTTPIntegrat
 		t.Fatalf("report actual facts=%d/%d/%d/%d", reports, snapshots, bound, files)
 	}
 	before = f.facts(t)
+	repeated = decodeTEST022Data[completion](t, f.require(t, f.editor, http.MethodPost, "/api/v1/reports/evidence/uploads/complete", ticket.completion(), 200))
+	if !repeated.Idempotent || repeated.ID != first.ID || repeated.EvidenceID != first.ID {
+		t.Fatalf("already bound attachment receipt changed: %+v", repeated)
+	}
+	f.unchanged(t, before)
 	f.require(t, f.otherEditor, http.MethodPost, "/api/v1/reports", report, 400)
 	f.require(t, f.otherEditor, http.MethodPost, "/api/v1/reports/evidence/"+first.ID+"/access", nil, 404)
 	f.unchanged(t, before)
@@ -558,6 +563,13 @@ func TestTEST037ReportUploadRegistrationAndBindingFaultsRollbackFullHTTPIntegrat
 	if !bytes.Equal(f.get(t, access.URL, 200), raw) {
 		t.Fatal("bound evidence download differs from actual uploaded bytes")
 	}
+	if _, err := f.db.Exec(f.ctx, `update report_evidence e set status='pending_delete',scan_status=file.scan_status
+		from oss_files file where e.public_id=$1 and e.object_key=file.object_key`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	before = f.facts(t)
+	f.require(t, f.editor, http.MethodPost, "/api/v1/reports/evidence/uploads/complete", ticket.completion(), 410)
+	f.unchanged(t, before)
 }
 
 func (f test037Fixture) oneMiBQuota(t *testing.T, token string) {

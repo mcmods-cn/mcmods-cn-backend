@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v5"
 	"net/http"
+
+	"github.com/jackc/pgx/v5"
 )
+
+var errReportEvidenceRetired = errors.New("report evidence is no longer available")
 
 func (s *Server) restoreReportEvidenceForCompletedOSSFile(
 	ctx context.Context,
@@ -33,14 +36,19 @@ func (s *Server) restoreReportEvidenceForCompletedOSSFile(
 	}
 	var evidenceID, evidenceOriginalName, evidenceContentType, evidenceSHA, evidenceScanStatus, evidenceStatus string
 	var evidenceUploaderID, evidenceByteSize int64
+	// Cleanup locks evidence before the file. The file lock already serializes
+	// missing-metadata recovery, and a receipt only reads an existing row.
 	err = tx.QueryRow(ctx, `select public_id,uploader_id,original_name,content_type,byte_size,sha256,scan_status,status
-		from report_evidence where object_key=$1 for update`, actualObjectKey).
+		from report_evidence where object_key=$1`, actualObjectKey).
 		Scan(&evidenceID, &evidenceUploaderID, &evidenceOriginalName, &evidenceContentType, &evidenceByteSize,
 			&evidenceSHA, &evidenceScanStatus, &evidenceStatus)
 	if err == nil {
 		if evidenceUploaderID != uploaderID || evidenceOriginalName != originalName || evidenceContentType != contentType ||
-			evidenceByteSize != byteSize || evidenceSHA != sha256 || evidenceScanStatus != scanStatus || evidenceStatus != "temporary" {
+			evidenceByteSize != byteSize || evidenceSHA != sha256 || evidenceScanStatus != scanStatus {
 			return "", "", errors.New("completed report evidence identity conflicts with its OSS file")
+		}
+		if evidenceStatus != "temporary" && evidenceStatus != "bound" {
+			return "", "", errReportEvidenceRetired
 		}
 		if err = tx.Commit(ctx); err != nil {
 			return "", "", err

@@ -1005,16 +1005,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 		}
 		if found {
 			if isReportEvidence {
-				evidenceID, evidenceScanStatus, recoveryErr := s.restoreReportEvidenceForCompletedOSSFile(
-					r.Context(), existingFileID, currentClaims(r).Subject, req,
-				)
-				if recoveryErr != nil {
-					writeError(w, http.StatusInternalServerError, "恢复已完成举报附件失败")
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{
-					"id": evidenceID, "evidenceId": evidenceID, "scanStatus": evidenceScanStatus, "idempotent": true,
-				})
+				s.writeCompletedReportEvidence(w, r, existingFileID, req)
 				return
 			}
 			response, responseErr := s.completedOSSUploadResponse(r.Context(), cfg, existing)
