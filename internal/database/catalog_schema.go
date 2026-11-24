@@ -354,7 +354,7 @@ func catalogSchemaStatements() []string {
 			alternative_index integer not null,
 			resource_id bigint references game_resources(entity_id) on delete set null,
 			raw_resource_id text not null default '',
-			amount double precision not null default 1,
+			amount double precision check(amount>=0 and amount<=9007199254740991),
 			ingredient_kind text not null,
 			ingredient_type text not null,
 			unique_id text not null default '',

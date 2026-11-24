@@ -25,6 +25,10 @@
 
 本轮扩展 `1.6.0` 可接受的原版资料，沿用现有任务唯一键。对于原来因未登记字段失败的任务，创建者可对仍有效的原上传按相同项目、目标版本和覆盖选择再发起导入。`createModExportJob` 在事务里将该任务重新排队。已回收的原文件需要从本地重新上传，保留新的来源绑定。既有公开修订和审核历史通过原有流程维护。
 
+## JEI 配方候选数量
+
+当前 categories v7 的配方中，`count` 和 `amount` 都缺失时，目录和绘制 API 返回 `amount: null`；显式 0 保留为 0。物品堆使用整数数量，两字段同时存在时必须相等。负数、非法数值及显式 JSON null 会使导入失败。已支持的 categories v6 继续使用其旧导入规则（两字段都缺失时为 1，显式值须为正）。人工配方的数量由编辑者明确填写正数。
+
 ## 已发布 JEI 配方的图标错位
 
 1. 从公开配方 `/api/v1/catalog/recipes/{publicId}/render` 定位 `recipeSnapshotId`、`revisionId` 和 `layout.template_id`。先检查是否采用人工配方定义或布局覆盖。对导入快照，在修订详情 `/api/v1/export-revisions/{revisionId}` 核对项目、目标资料版本、来源种类、命名空间和原包 SHA-256。有本地原包时，用 `recipes/jei/categories.json` 找到对应类别和模板文件，对照游戏画面、`rect`（命中框）及 `visual_rect`（绘制框）。0.10.0 的真实火把模板保存了包含装饰的范围，缺少重建第三方渲染器所需的局部几何。相同原包会提供相同坐标。包 manifest 记录 exporter 版本，JEI 版本须另核生产环境。导入记录中的 `source_mod_version` 属于配方来源 Mod。模板 ID 是槽信息的哈希，几何变化可使其改变。

@@ -53,28 +53,34 @@ func exportIngredientKind(ingredientType string) string {
 	}
 }
 
-// Amount fields are optional, but an explicitly supplied value is business
-// data: it must never fall back to one when malformed.
-func validatedExportRecipeAmount(alternative map[string]any) (float64, error) {
-	amount := float64(1)
-	found := false
+// v6 used an implicit quantity of one. A current JEI helper omits an
+// unavailable amount and can explicitly report zero.
+func validatedExportRecipeAmount(alternative map[string]any, legacyQuantities bool) (*float64, error) {
+	var amount *float64
 	for _, key := range []string{"count", "amount"} {
 		raw, exists := alternative[key]
 		if !exists {
 			continue
 		}
 		value, ok := catalogFiniteNumber(raw)
-		if !ok || value <= 0 || value > 9007199254740991 {
-			return 0, fmt.Errorf("%s must be a positive finite quantity within the exact numeric range", key)
+		if !ok || value < 0 || value > 9007199254740991 {
+			return nil, fmt.Errorf("%s must be a non-negative finite quantity within the exact numeric range", key)
+		}
+		if legacyQuantities && value == 0 {
+			return nil, fmt.Errorf("%s must be positive for v6 recipe candidates", key)
 		}
 		kind := exportIngredientKind(exportString(alternative["type"]))
 		if (key == "count" || kind == "item") && value != math.Trunc(value) {
-			return 0, fmt.Errorf("%s must be an integer for item stacks", key)
+			return nil, fmt.Errorf("%s must be an integer for item stacks", key)
 		}
-		if found && amount != value {
-			return 0, errors.New("count and amount disagree")
+		if amount != nil && *amount != value {
+			return nil, errors.New("count and amount disagree")
 		}
-		amount, found = value, true
+		amount = &value
+	}
+	if amount == nil && legacyQuantities {
+		one := float64(1)
+		return &one, nil
 	}
 	return amount, nil
 }

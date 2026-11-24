@@ -127,7 +127,7 @@ type recipeImportCandidateWrite struct {
 	ResourceNamespace    string          `json:"resource_namespace"`
 	ResourcePath         string          `json:"resource_path"`
 	KindCode             string          `json:"kind_code"`
-	Amount               float64         `json:"amount"`
+	Amount               *float64        `json:"amount"`
 	IngredientKind       string          `json:"ingredient_kind"`
 	IngredientType       string          `json:"ingredient_type"`
 	UniqueID             string          `json:"unique_id"`

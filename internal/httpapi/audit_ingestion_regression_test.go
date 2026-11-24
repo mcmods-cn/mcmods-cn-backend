@@ -16,7 +16,7 @@ func TestAuditGR009ExplicitInvalidQuantitiesAreRejected(t *testing.T) {
 	for _, raw := range []string{`{"count":-7}`, `{"count":0}`, `{"amount":"many"}`, `{"amount":null}`, `{"count":1.5}`, `{"count":2,"amount":3}`, `{"amount":9007199254740992}`} {
 		var value map[string]any
 		_ = json.Unmarshal([]byte(raw), &value)
-		if amount, err := validatedExportRecipeAmount(value); err == nil {
+		if amount, err := validatedExportRecipeAmount(value, true); err == nil {
 			t.Errorf("explicit invalid quantity %s accepted as %v", raw, amount)
 		}
 	}
@@ -26,14 +26,26 @@ func TestAuditGR009ExplicitInvalidQuantitiesAreRejected(t *testing.T) {
 	}{{`{}`, 1}, {`{"type":"item_stack","count":64}`, 64}, {`{"type":"fluid_stack","amount":0.25}`, 0.25}, {`{"count":2,"amount":2}`, 2}} {
 		var value map[string]any
 		_ = json.Unmarshal([]byte(tc.raw), &value)
-		if amount, err := validatedExportRecipeAmount(value); err != nil || amount != tc.amount {
+		if amount, err := validatedExportRecipeAmount(value, true); err != nil || amount == nil || *amount != tc.amount {
 			t.Errorf("valid %s = %v/%v", tc.raw, amount, err)
 		}
 	}
-	if _, err := validatedExportRecipeAmount(map[string]any{"count": math.Inf(1)}); err == nil {
+	if _, err := validatedExportRecipeAmount(map[string]any{"count": math.Inf(1)}, true); err == nil {
 		t.Error("infinity accepted")
 	}
 }
+func TestCurrentJEICandidatePreservesObservedQuantity(t *testing.T) {
+	for _, raw := range []string{`{"count":-7}`, `{"amount":null}`, `{"amount":"many"}`, `{"count":1.5}`, `{"count":0,"amount":1}`, `{"amount":9007199254740992}`} {
+		var value map[string]any
+		if err := json.Unmarshal([]byte(raw), &value); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := validatedExportRecipeAmount(value, false); err == nil {
+			t.Errorf("invalid current quantity accepted: %s", raw)
+		}
+	}
+}
+
 func TestAuditGR009ProbabilitiesMustAgree(t *testing.T) {
 	chance, percent := .25, 90.0
 	binding := exportJEIBinding{SemanticRole: "output", ChanceAvailable: true, Chance: &chance, ChancePercent: &percent}

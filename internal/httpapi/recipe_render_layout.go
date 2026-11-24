@@ -369,7 +369,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		var bindingID, resourceID, ingredientKind, ingredientType, uniqueID, nbtSNBT string
 		var chanceComparator, chanceSource, chanceText, chanceTranslationKey string
 		var alternativeIndex int
-		var amount float64
+		var amount sql.NullFloat64
 		var chanceAvailable, byproduct bool
 		var chance, chancePercent, chanceRenderX, chanceRenderY sql.NullFloat64
 		var chanceTexts []byte
@@ -386,7 +386,7 @@ func (s *Server) hydrateRecipeRenderLayouts(ctx context.Context, recipes []map[s
 		alternative := map[string]any{}
 		alternative["alternative_index"] = alternativeIndex
 		alternative["resource_location"] = resourceID
-		alternative["amount"] = amount
+		alternative["amount"] = nullableSQLFloat(amount)
 		alternative["ingredient_kind"] = ingredientKind
 		alternative["ingredient_type"] = ingredientType
 		alternative["unique_id"] = uniqueID

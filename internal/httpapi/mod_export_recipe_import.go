@@ -765,7 +765,7 @@ func validateExportJEIRecipeObjectFields(document exportJEIRecipeCollection) err
 	return nil
 }
 
-func queueExportJEIRecipeCollection(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, packageID string, revisions map[string]string, name string, document exportJEIRecipeCollection) error {
+func queueExportJEIRecipeCollection(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, packageID string, revisions map[string]string, name string, document exportJEIRecipeCollection, legacyQuantities bool) error {
 	if err := validateExportJEIRecipeObjectFields(document); err != nil {
 		return fmt.Errorf("JEI recipe collection %s: %w", name, err)
 	}
@@ -831,14 +831,14 @@ func queueExportJEIRecipeCollection(batch *modExportWriteBatch, resolver catalog
 			BindingCount: len(recipeBinding.Bindings),
 		})
 		batch.byteCount += int64(len(recipeBinding.Parameters))
-		if err = queueExportRecipeBindings(batch, resolver, recipeSnapshotID, templateID, recipeBinding.Bindings); err != nil {
+		if err = queueExportRecipeBindings(batch, resolver, recipeSnapshotID, templateID, recipeBinding.Bindings, legacyQuantities); err != nil {
 			return fmt.Errorf("JEI recipe %q: %w", recipeKey, err)
 		}
 	}
 	return nil
 }
 
-func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, recipeSnapshotID, templateID string, bindings []exportJEIBinding) error {
+func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResourceIdentityResolver, recipeSnapshotID, templateID string, bindings []exportJEIBinding, legacyQuantities bool) error {
 	seen := make(map[string]struct{}, len(bindings))
 	for ordinal, binding := range bindings {
 		binding.SlotID = strings.TrimSpace(binding.SlotID)
@@ -877,7 +877,7 @@ func queueExportRecipeBindings(batch *modExportWriteBatch, resolver catalogResou
 			TagIdentity: tagIdentityKey, TagPublicID: tagPublicID, TagCanonicalID: tagID,
 		})
 		for alternativeIndex, alternative := range binding.Alternatives {
-			amount, amountErr := validatedExportRecipeAmount(alternative)
+			amount, amountErr := validatedExportRecipeAmount(alternative, legacyQuantities)
 			if amountErr != nil {
 				return fmt.Errorf("slot %s alternative %d: %w", binding.SlotID, alternativeIndex, amountErr)
 			}

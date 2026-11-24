@@ -38,6 +38,19 @@ func auditRecipeNegativePackage(t *testing.T, variant string) []byte {
 	alternative := output["alternatives"].([]any)[0].(map[string]any)
 	switch variant {
 	case "valid":
+	case "v7-quantities", "v6-implicit-quantity":
+		unknown := map[string]any{"type": "fluid_stack", "resource_location": "example:fluid"}
+		values := []any{unknown}
+		if variant == "v7-quantities" {
+			values = append(values, map[string]any{"type": "fluid_stack", "resource_location": "example:empty", "amount": 0})
+		} else {
+			header := documents["recipes/jei/categories.json"]
+			header["schema_version"] = "mcmods-jei-categories/v6"
+			cat := header["categories"].([]any)[0].(map[string]any)
+			delete(cat, "export_mode")
+			delete(cat, "recipes_omitted")
+		}
+		output["alternatives"] = values
 	case "valid-second":
 		documents["recipes/jei/categories.json"]["categories"].([]any)[0].(map[string]any)["title_names"] = map[string]any{"en_us": "Second synthetic pressing import"}
 	case "negative-count":
@@ -71,8 +84,8 @@ func auditRecipeNegativePackage(t *testing.T, variant string) []byte {
 
 func TestAuditRecipeNegativeCasesReachExactValidationAndPreservePublishedDataIntegration(t *testing.T) {
 	for _, tc := range []struct{ variant, exactMessage, constraint string }{
-		{"negative-count", "count must be a positive finite quantity within the exact numeric range", ""},
-		{"text-amount", "amount must be a positive finite quantity within the exact numeric range", ""},
+		{"negative-count", "count must be a non-negative finite quantity within the exact numeric range", ""},
+		{"text-amount", "amount must be a non-negative finite quantity within the exact numeric range", ""},
 		{"inconsistent-chance", "chance and chance_percent must describe the same probability", ""},
 		{"missing-template", "", "recipe_import_snapshots_template_id_fkey"},
 		{"missing-slot", "", "recipe_import_bindings_template_slot_id_fkey"},

@@ -45,7 +45,7 @@ func TestQueueExportRecipeTemplateAndBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = queueExportJEIRecipeCollection(batch, catalogResourceIdentityResolver{}, "package", map[string]string{"minecraft": "revision"}, "recipes/jei/recipes/minecraft/crafting.json", recipeDocument); err != nil {
+	if err = queueExportJEIRecipeCollection(batch, catalogResourceIdentityResolver{}, "package", map[string]string{"minecraft": "revision"}, "recipes/jei/recipes/minecraft/crafting.json", recipeDocument, false); err != nil {
 		t.Fatal(err)
 	}
 	if batch.rows != 9 || len(batch.recipes) != 1 || len(batch.recipeBindings) != 2 || len(batch.recipeCandidates) != 2 {

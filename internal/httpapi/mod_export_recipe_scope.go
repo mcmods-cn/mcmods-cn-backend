@@ -235,7 +235,7 @@ func (scope *exportRecipeImportScope) queueRecipes(batch *modExportWriteBatch, r
 		single := document
 		single.Recipes = []exportJEIRecipeBinding{binding}
 		single.Count = 1
-		if err = queueExportJEIRecipeCollection(batch, resolver, packageID, map[string]string{exportResourceNamespace(document.RecipeTypeID): revision}, name, single); err != nil {
+		if err = queueExportJEIRecipeCollection(batch, resolver, packageID, map[string]string{exportResourceNamespace(document.RecipeTypeID): revision}, name, single, scope.document.SchemaVersion == "mcmods-jei-categories/v6"); err != nil {
 			return err
 		}
 	}

@@ -158,3 +158,55 @@ func TestPublishedImportedRecipeCandidatesKeepTheirResourceIdentity(t *testing.T
 		})
 	}
 }
+
+func TestPublishedJEICandidatesKeepVersionedQuantityObservations(t *testing.T) {
+	for _, tc := range []struct {
+		variant string
+		want    []any
+	}{
+		{"v7-quantities", []any{nil, float64(0)}},
+		{"v6-implicit-quantity", []any{float64(1)}},
+	} {
+		t.Run(tc.variant, func(t *testing.T) {
+			f := newAuditFixGRFixture(t)
+			_, rev := f.imported(t, auditRecipeNegativePackage(t, tc.variant))
+			f.reviewGR(t, rev, "approved")
+			var publicID string
+			if err := f.db.QueryRow(f.ctx, `select entity.public_id from recipe_import_snapshots snapshot
+				join catalog_entities entity on entity.id=snapshot.recipe_id where snapshot.revision_id=$1`, rev).Scan(&publicID); err != nil {
+				t.Fatal(err)
+			}
+			assertAmounts := func(origin string, entries []map[string]any) {
+				t.Helper()
+				if len(entries) != len(tc.want) {
+					t.Fatalf("%s candidate count=%d, want %d", origin, len(entries), len(tc.want))
+				}
+				for i, want := range tc.want {
+					if value, exists := entries[i]["amount"]; !exists || value != want {
+						t.Errorf("%s candidate %d quantity=%v present=%t, want %v", origin, i, value, exists, want)
+					}
+				}
+			}
+			path := "/api/v1/catalog/recipes/" + publicID
+			detail := decodeTEST022Data[struct {
+				Bindings map[string]struct{ Candidates []map[string]any }
+			}](t, f.require(t, "", http.MethodGet, path, nil, http.StatusOK))
+			assertAmounts("catalog", detail.Bindings["output_0"].Candidates)
+			render := decodeTEST022Data[struct {
+				Layout struct {
+					Slots []struct {
+						ID           string `json:"slot_id"`
+						Alternatives []map[string]any
+					}
+				}
+			}](t, f.require(t, "", http.MethodGet, path+"/render", nil, http.StatusOK))
+			for _, slot := range render.Layout.Slots {
+				if slot.ID == "output_0" {
+					assertAmounts("render", slot.Alternatives)
+					return
+				}
+			}
+			t.Fatal("published render has no output_0 slot")
+		})
+	}
+}

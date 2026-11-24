@@ -101,7 +101,7 @@ func TestAuditRemainingOriginalGRG48CandidateProjection(t *testing.T) {
 		}},
 	}
 	batch := newModExportWriteBatch()
-	if err := queueExportRecipeBindings(batch, catalogResourceIdentityResolver{}, "audit-recipe", "audit-template", []exportJEIBinding{base}); err != nil {
+	if err := queueExportRecipeBindings(batch, catalogResourceIdentityResolver{}, "audit-recipe", "audit-template", []exportJEIBinding{base}, false); err != nil {
 		t.Fatal(err)
 	}
 	if len(batch.recipeBindings) != 1 || len(batch.recipeCandidates) != 1 {
@@ -113,7 +113,7 @@ func TestAuditRemainingOriginalGRG48CandidateProjection(t *testing.T) {
 		candidate.BindingID != binding.ID || candidate.AlternativeIndex != 0 {
 		t.Fatalf("original candidate/slot association changed: binding=%+v candidate=%+v", binding, candidate)
 	}
-	if candidate.Amount != 2 || candidate.NBTSNBT != "{Damage:0}" || candidate.IngredientType != "minecraft:item_stack" || candidate.IngredientKind != "item" ||
+	if candidate.Amount == nil || *candidate.Amount != 2 || candidate.NBTSNBT != "{Damage:0}" || candidate.IngredientType != "minecraft:item_stack" || candidate.IngredientKind != "item" ||
 		candidate.KindCode != "minecraft.item" || candidate.ResourceCanonicalID != "example:audit_item" || candidate.ResourceRawID != "example:audit_item" ||
 		candidate.ResourceAliasID != "example:audit_item" || candidate.ResourceNamespace != "example" || candidate.ResourcePath != "audit_item" ||
 		!strings.HasPrefix(candidate.ResourceIdentity, "res_") || len(candidate.ResourcePublicID) != 9 {
