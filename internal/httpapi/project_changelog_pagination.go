@@ -25,9 +25,10 @@ const (
 )
 
 type projectChangelogPageRequest struct {
-	Limit  int
-	Scope  string
-	Cursor *projectChangelogPageCursor
+	Limit      int
+	Scope      string
+	CategoryID string
+	Cursor     *projectChangelogPageCursor
 }
 
 type projectChangelogPageCursor struct {
@@ -82,15 +83,19 @@ func parseProjectChangelogPageRequest(values url.Values, target projectChangelog
 		}
 		limit = parsed
 	}
-	scope := projectChangelogPageScope(target, locale, limit)
+	categoryID := strings.ToLower(strings.TrimSpace(values.Get("categoryId")))
+	if values.Has("categoryId") && !validCatalogPublicID(categoryID) {
+		return projectChangelogPageRequest{}, errors.New("invalid changelog category")
+	}
+	scope := projectChangelogPageScope(target, locale, limit, categoryID)
 	cursor, err := decodeProjectChangelogPageCursor(values.Get("cursor"), scope)
 	if err != nil {
 		return projectChangelogPageRequest{}, err
 	}
-	return projectChangelogPageRequest{Limit: limit, Scope: scope, Cursor: cursor}, nil
+	return projectChangelogPageRequest{Limit: limit, Scope: scope, CategoryID: categoryID, Cursor: cursor}, nil
 }
 
-func projectChangelogPageScope(target projectChangelogTarget, locale string, limit int) string {
+func projectChangelogPageScope(target projectChangelogTarget, locale string, limit int, categoryID string) string {
 	material, _ := json.Marshal(struct {
 		Version    int    `json:"version"`
 		RouteID    int64  `json:"routeId"`
@@ -98,7 +103,8 @@ func projectChangelogPageScope(target projectChangelogTarget, locale string, lim
 		PublicID   string `json:"publicId"`
 		Locale     string `json:"locale"`
 		Limit      int    `json:"limit"`
-	}{projectChangelogCursorVersion, target.RouteID, target.EntityType, target.PublicID, normalizeContentLocale(locale), limit})
+		CategoryID string `json:"categoryId,omitempty"`
+	}{projectChangelogCursorVersion, target.RouteID, target.EntityType, target.PublicID, normalizeContentLocale(locale), limit, categoryID})
 	digest := sha256.Sum256(material)
 	return hex.EncodeToString(digest[:16])
 }
@@ -161,6 +167,11 @@ func projectChangelogPageSQL(targetRouteID int64, locale string, request project
 	if request.Cursor != nil {
 		query += ` and (entry.event_at,entry.id)<($6,$7)`
 		args = append(args, request.Cursor.EventAt, request.Cursor.ID)
+	}
+	if request.CategoryID != "" {
+		query += ` and entry.category_id=(select id from project_changelog_categories
+			where object_route_id=$1 and public_id=$` + strconv.Itoa(len(args)+1) + `)`
+		args = append(args, request.CategoryID)
 	}
 	query += ` order by entry.event_at desc,entry.id desc limit $` + strconv.Itoa(len(args)+1)
 	args = append(args, request.Limit+1)

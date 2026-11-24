@@ -19,7 +19,7 @@ type projectChangelogCategoryPage struct {
 }
 
 func projectChangelogCategoryScope(target projectChangelogTarget, locale string) string {
-	return "categories:" + projectChangelogPageScope(target, locale, projectChangelogMaximumCategories)
+	return "categories:" + projectChangelogPageScope(target, locale, projectChangelogMaximumCategories, "")
 }
 
 func loadProjectChangelogCategoryPage(ctx context.Context, query interface {

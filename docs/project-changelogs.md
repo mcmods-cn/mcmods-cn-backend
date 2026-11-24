@@ -5,6 +5,8 @@
 `categoriesHasMore` 和 `categoriesNextCursor`。后续条目页不重复加载分类。
 100 是单页读取预算，不是项目允许创建分类的总量；已有第 101 个及以后分类仍可使用。
 
+条目列表接受可选的 `categoryId`（九位公开 ID）。筛选在翻页前生效，使用同一项目内生效且已审核的条目。有效但不属于该项目的分类返回空页，格式错误或换筛选后继续使用旧游标返回 400。分类短链转到父项目当前地址并打开 `?tab=changelog&categoryId=<公开ID>#changelog`。修改父项目的 slug 后，原短链仍能打开同一分类。
+
 更多分类由 `GET /api/v1/changelogs/categories` 按需读取，查询参数为 `targetType`、
 `targetId`、`locale` 和可选 `cursor`。响应 `data` 包含 `target`、`categories`、
 `limit: 100`、`hasMore` 和 `nextCursor`。分类字段与原数组相同，按创建时间与内部 ID

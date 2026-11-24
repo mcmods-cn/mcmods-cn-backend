@@ -61,32 +61,41 @@ func (s *Server) publicLinkTargetIsVisible(ctx context.Context, entityType strin
 		query = `select exists(select 1 from shop_items where id=$1 and status='active')`
 	case "task":
 		query = `select exists(select 1 from task_definitions where id=$1 and status='active')`
-	case "project_changelog", "project_changelog_category":
-		parentSQL := `select target.entity_type,target.internal_id from project_changelogs entry join public_routes target on target.id=entry.object_route_id
-			where entry.id=$1 and entry.status='active' and entry.review_status='approved'`
-		if entityType == "project_changelog_category" {
-			parentSQL = `select target.entity_type,target.internal_id from project_changelog_categories category
-				join public_routes target on target.id=category.object_route_id where category.id=$1`
-		}
-		var parentType string
-		var parentID int64
-		err := s.db.QueryRow(ctx, parentSQL, internalID).Scan(&parentType, &parentID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		if !changelogTargetTypes[parentType] {
-			return false, nil
-		}
-		return s.publicLinkTargetIsVisible(ctx, parentType, parentID, "", 0)
 	default:
 		return false, nil
 	}
 	var visible bool
 	err := s.db.QueryRow(ctx, query, internalID).Scan(&visible)
 	return visible, err
+}
+
+// Changelog entries have a detail page. Categories are filters on the current
+// parent page, so the destination follows the parent even after a slug change.
+func (s *Server) publicChangelogLink(ctx context.Context, entityType string, internalID int64, publicID, target string) (string, bool, error) {
+	query := `select target.entity_type,target.internal_id,target.canonical_path from project_changelogs entry
+		join public_routes target on target.id=entry.object_route_id
+		where entry.id=$1 and entry.status='active' and entry.review_status='approved'`
+	if entityType == "project_changelog_category" {
+		query = `select target.entity_type,target.internal_id,target.canonical_path from project_changelog_categories category
+			join public_routes target on target.id=category.object_route_id where category.id=$1`
+	}
+	var parentType, parentPath string
+	var parentID int64
+	err := s.db.QueryRow(ctx, query, internalID).Scan(&parentType, &parentID, &parentPath)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil || !changelogTargetTypes[parentType] {
+		return "", false, err
+	}
+	if entityType == "project_changelog_category" {
+		if parentPath == "" {
+			return "", false, nil
+		}
+		target = parentPath + "?tab=changelog&categoryId=" + url.QueryEscape(publicID) + "#changelog"
+	}
+	visible, err := s.publicLinkTargetIsVisible(ctx, parentType, parentID, "", 0)
+	return target, visible, err
 }
 
 func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
@@ -107,8 +116,13 @@ func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "解析短链接失败")
 		return
 	}
-	visible, visibilityErr := s.publicLinkTargetIsVisible(r.Context(), entityType, internalID, publicID, currentClaims(r).Subject)
-	if visibilityErr != nil {
+	var visible bool
+	if entityType == "project_changelog" || entityType == "project_changelog_category" {
+		target, visible, err = s.publicChangelogLink(r.Context(), entityType, internalID, publicID, target)
+	} else {
+		visible, err = s.publicLinkTargetIsVisible(r.Context(), entityType, internalID, publicID, currentClaims(r).Subject)
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "解析短链接发布状态失败")
 		return
 	}

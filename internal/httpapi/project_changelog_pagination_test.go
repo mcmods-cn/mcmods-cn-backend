@@ -43,7 +43,7 @@ func TestProjectChangelogCursorIsStrictAndScopeBound(t *testing.T) {
 			}
 		})
 	}
-	foreign := projectChangelogPageScope(target, "en-US", request.Limit)
+	foreign := projectChangelogPageScope(target, "en-US", request.Limit, "")
 	if _, err = decodeProjectChangelogPageCursor(raw, foreign); err == nil {
 		t.Fatal("cursor was accepted for another locale")
 	}

@@ -24,8 +24,8 @@ func changelogSchemaStatements() []string {
 		)`,
 		`create or replace function register_project_changelog_category_public_route() returns trigger as $$
 		begin
-			insert into public_routes(public_id,entity_type,internal_id,canonical_path)
-			values(new.public_id,'project_changelog_category',new.id,'/changelogs/categories/'||new.public_id);
+			insert into public_routes(public_id,entity_type,internal_id)
+			values(new.public_id,'project_changelog_category',new.id);
 			return new;
 		end;
 		$$ language plpgsql`,

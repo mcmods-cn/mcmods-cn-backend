@@ -78,3 +78,70 @@ func TestOCT02ChangelogCategoriesRemainAccessibleAfterOneHundredIntegration(t *t
 	}
 	f.require(t, f.editor, http.MethodGet, "/api/v1/changelogs/categories"+baseQuery, nil, http.StatusOK)
 }
+
+func TestChangelogCategoryLinksAndEntryPaginationFollowParentIntegration(t *testing.T) {
+	f := newTEST017Fixture(t)
+	var category string
+	if err := f.db.QueryRow(f.ctx, `insert into project_changelog_categories(object_route_id,default_locale)
+		select id,'en-US' from public_routes where entity_type='mod' and internal_id=$1 returning public_id`, f.modID).Scan(&category); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `insert into project_changelogs(object_route_id,category_id,event_at,
+		project_version,default_locale,review_status,created_by)
+		select category.object_route_id,case when version=4 then null else category.id end,
+			'2026-01-01'::timestamptz + version*interval '1 day',version::text,'en-US',
+			case when version=3 then 'pending' else 'approved' end,$2
+		from project_changelog_categories category cross join generate_series(1,4) version where category.public_id=$1`, category, f.userIDs[f.editor]); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := "/api/v1/public-links/" + category
+	var initialSlug string
+	if err := f.db.QueryRow(f.ctx, `select slug from mods where id=$1`, f.modID).Scan(&initialSlug); err != nil {
+		t.Fatal(err)
+	}
+	for _, slug := range []string{initialSlug, "renamed-changelog-project"} {
+		if _, err := f.db.Exec(f.ctx, `update mods set slug=$2 where id=$1`, f.modID, slug); err != nil {
+			t.Fatal(err)
+		}
+		raw := f.require(t, "", http.MethodGet, linkPath, nil, http.StatusOK)
+		var result struct{ Data struct{ Target string } }
+		if err := json.Unmarshal(raw, &result); err != nil {
+			t.Fatal(err)
+		}
+		if want := "/mods/" + slug + "?tab=changelog&categoryId=" + category + "#changelog"; result.Data.Target != want {
+			t.Fatalf("category link = %q, want %q", result.Data.Target, want)
+		}
+	}
+	base := "/api/v1/changelogs?targetType=mod&targetId=" + f.modCode + "&limit=1"
+	pagePath := base + "&categoryId=" + category
+	var cursor string
+	for _, wantVersion := range []string{"2", "1"} {
+		raw := f.require(t, "", http.MethodGet, pagePath+"&cursor="+url.QueryEscape(cursor), nil, http.StatusOK)
+		var response struct{ Data projectChangelogPage }
+		if err := json.Unmarshal(raw, &response); err != nil {
+			t.Fatal(err)
+		}
+		page := response.Data
+		if len(page.Items) != 1 || page.Items[0].ProjectVersion != wantVersion || page.Items[0].Category == nil ||
+			page.Items[0].Category.ID != category || page.HasMore != (wantVersion == "2") || page.HasMore != (page.NextCursor != "") {
+			t.Fatalf("filtered page for version %s: %+v", wantVersion, page)
+		}
+		cursor = page.NextCursor
+		if page.HasMore {
+			for _, changedFilter := range []string{"", "&categoryId=unknown01"} {
+				f.require(t, "", http.MethodGet, base+changedFilter+"&cursor="+url.QueryEscape(cursor), nil, http.StatusBadRequest)
+			}
+		}
+	}
+	f.require(t, "", http.MethodGet, base+"&categoryId=invalid", nil, http.StatusBadRequest)
+	raw := f.require(t, "", http.MethodGet, "/api/v1/changelogs?targetType=mod&targetId="+f.otherModCode+"&categoryId="+category, nil, http.StatusOK)
+	var other struct{ Data projectChangelogPage }
+	if err := json.Unmarshal(raw, &other); err != nil || len(other.Data.Items) != 0 || other.Data.HasMore {
+		t.Fatalf("other project returned entries for category: %+v, err %v", other, err)
+	}
+	if _, err := f.db.Exec(f.ctx, `update mods set review_status='pending' where id=$1`, f.modID); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, "", http.MethodGet, linkPath, nil, http.StatusNotFound)
+	f.require(t, "", http.MethodGet, pagePath, nil, http.StatusNotFound)
+}
