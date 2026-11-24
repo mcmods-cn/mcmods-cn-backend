@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"reflect"
 	"testing"
 )
@@ -225,4 +226,57 @@ func TestCatalogReferenceSelectionRequiresAnUnambiguousVisibleIdentity(t *testin
 			t.Errorf("resolved input positions and IDs = %v", matched)
 		}
 	})
+}
+
+func TestRecipeTypeDirectorySearchAndCatalogUsePublishedTitlesByLanguage(t *testing.T) {
+	f := newAuditFixGRFixture(t)
+	_, revision := f.imported(t, auditRecipeNegativePackage(t, "valid"))
+	f.reviewGR(t, revision, "approved")
+	var id int64
+	var publicID string
+	if err := f.db.QueryRow(f.ctx, `update recipe_type_import_snapshots snapshot
+		set title_names='{"en_us":"Original English title","zh_cn":"导入标题"}' from catalog_entities entity
+		where snapshot.recipe_type_id=entity.id and snapshot.revision_id=$1 returning entity.id,entity.public_id`, revision).Scan(&id, &publicID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(f.ctx, `insert into content_localizations(subject_type,subject_id,catalog_entity_id,locale,name,review_status)
+		values('recipe_type',$1,$1,'en-US','Reviewed English title','approved'),('recipe_type',$1,$1,'zh-TW','Unpublished title','pending')
+		on conflict(subject_type,subject_id,locale) do update set name=excluded.name,review_status=excluded.review_status`, id); err != nil {
+		t.Fatal(err)
+	}
+	type card struct{ Names map[string]string }
+	checkNames := func(t *testing.T, got card) {
+		t.Helper()
+		if len(got.Names) != 2 {
+			t.Fatalf("expected exactly two public titles, got %#v", got.Names)
+		}
+		names := map[string]string{}
+		for key, name := range got.Names {
+			locale, _ := canonicalExportLocaleTag(key)
+			names[locale] = name
+		}
+		if !reflect.DeepEqual(names, map[string]string{"en-US": "Reviewed English title", "zh-CN": "导入标题"}) {
+			t.Errorf("published names = %#v", got.Names)
+		}
+	}
+	t.Run("detail", func(t *testing.T) {
+		checkNames(t, decodeTEST022Data[card](t, f.require(t, "", http.MethodGet, "/api/v1/recipe-types/"+publicID+"/catalog", nil, http.StatusOK)))
+	})
+	for _, tc := range []struct {
+		term string
+		want int
+	}{{"Reviewed English title", 1}, {"导入标题", 1}, {"Original English title", 0}, {"Unpublished title", 0}} {
+		t.Run(tc.term, func(t *testing.T) {
+			page := decodeTEST022Data[struct {
+				Total int
+				Items []card
+			}](t, f.require(t, "", http.MethodGet, "/api/v1/recipe-types?q="+url.QueryEscape(tc.term), nil, http.StatusOK))
+			if page.Total != tc.want || len(page.Items) != tc.want {
+				t.Fatalf("search returned total %d, items %d, want %d", page.Total, len(page.Items), tc.want)
+			}
+			if tc.want > 0 {
+				checkNames(t, page.Items[0])
+			}
+		})
+	}
 }

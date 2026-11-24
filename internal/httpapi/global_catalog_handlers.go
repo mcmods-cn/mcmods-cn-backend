@@ -73,6 +73,23 @@ latest_recipe_observations as (
 	where not exists(select 1 from recipe_definitions definition where definition.recipe_id=recipe.entity_id)
 )`
 
+// A reviewed manual title replaces only the matching import language. Older
+// exports use Minecraft locale keys such as en_us alongside the site's en-US.
+const publicRecipeTypeNameProjectionSQL = `cross join lateral (
+	select coalesce(jsonb_object_agg(chosen.locale,chosen.name),'{}'::jsonb) as names
+	from (
+		select distinct on (lower(replace(locale,'_','-'))) locale,name
+		from (
+			select localization.locale,localization.name,true as authoritative from content_localizations localization
+			where localization.catalog_entity_id=entity.id and localization.review_status='approved' and localization.name<>''
+			union all
+			select entry.key,entry.value#>>'{}',false from jsonb_each(case when jsonb_typeof(imported.title_names)='object'
+				then imported.title_names else '{}'::jsonb end) entry where jsonb_typeof(entry.value)='string' and entry.value#>>'{}'<>''
+		) candidates
+		order by lower(replace(locale,'_','-')),authoritative desc,(position('-' in locale)>0) desc,locale collate "C"
+	) chosen
+) display`
+
 func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	canonicalID := strings.TrimSpace(r.URL.Query().Get("canonicalId"))
@@ -83,7 +100,7 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 	primary, secondary := requestedContentLocales(r)
 	limit := boundedLimit(r.URL.Query().Get("limit"), 24, 60)
 	offset := boundedOffset(r.URL.Query().Get("offset"))
-	key := fmt.Sprintf("recipe-types:v6:list:%s:%s:%s:%d:%d:exact:%s", query, primary, secondary, limit, offset, canonicalID)
+	key := fmt.Sprintf("recipe-types:v7:list:%s:%s:%s:%d:%d:exact:%s", query, primary, secondary, limit, offset, canonicalID)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var total int
 		if err := s.db.QueryRow(ctx, `with `+latestGlobalExportScopeCTE+`, imported as (
@@ -94,10 +111,10 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			select count(*)::int from recipe_types recipe_type
 			join catalog_entities entity on entity.id=recipe_type.entity_id
 			left join imported on imported.recipe_type_id=recipe_type.entity_id
-			where entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type")+` and ($4='' or recipe_type.canonical_id=$4) and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
-			 or imported.title_names->>$2 ilike '%'||$1||'%' or imported.title_names->>$3 ilike '%'||$1||'%'
-			 or exists(select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))`,
-			query, primary, secondary, canonicalID).Scan(&total); err != nil {
+		`+publicRecipeTypeNameProjectionSQL+`
+			where entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type")+` and ($2='' or recipe_type.canonical_id=$2) and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
+			 or exists(select 1 from jsonb_each_text(display.names) term where term.value ilike '%'||$1||'%'))`,
+			query, canonicalID).Scan(&total); err != nil {
 			return nil, err
 		}
 		rows, err := s.db.Query(ctx, `with `+publicRecipeSelectionCTE+`, imported as (
@@ -106,18 +123,17 @@ func (s *Server) globalRecipeTypes(w http.ResponseWriter, r *http.Request) {
 			order by snapshot.recipe_type_id,coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc
 		)
 		select recipe_type.entity_id,entity.public_id,recipe_type.canonical_id,
-			coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-			 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.title_names,'{}'::jsonb),
+			display.names,
 			(select count(*)::int from public_recipes public_recipe join recipes recipe on recipe.entity_id=public_recipe.entity_id
 			 where recipe.recipe_type_id=recipe_type.entity_id),
 			(select count(*)::int from recipe_layout_templates template join catalog_entities template_entity on template_entity.id=template.entity_id
 			 where template.recipe_type_id=recipe_type.entity_id and template_entity.status='active' and `+publicCatalogEntitySQL("template_entity", "recipe_template")+`)
 		from recipe_types recipe_type join catalog_entities entity on entity.id=recipe_type.entity_id
 		left join imported on imported.recipe_type_id=recipe_type.entity_id
-		where entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type")+` and ($6='' or recipe_type.canonical_id=$6) and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
-		 or imported.title_names->>$2 ilike '%'||$1||'%' or imported.title_names->>$3 ilike '%'||$1||'%'
-		 or exists(select 1 from content_localizations localization where localization.catalog_entity_id=entity.id and localization.name ilike '%'||$1||'%'))
-		order by recipe_type.canonical_id limit $4 offset $5`, query, primary, secondary, limit, offset, canonicalID)
+		`+publicRecipeTypeNameProjectionSQL+`
+		where entity.status='active' and `+publicCatalogEntitySQL("entity", "recipe_type")+` and ($4='' or recipe_type.canonical_id=$4) and ($1='' or recipe_type.canonical_id ilike '%'||$1||'%'
+		 or exists(select 1 from jsonb_each_text(display.names) term where term.value ilike '%'||$1||'%'))
+		order by recipe_type.canonical_id limit $2 offset $3`, query, limit, offset, canonicalID)
 		if err != nil {
 			return nil, err
 		}
@@ -175,7 +191,7 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 	if !s.requirePublicCatalogEntity(w, r, entity) {
 		return
 	}
-	key := fmt.Sprintf("recipe-types:v8:detail:%s:%s:%s:%d:%d", publicID, primary, secondary, limit, offset)
+	key := fmt.Sprintf("recipe-types:v9:detail:%s:%s:%s:%d:%d", publicID, primary, secondary, limit, offset)
 	s.writeCachedCatalog(w, r, key, func(ctx context.Context) (any, error) {
 		var entityID int64
 		var canonicalID string
@@ -186,11 +202,11 @@ func (s *Server) globalRecipeTypeCatalog(w http.ResponseWriter, r *http.Request)
 			order by snapshot.recipe_type_id,coalesce(revision.activated_at,revision.created_at) desc,revision.created_at desc
 		)
 			select recipe_type.entity_id,entity.public_id,recipe_type.canonical_id,
-				coalesce((select jsonb_object_agg(localization.locale,localization.name) from content_localizations localization
-				 where localization.catalog_entity_id=entity.id and localization.name<>''),imported.title_names,'{}'::jsonb)
+				display.names
 			from recipe_types recipe_type
 			join catalog_entities entity on entity.id=recipe_type.entity_id and entity.status='active'
 			left join imported on imported.recipe_type_id=recipe_type.entity_id
+		`+publicRecipeTypeNameProjectionSQL+`
 			where entity.public_id=$1 and `+publicCatalogEntitySQL("entity", "recipe_type")+`
 			limit 1`, publicID).Scan(&entityID, &publicID, &canonicalID, &names)
 		if errors.Is(err, pgx.ErrNoRows) {
