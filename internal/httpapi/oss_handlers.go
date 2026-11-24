@@ -322,6 +322,10 @@ func (s *Server) createOSSDirectUploadWithScope(w http.ResponseWriter, r *http.R
 		objectCategory = category
 		objectPrefix = ossRoot(cfg.Prefix)
 	}
+	if !isAllowedObjectKey(objectPrefix, ossRoot(cfg.Prefix)) {
+		writeError(w, http.StatusBadRequest, "上传前缀必须位于当前 OSS 根目录")
+		return
+	}
 	contentType := strings.TrimSpace(req.ContentType)
 	if contentType == "" {
 		contentType = mime.TypeByExtension(ext)
@@ -607,11 +611,7 @@ func (s *Server) completeOSSDirectUploadWithScope(w http.ResponseWriter, r *http
 			writeError(w, http.StatusBadRequest, "OSS ObjectKey 不属于用户文件目录")
 			return
 		}
-		if isBlueprintObject {
-			req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
-		} else {
-			req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
-		}
+		req.Category = ossCategoryFromObjectKey(req.ObjectKey, cfg.Prefix)
 	} else if isModExport {
 		exportCategory, uploaderCategory := ossModExportUploadCategories(modExportUniqueID, currentClaims(r).Subject)
 		exportPrefix := ossObjectPrefix(cfg.Prefix, uploaderCategory)
