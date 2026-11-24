@@ -88,3 +88,41 @@ func TestModRevisionIconFailurePreservesReceiptAndDistinguishesMissingComparison
 	}
 	f.require(t, f.reviewer, http.MethodGet, path+"/compare?before="+created.ID+"&after="+created.ID, nil, http.StatusInternalServerError)
 }
+
+func TestModRevisionComparisonPresentsChangedIconsFromVisibleSnapshotsIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	s := f.origin.Config.Handler.(*Server)
+	const endpoint = "https://oss.example.invalid"
+	const prefix = "retired-mod-covers/"
+	cfg := ossConfigPayload{Enabled: true, Bucket: "icons", Endpoint: endpoint, Region: "cn-test", UseCName: true}
+	sealed, err := s.sealSystemSetting(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.db.Exec(f.ctx, `insert into system_settings(key,value) values('oss.aliyun',$1::jsonb)
+		on conflict(key) do update set value=excluded.value`, sealed); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for i, key := range []string{"old.png", "new.png"} {
+		var revision string
+		err = f.db.QueryRow(f.ctx, `with revision as (
+			insert into content_revisions(entity_type,entity_id,aggregate_type,aggregate_key,revision_no,snapshot,snapshot_hash,created_by,source)
+			values('mod',$1,'mod',$2,$3,jsonb_build_object('iconUrl',$4::text),$5,$6,'test') returning id,public_id
+		), decision as (
+			insert into change_requests(entity_type,entity_id,aggregate_type,aggregate_key,proposed_revision_id,status,submitted_by)
+			select 'mod',$1,'mod',$2,id,'approved',$6 from revision
+		) select public_id from revision`, f.modID, f.modCode, i+1, endpoint+"/"+prefix+key, key, f.userIDs[f.editor]).Scan(&revision)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, revision)
+	}
+	raw := f.require(t, "", http.MethodGet, "/api/v1/mods/test013-mod/revisions/compare?before="+ids[0]+"&after="+ids[1], nil, http.StatusOK)
+	compared := decodeTEST022Data[modRevisionComparisonResponse](t, raw)
+	if len(compared.Changes) != 1 || compared.Changes[0].Path != "/iconUrl" || compared.Changes[0].Operation != "replace" ||
+		compared.Changes[0].Before != compared.Before.Snapshot.IconURL || compared.Changes[0].After != compared.After.Snapshot.IconURL ||
+		len(compared.ChangedFields) != 1 || compared.ChangedFields[0] != "iconUrl" || bytes.Contains(raw, []byte(prefix)) {
+		t.Fatalf("comparison should mark the changed icon with only its projected values: %s", raw)
+	}
+}
