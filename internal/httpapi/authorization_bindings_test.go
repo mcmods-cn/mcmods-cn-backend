@@ -34,7 +34,7 @@ func TestRoleTrackMutationLocksUserBeforeReadingManualBindings(t *testing.T) {
 		t.Fatal("could not isolate applyUserRoleTrack")
 	}
 	implementation := source[start:end]
-	lockIndex := strings.Index(implementation, "select id from users where id=$1 for update")
+	lockIndex := strings.Index(implementation, "lockRoleTrackAccounts(w, r, tx, userID)")
 	readIndex := strings.Index(implementation, "select role.code,binding.expires_at from user_role_bindings")
 	if lockIndex < 0 || readIndex < 0 || lockIndex > readIndex {
 		t.Fatal("role-track mutation does not lock the user before reading its manual authorization snapshot")

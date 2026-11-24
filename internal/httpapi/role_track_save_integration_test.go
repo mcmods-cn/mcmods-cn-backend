@@ -126,3 +126,63 @@ func TestRoleTrackUpdateRejectsAnEditForTheOldCodeIntegration(t *testing.T) {
 	f.require(t, f.reviewer, http.MethodDelete, basePath+"/"+renamed.Code, nil, http.StatusOK)
 
 }
+
+func TestRoleTrackOperatorsCanAdjustEachOtherAndTheirOwnAccountIntegration(t *testing.T) {
+	f := newTEST013Fixture(t)
+	first, second := f.userIDs[f.reviewer], f.userIDs[f.editor]
+	grantTEST044Permissions(t, f.ctx, f.db, first, "permission.write")
+	grantTEST044Permissions(t, f.ctx, f.db, second, "permission.write")
+	if _, err := f.db.Exec(f.ctx, `insert into roles(code,name) values ('cross_low','Low'),('cross_high','High')`); err != nil {
+		t.Fatal(err)
+	}
+	f.require(t, f.reviewer, http.MethodPost, "/api/v1/admin/role-tracks", roleTrackPayload{
+		Code: "cross_track", Name: "Cross", Roles: []string{"cross_low", "cross_high"},
+	}, http.StatusOK)
+	if _, err := f.db.Exec(f.ctx, `insert into user_role_bindings(user_id,role_id,source,source_key)
+		select account.id,role.id,'manual','' from users account cross join roles role
+		where account.id in ($1,$2) and role.code='cross_low'`, first, second); err != nil {
+		t.Fatal(err)
+	}
+	var firstID, secondID string
+	if err := f.db.QueryRow(f.ctx, `select first.public_id,second.public_id from users first,users second
+		where first.id=$1 and second.id=$2`, first, second).Scan(&firstID, &secondID); err != nil {
+		t.Fatal(err)
+	}
+	path := func(id, direction string) string {
+		return "/api/v1/admin/users/" + id + "/role-tracks/cross_track/" + direction
+	}
+	barrier, err := f.db.Begin(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer barrier.Rollback(f.ctx)
+	if _, err := barrier.Exec(f.ctx, "select id from users where id=least($1::bigint,$2::bigint) for no key update", first, second); err != nil {
+		t.Fatal(err)
+	}
+	a := auditCompletionAsyncJSON(f, f.reviewer, http.MethodPost, path(secondID, "upgrade"), nil)
+	b := auditCompletionAsyncJSON(f, f.editor, http.MethodPost, path(firstID, "upgrade"), nil)
+	auditCompletionAwaitLocks(t, f, 2)
+	if err := barrier.Commit(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, reply := range []<-chan auditCompletionHTTPResult{a, b} {
+		if result := <-reply; result.err != nil || result.status != http.StatusOK {
+			t.Fatalf("concurrent change status=%d error=%v", result.status, result.err)
+		}
+	}
+	var granted, audited int
+	if err := f.db.QueryRow(f.ctx, `select (select count(*) from user_role_bindings b join roles r on r.id=b.role_id
+		where b.user_id in ($1,$2) and b.source='manual' and r.code='cross_high'),
+		(select count(*) from permission_audit_logs where action='upgrade_role_track' and
+		 ((operator_id=$1 and target_user_id=$2) or (operator_id=$2 and target_user_id=$1)))`, first, second).Scan(&granted, &audited); err != nil || granted != 2 || audited != 2 {
+		t.Fatalf("cross-account adjustments grants=%d audits=%d error=%v", granted, audited, err)
+	}
+	raw := f.require(t, f.reviewer, http.MethodPost, path(firstID, "downgrade"), nil, http.StatusOK)
+	reply := decodeTEST022Data[struct {
+		Changed bool     `json:"changed"`
+		Roles   []string `json:"roles"`
+	}](t, raw)
+	if !reply.Changed || !reflect.DeepEqual(reply.Roles, []string{"cross_low"}) {
+		t.Fatalf("own-account adjustment: %#v", reply)
+	}
+}

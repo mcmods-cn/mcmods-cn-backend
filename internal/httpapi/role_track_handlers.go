@@ -21,6 +21,29 @@ type roleTrackPayload struct {
 	Roles       []string `json:"roles"`
 }
 
+// A moderator can also be the target. Lock the distinct accounts in one order
+// before taking a track or its memberships, including when two admins act on
+// each other. The later session/permission check then uses those same rows.
+const roleTrackAccountLockSQL = `select coalesce(bool_or(id=$1),false),coalesce(bool_or(id=$2),false)
+	from (select id from users where id in ($1,$2) order by id for no key update) locked_accounts`
+
+func lockRoleTrackAccounts(w http.ResponseWriter, r *http.Request, tx pgx.Tx, targetID int64) bool {
+	var actorFound, targetFound bool
+	if err := tx.QueryRow(r.Context(), roleTrackAccountLockSQL, currentClaims(r).Subject, targetID).Scan(&actorFound, &targetFound); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "锁定用户授权失败")
+		return false
+	}
+	if !actorFound {
+		writeCurrentWriteActorFailure(w, pgx.ErrNoRows)
+		return false
+	}
+	if targetID != 0 && !targetFound {
+		writeError(w, http.StatusNotFound, "用户不存在")
+		return false
+	}
+	return true
+}
+
 func (s *Server) roleTracks(w http.ResponseWriter, r *http.Request) {
 	tracks, err := s.loadRoleTracks(r.Context())
 	if err != nil {
@@ -62,6 +85,9 @@ func (s *Server) saveRoleTrack(w http.ResponseWriter, r *http.Request, currentCo
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if !lockRoleTrackAccounts(w, r, tx, 0) {
+		return
+	}
 	if currentCode == "" {
 		_, err = tx.Exec(
 			r.Context(),
@@ -117,6 +143,9 @@ func (s *Server) saveRoleTrack(w http.ResponseWriter, r *http.Request, currentCo
 			return
 		}
 	}
+	if _, ok := requireCurrentWritePermission(w, r, tx, "permission.write"); !ok {
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存权限组线路失败")
 		return
@@ -163,11 +192,14 @@ func (s *Server) deleteRoleTrack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	if !lockRoleTrackForEdit(w, r, tx, code, "", nil) {
+	if !lockRoleTrackAccounts(w, r, tx, 0) || !lockRoleTrackForEdit(w, r, tx, code, "", nil) {
 		return
 	}
 	if _, err = tx.Exec(r.Context(), `delete from permission_role_tracks where code=$1`, code); err != nil {
 		writeError(w, http.StatusInternalServerError, "删除权限组线路失败")
+		return
+	}
+	if _, ok := requireCurrentWritePermission(w, r, tx, "permission.write"); !ok {
 		return
 	}
 	if err = tx.Commit(r.Context()); err != nil {
@@ -198,9 +230,7 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var lockedUserID int64
-	if err = tx.QueryRow(r.Context(), `select id from users where id=$1 for update`, userID).Scan(&lockedUserID); err != nil {
-		writeError(w, http.StatusInternalServerError, "锁定用户授权失败")
+	if !lockRoleTrackAccounts(w, r, tx, userID) {
 		return
 	}
 	var lockedTrackCode string
@@ -267,6 +297,10 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 		return
 	}
 	rows.Close()
+	actor, ok := requireCurrentWritePermission(w, r, tx, "permission.write")
+	if !ok {
+		return
+	}
 	targets, targetExpiries, changed := shiftRoleTrackRoles(roles, currentExpiries, direction)
 	if !changed {
 		skipRequestActivity(r)
@@ -307,7 +341,7 @@ func (s *Server) applyUserRoleTrack(w http.ResponseWriter, r *http.Request, dire
 	if direction < 0 {
 		action = "downgrade_role_track"
 	}
-	if err := s.auditPermissionChangeTx(r.Context(), tx, currentClaims(r).Subject, &userID, action, map[string]any{"track": trackCode, "from": current, "to": targets}); err != nil {
+	if err := s.auditPermissionChangeTx(r.Context(), tx, actor.Subject, &userID, action, map[string]any{"track": trackCode, "from": current, "to": targets}); err != nil {
 		writeError(w, http.StatusInternalServerError, "记录权限组调整失败")
 		return
 	}

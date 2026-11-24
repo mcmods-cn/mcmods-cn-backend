@@ -153,7 +153,7 @@ func TestOCT03CBUG004ConcurrentRoleTrackReadsCommittedManualBindingIntegration(t
 	if err := f.db.QueryRow(f.ctx, `select public_id from users where id=$1`, target).Scan(&targetPublicID); err != nil {
 		t.Fatal(err)
 	}
-	server, barrier := oct03CTraceAuthorizationPool(t, f, "select role.code,binding.expires_at", "select id from users where id=$1 for update")
+	server, barrier := oct03CTraceAuthorizationPool(t, f, "select role.code,binding.expires_at", roleTrackAccountLockSQL)
 	ctx, cancel := context.WithTimeout(f.ctx, 15*time.Second)
 	defer cancel()
 	defer barrier.allowFirst()
