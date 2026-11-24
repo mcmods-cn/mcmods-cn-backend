@@ -515,7 +515,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/v1/admin/reports/{id}/reopen", s.requirePermission("report.action.reopen", s.reopenUnifiedReport))
 	s.mux.HandleFunc("GET /api/v1/admin/bans", s.requirePermission("ban.view_internal", s.adminBans))
 	s.mux.HandleFunc("POST /api/v1/admin/bans", s.requirePermission("ban.create", s.adminBans))
-	s.mux.HandleFunc("GET /api/v1/admin/ban-reasons", s.requirePermission("ban.create", s.adminBanReasons))
+	s.mux.HandleFunc("GET /api/v1/admin/ban-reasons", s.requireAuth(s.adminBanReasons))
 	s.mux.HandleFunc("POST /api/v1/admin/bans/{id}/revoke", s.requirePermission("ban.revoke", s.revokeBan))
 	s.mux.HandleFunc("GET /api/v1/admin/seed-crawler", s.requirePermission("seed_crawler.view", s.adminSeedCrawler))
 	s.mux.HandleFunc("PUT /api/v1/admin/seed-crawler", s.requirePermission("seed_crawler.configure", s.adminSeedCrawler))

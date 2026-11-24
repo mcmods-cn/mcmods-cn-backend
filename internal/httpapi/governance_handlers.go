@@ -1173,6 +1173,11 @@ type createBanRequest struct {
 }
 
 func (s *Server) adminBanReasons(w http.ResponseWriter, r *http.Request) {
+	claims := currentClaims(r)
+	if !claimsAllow(claims, "ban.create") && !claimsAllow(claims, "report.action.ban") {
+		writeError(w, http.StatusForbidden, "permission denied")
+		return
+	}
 	locale := normalizedSiteAffairsLocale(r.URL.Query().Get("locale"))
 	rows, err := s.db.Query(r.Context(), `select code,coalesce(translations->>$1,translations->>'zh-CN',code),sort_order
 		from ban_reasons where active order by sort_order,code`, locale)

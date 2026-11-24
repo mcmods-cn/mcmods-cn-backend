@@ -20,4 +20,4 @@
 
 公开接口不返回举报人、附件、审核员内部备注、IP、设备、风控理由或权限明细。内部原因仅要求 `ban.view_internal`。创建和解除分别要求 `ban.create`、`ban.revoke`。
 
-后台通过受 `ban.create` 保护的 `GET /api/v1/admin/ban-reasons` 读取本地化常用理由，独立封禁和举报结案封禁共用同一选择器；选择 `other` 时后端仍强制填写自定义理由，客户端不能提交任意不存在的理由代码。
+持有 `ban.create` 或 `report.action.ban` 的人员可通过 `GET /api/v1/admin/ban-reasons` 读取本地化常用理由。独立封禁和举报结案封禁共用选择器，各自执行原有的写权限检查。选择 `other` 时后端仍强制填写自定义理由，客户端不能提交任意不存在的理由代码。
