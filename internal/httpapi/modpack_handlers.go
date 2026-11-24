@@ -121,6 +121,7 @@ type modpackResponse struct {
 }
 
 type modpackCatalogCard struct {
+	Stats               *projectCatalogStats            `json:"stats,omitempty"`
 	ID                  int64                           `json:"-"`
 	PublicID            string                          `json:"id"`
 	SiteID              string                          `json:"siteId"`
@@ -266,7 +267,7 @@ func (s *Server) modpacks(w http.ResponseWriter, r *http.Request) {
 		pack.abbreviation,pack.summary,pack.default_locale,pack.environment,pack.primary_category,pack.official_status,
 		pack.source_status,pack.license,pack.curseforge_project_id,pack.modrinth_project_id,pack.icon_url,
 		pack.search_keywords,pack.review_status,pack.created_at,pack.updated_at,pack.published_at,
-		exists(select 1 from modpack_gallery_images gallery where gallery.modpack_id=pack.id)
+		exists(select 1 from modpack_gallery_images gallery where gallery.modpack_id=pack.id),`+projectCatalogStatsSQL+`
 		from modpacks pack
 		left join public_routes popularity_route on popularity_route.entity_type='modpack' and popularity_route.internal_id=pack.id
 		left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
@@ -331,25 +332,12 @@ func (s *Server) modpackItem(w http.ResponseWriter, r *http.Request) {
 	}
 	item.CanEdit = canEditModpack(claims, item)
 	ossCfg := s.ossConfigFromSettings(r.Context())
-	item.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.IconURL)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate modpack icon URL")
-		return
+	imageFields := appendProjectAuthorImages([]*string{&item.IconURL}, item.Authors)
+	for i := range item.Mods {
+		imageFields = append(imageFields, &item.Mods[i].IconURL)
 	}
-	modIconURLs := make([]string, len(item.Mods))
-	for index := range item.Mods {
-		modIconURLs[index] = item.Mods[index].IconURL
-	}
-	modIconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, modIconURLs)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate contained mod icon URL")
-		return
-	}
-	for index := range item.Mods {
-		item.Mods[index].IconURL = modIconURLs[index]
-	}
-	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, item.Authors); err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate modpack author avatar URL")
+	if err = s.resolveProjectImageFields(r.Context(), ossCfg, imageFields); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate project image URLs")
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
@@ -903,7 +891,7 @@ func scanModpackCatalogCard(row scanner) (modpackCatalogCard, error) {
 		&item.Abbreviation, &item.Summary, &item.DefaultLocale, &item.Environment, &item.PrimaryCategory,
 		&item.OfficialStatus, &item.SourceStatus, &item.License, &item.CurseForgeProjectID, &item.ModrinthProjectID,
 		&item.IconURL, &item.SearchKeywords, &item.ReviewStatus, &item.CreatedAt, &item.UpdatedAt, &item.PublishedAt,
-		&item.HasGallery)
+		&item.HasGallery, &item.Stats)
 	item.Compatibilities = []modLoaderCompatibilityPayload{}
 	item.Tags = []string{}
 	item.Authors = []catalogCardAuthorPayload{}

@@ -120,7 +120,7 @@ func TestStoredOSSImagesDoNotSignUnboundPrivateFilesIntegration(t *testing.T) {
 			}}
 		}
 		before := counter.queries.Load()
-		if err := server.resolveModAuthorOSSURLsWithConfig(ownerCtx, cfg, authors); err != nil {
+		if err := server.resolveProjectImageFields(ownerCtx, cfg, appendProjectAuthorImages(nil, authors)); err != nil {
 			t.Fatal(err)
 		}
 		for _, author := range authors {

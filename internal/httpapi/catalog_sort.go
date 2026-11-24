@@ -6,6 +6,21 @@ import (
 	"unicode/utf8"
 )
 
+// Catalog counts come from the site's route projection used for sorting.
+type projectCatalogStats struct {
+	Downloads   int64    `json:"downloads"`
+	Views       int64    `json:"views"`
+	Favorites   int64    `json:"favorites"`
+	Comments    int64    `json:"comments"`
+	RatingCount int64    `json:"ratingCount"`
+	Rating      *float64 `json:"rating"`
+}
+
+const projectCatalogStatsSQL = `case when popularity.object_route_id is not null then jsonb_build_object(
+	'downloads',popularity.download_count,'views',popularity.view_count,'favorites',popularity.favorite_count,
+	'comments',popularity.comment_count,'ratingCount',popularity.rating_count,
+	'rating',case when popularity.rating_count>0 then popularity.rating_average end) end`
+
 type catalogSort string
 type catalogSortDirection string
 

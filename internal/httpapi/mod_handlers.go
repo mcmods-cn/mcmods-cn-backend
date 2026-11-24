@@ -113,6 +113,7 @@ type createModRequest struct {
 }
 
 type modResponse struct {
+	Stats                *projectCatalogStats            `json:"stats,omitempty"`
 	ID                   int64                           `json:"-"`
 	PublicID             string                          `json:"id"`
 	UniqueID             string                          `json:"uniqueId"`
@@ -485,7 +486,7 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		`select m.id, project_code, slug, primary_name, secondary_name, abbreviation, summary, environment, primary_category,
 		        official_status, source_status, license, curseforge_project_id, modrinth_project_id, github_project_path, icon_url,
 		        body_markdown, search_keywords, submission_method, review_status, submitted_by, m.created_at, m.updated_at, published_at,
-		        (select revision.public_id from content_revisions revision where revision.id=m.published_revision_id)
+		        (select revision.public_id from content_revisions revision where revision.id=m.published_revision_id),`+projectCatalogStatsSQL+`
 		 from mods m
 		 left join public_routes popularity_route on popularity_route.entity_type='mod' and popularity_route.internal_id=m.id
 		 left join content_popularity_stats popularity on popularity.object_route_id=popularity_route.id
@@ -503,7 +504,9 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]modResponse, 0)
 	for rows.Next() {
-		mod, err := scanMod(rows)
+		var stats *projectCatalogStats
+		mod, err := scanMod(rows, &stats)
+		mod.Stats = stats
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "解析模组列表失败")
 			return
@@ -520,22 +523,13 @@ func (s *Server) publicMods(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
-	iconURLs := make([]string, len(items))
-	for index := range items {
-		iconURLs[index] = items[index].IconURL
+	var imageFields []*string
+	for i := range items {
+		imageFields = append(imageFields, &items[i].IconURL)
+		imageFields = appendProjectAuthorImages(imageFields, items[i].Authors)
 	}
-	iconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, iconURLs)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate mod icon URL")
-		return
-	}
-	authors := make([][]modAuthorPayload, len(items))
-	for index := range items {
-		items[index].IconURL = iconURLs[index]
-		authors[index] = items[index].Authors
-	}
-	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, authors...); err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate mod author avatar URL")
+	if err = s.resolveProjectImageFields(r.Context(), ossCfg, imageFields); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate mod image URLs")
 		return
 	}
 	writeJSON(w, http.StatusOK, modListResponse{Items: items, Total: total})
@@ -562,45 +556,38 @@ func (s *Server) publicModDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ossCfg := s.ossConfigFromSettings(r.Context())
-	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, mod.Authors); err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate mod author avatar URL")
-		return
-	}
-	mod.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, mod.IconURL)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate mod icon URL")
+	if err = s.resolveProjectImageFields(r.Context(), ossCfg, appendProjectAuthorImages([]*string{&mod.IconURL}, mod.Authors)); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate mod image URLs")
 		return
 	}
 	writeJSON(w, http.StatusOK, mod)
 }
 
-func (s *Server) resolveModAuthorOSSURLsWithConfig(ctx context.Context, cfg ossConfigPayload, groups ...[]modAuthorPayload) error {
-	var avatars []*string
-	for _, authors := range groups {
-		for i := range authors {
-			author := &authors[i]
-			avatars = append(avatars, &author.AvatarURL)
-			for j := range author.Members {
-				avatars = append(avatars, &author.Members[j].AvatarURL)
-			}
+func appendProjectAuthorImages(fields []*string, authors []modAuthorPayload) []*string {
+	for i := range authors {
+		fields = append(fields, &authors[i].AvatarURL)
+		for j := range authors[i].Members {
+			fields = append(fields, &authors[i].Members[j].AvatarURL)
 		}
 	}
-	// Use the same storage visibility check as project icons. Large teams can
-	// exceed the catalog page size, so cap the number of URL inputs per query.
-	for len(avatars) > 0 {
-		batchSize := min(len(avatars), 256)
-		urls := make([]string, batchSize)
-		for i, avatar := range avatars[:batchSize] {
-			urls[i] = *avatar
+	return fields
+}
+
+func (s *Server) resolveProjectImageFields(ctx context.Context, cfg ossConfigPayload, fields []*string) error {
+	for len(fields) > 0 {
+		batch := fields[:min(len(fields), 256)]
+		urls := make([]string, len(batch))
+		for i, field := range batch {
+			urls[i] = *field
 		}
 		resolved, err := s.resolveStoredOSSImageURLsWithConfig(ctx, cfg, urls)
 		if err != nil {
 			return err
 		}
-		for i, url := range resolved {
-			*avatars[i] = url
+		for i, field := range batch {
+			*field = resolved[i]
 		}
-		avatars = avatars[batchSize:]
+		fields = fields[len(batch):]
 	}
 	return nil
 }
@@ -686,14 +673,15 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-func scanMod(row scanner) (modResponse, error) {
+func scanMod(row scanner, extraColumns ...any) (modResponse, error) {
 	var mod modResponse
-	err := row.Scan(
+	columns := []any{
 		&mod.ID, &mod.UniqueID, &mod.SiteID, &mod.PrimaryName, &mod.SecondaryName, &mod.Abbreviation, &mod.Summary,
 		&mod.Environment, &mod.PrimaryCategory, &mod.OfficialStatus, &mod.SourceStatus, &mod.License,
 		&mod.CurseForgeProjectID, &mod.ModrinthProjectID, &mod.GitHubProjectPath, &mod.IconURL, &mod.BodyMarkdown, &mod.SearchKeywords,
 		&mod.SubmissionMethod, &mod.ReviewStatus, &mod.SubmittedByInternal, &mod.CreatedAt, &mod.UpdatedAt, &mod.PublishedAt, &mod.PublishedRevisionID,
-	)
+	}
+	err := row.Scan(append(columns, extraColumns...)...)
 	mod.PublicID = mod.UniqueID
 	mod.Tags = []string{}
 	mod.ModIDs = []modIdentifierPayload{}

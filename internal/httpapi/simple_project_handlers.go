@@ -308,25 +308,12 @@ func (s *Server) simpleProjectItem(w http.ResponseWriter, r *http.Request) {
 	}
 	item.CanEdit = canEditSimpleProject(currentClaims(r), item)
 	ossCfg := s.ossConfigFromSettings(r.Context())
-	item.IconURL, err = s.resolveStoredOSSObjectAccessURLWithConfig(r.Context(), ossCfg, item.IconURL)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate project icon URL")
-		return
+	imageFields := appendProjectAuthorImages([]*string{&item.IconURL}, item.Authors)
+	for i := range item.ParentProjects {
+		imageFields = append(imageFields, &item.ParentProjects[i].IconURL)
 	}
-	parentIconURLs := make([]string, len(item.ParentProjects))
-	for index := range item.ParentProjects {
-		parentIconURLs[index] = item.ParentProjects[index].IconURL
-	}
-	parentIconURLs, err = s.resolveStoredOSSImageURLsWithConfig(r.Context(), ossCfg, parentIconURLs)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate parent project icon URL")
-		return
-	}
-	for index := range item.ParentProjects {
-		item.ParentProjects[index].IconURL = parentIconURLs[index]
-	}
-	if err = s.resolveModAuthorOSSURLsWithConfig(r.Context(), ossCfg, item.Authors); err != nil {
-		writeError(w, http.StatusBadGateway, "failed to generate project author avatar URL")
+	if err = s.resolveProjectImageFields(r.Context(), ossCfg, imageFields); err != nil {
+		writeError(w, http.StatusBadGateway, "failed to generate project image URLs")
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
