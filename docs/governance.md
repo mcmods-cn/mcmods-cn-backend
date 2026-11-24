@@ -22,7 +22,7 @@
 | 运行时间与分配 | Forge/NeoForge 的稳定构建版本选择保留原比较规则，改为一次扫描。相同 Go 1.26.11、单线程、2,048 个合成版本各测六次，中位耗时从 6.44 ms 降至 0.553 ms，每次分配从 4,406,376 字节降至 393,024 字节。复跑 `go test ./internal/httpapi -run '^$' -bench '^BenchmarkSelectLoaderArtifactVersion$' -benchmem -count=6`。 |
 | 目录布局深分页 | PostgreSQL 18.6，同一回滚事务、十万行和两个栏目。先对每个范围取主键页，再统一截取 501 项并补详情。五次交替执行、剔除首对后，中间页的 SQL 执行中位数从 1,538 ms 降至 19 ms，500 个结果的内容与顺序一致。稀有词从 18 ms 升至 29 ms，无结果从 4 ms 升至 9 ms。完整 HTTP 门另跑 `TestModContentSectionCursorSearchAndGraphIntegration`。 |
 | 蓝图归一化和封面 | 相同十万个非空气方块，Go 单线程六轮测量，每次额外分配从 4,800,512 字节降至 0。解码拒绝方块索引数量与声明体积不符的 Sponge 数据。封面回归解码实际 PNG 检查细长结构两端的方块颜色。[蓝图生命周期](blueprint-and-comment-lifecycle.md) |
-| 备份恢复 | PostgreSQL 18.6 在恢复时会重新解析触发器的 `WHEN`。曾有一处等价的行比较在恢复后生成不同的定义文本，导致同一安装程序拒绝启动。改用逐字段、NULL 安全比较后，在两个独立库比对了 10,164 条定义并复核了合成项目的公开 ID。CI 的 `postgres-integration` 使用同一安装程序复查还原库。[持续验收入口](../.github/workflows/ci.yml) |
+| 备份恢复 | PostgreSQL 18.6 在恢复时会重新解析触发器的 `WHEN`。曾有一处等价的行比较在恢复后生成不同的定义文本，导致同一安装程序拒绝启动。改用逐字段、NULL 安全比较后，在两个独立库比对了最终结构的 10,162 条定义，合成项目的公开 ID 一致。该次结构取自 `b7ce2abd`，定义 SHA-256 为 `9f860add623943cee7ee7376b8acadaa4de49ef38050b723fd6f29311679bafc`。CI 的 `postgres-integration` 使用同一安装程序复查还原库。[持续验收入口](../.github/workflows/ci.yml) |
 | 日志保留 | 分类选择继承时将 `categoryDays` 中的该项保存为 0，实际保留期来自 `defaultDays`。站点策略 365 天的集成回归覆盖保留 180 天日志、清理 400 天日志。复跑 `TestSavedLogCategoryCanInheritTheSiteRetentionIntegration`。 |
 | 皮肤对象收据 | 网页和启动器共用的纹理写入会保留本次生成的对象键。即使对象存储已写入但客户端未收到成功回执，事务回滚后也可回收遗留字节。真实 PostgreSQL 与受控对象服务验证了保留待删记录、删除旧对象、重试使用新键。[文件约定](oss-object-layout.md) |
 
@@ -31,6 +31,31 @@
 资料字段可保存最多 2,048 条引用。审核发布后，事务会逐条登记尚未解析的引用。只修改目录布局的显示方式时保留目录外的父进度。JEI categories v7 的候选保留未知数量及显式 0，v6 维持原有数量规则。[导入契约](import-asset-registry.md)
 
 完整 PostgreSQL 门禁按一次运行的固定提交计数。运行中止、测试断言失败、条件跳过分别保留。合并修复后需重新运行整门，所需服务和隔离步骤见[测试环境](testing-isolated-environment.md)。正式 Fabric 和 Forge 发行包的入世界导出、目标云服务与跨主机恢复仍待验收。
+
+### 发行文件、逐文件记录与复验
+
+exporter 的 `e751c8b` 在 JDK 17 上完成 JUnit、两种加载器构建与 Python 契约校验。从同一次 GitHub 构建下载发行包后，Fabric Loader 0.16.14 和 Forge 47.4.21 均识别了 0.10.2。两个标准实例在 Minecraft 登录处停止。配对文件的 SHA-256 如下。[发行构建与下载](https://github.com/mcmods-cn/mcmods_exporter/actions/runs/45390514931)
+
+| Minecraft 1.20.1 加载器 | 发行 JAR SHA-256 |
+| --- | --- |
+| Fabric | `be598e163a2cbf8808cac00d5d6f659de2730b487eda6a3cc49a81cd1fb57cd8` |
+| Forge | `b81d484aa10ae36f152b8758ff8799682f075e96009e8513b2b5e93b573069bb` |
+
+PostgreSQL 18.6 上，131 条待解析 Mod 关系原需 268 次 SQL，已有目标的关系会得到错误回执。现在按锁定的实际关系生成回执，同一输入共 8 次 SQL。清理队列按失败时间和 ID 读取死信；十万条工单、五千条死信的同一热缓存样本，取最近 50 条的通用计划从 1,968 个共享缓存页降至 23 个，返回的 ID 和顺序一致。[对象死信恢复](queue-recovery.md#oss-对象删除)
+
+`840f009` 的隔离服务门使用 PostgreSQL、Redis、NATS/JetStream 与 Typesense。31 个顶层用例及 6 个子场景均执行通过，包含权限版本和广播重连。完整数据库门的用例比该专项目录更广，按各自源码和运行编号核对。[真实服务专项](https://github.com/mcmods-cn/mcmods-cn-backend/actions/runs/45391231935)
+
+逐文件记录包含三个固定 Git SHA、每份文件的 Git blob、SHA-256、分类、连续阅读区间或格式核验依据。条目保留实际阅读者的职责与调用链记录。将三仓完整 Git 克隆放在同一目录，打开下列命令所在的后端仓库。命令会重新读取记录中的 Git 对象并检查区间，输出中单列运行验证。[逐文件记录](audit/current-review.json.gz) · [核对工具](../tools/audit/review_snapshot.py)
+
+```sh
+work=$(mktemp -d)
+gzip -dc docs/audit/current-review.json.gz > "$work/proof.json"
+python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["snapshots"]))' "$work/proof.json" > "$work/pins.json"
+python3 -B tools/audit/review_snapshot.py --workspace .. --snapshots "$work/pins.json" \
+  --proof "$work/proof.json" --output "$work/verified.json" --require-complete
+```
+
+记录绑定收录源码的提交。存放压缩记录的后续提交，可另用 `gzip -t` 校验文件，并用上述命令验证解压后的内容。
 
 ### 2026-11-23 冻结快照的验收
 
