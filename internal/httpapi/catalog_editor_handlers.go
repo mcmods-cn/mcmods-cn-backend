@@ -319,25 +319,20 @@ func importedCatalogLocalizationRows(raw []byte) []map[string]any {
 	if len(raw) == 0 || json.Unmarshal(raw, &names) != nil {
 		return []map[string]any{}
 	}
-	normalized := make(map[string]string, len(names))
-	for rawLocale, rawName := range names {
-		locale := normalizeContentLocale(rawLocale)
-		name := strings.TrimSpace(rawName)
-		if name == "" || locale == "" {
-			continue
+	normalized := selectCatalogLocales(names, func(rawLocale, name string) string {
+		if strings.TrimSpace(name) == "" {
+			return ""
 		}
+		locale := normalizeContentLocale(rawLocale)
 		if !isEditableContentLocale(locale) {
 			base, _, _ := strings.Cut(locale, "-")
-			if isEditableContentLocale(base) {
-				locale = base
-			} else {
-				continue
+			locale = normalizeContentLocale(base)
+			if !isEditableContentLocale(locale) {
+				return ""
 			}
 		}
-		if _, exists := normalized[locale]; !exists {
-			normalized[locale] = name
-		}
-	}
+		return locale
+	})
 	locales := make([]string, 0, len(normalized))
 	for locale := range normalized {
 		locales = append(locales, locale)
@@ -346,7 +341,7 @@ func importedCatalogLocalizationRows(raw []byte) []map[string]any {
 	result := make([]map[string]any, 0, len(locales))
 	for _, locale := range locales {
 		result = append(result, map[string]any{
-			"locale": locale, "name": normalized[locale], "summary": "", "contentMarkdown": "",
+			"locale": locale, "name": strings.TrimSpace(normalized[locale]), "summary": "", "contentMarkdown": "",
 			"provenance": "import", "sourceLocale": "", "revisionNo": 0, "editable": true,
 			"reviewStatus": "approved", "publishedRevisionId": nil,
 		})

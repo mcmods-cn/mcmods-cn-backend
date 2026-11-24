@@ -71,3 +71,33 @@ func TestCatalogHumanEditProvenance(t *testing.T) {
 		}
 	}
 }
+
+func TestCatalogLocaleAliasesPreserveTheEditableNameOnRoundTrip(t *testing.T) {
+	// Imported Minecraft codes and canonical human localizations share the read projection.
+	raw := []byte(`{"en-GB":"British name","en_us":"Imported name","en-US":"Manual name","es-MX":"Nombre"}`)
+	rows, defaultLocale := catalogImportedEditorLocalizations(raw, "en-US", "")
+	var edits []catalogLocalizationEdit
+	for _, row := range rows {
+		edits = append(edits, catalogLocalizationEdit{Locale: row["locale"].(string), Name: row["name"].(string)})
+	}
+	_, edits, err := normalizeCatalogLocalizations(defaultLocale, edits)
+	if err != nil || len(edits) != 2 || edits[0].Locale != "en-US" || edits[0].Name != "Manual name" || edits[1].Locale != "es-ES" || edits[1].Name != "Nombre" {
+		t.Fatalf("editor round trip = %+v, %v", edits, err)
+	}
+	if locale, name := catalogResolvedName(raw, "en-US", "ja-JP", "en-US"); locale != "en-US" || name != "Manual name" {
+		t.Fatalf("public projection = %q %q", locale, name)
+	}
+	if locale, name := catalogResolvedName(raw, "en-GB", "en-US", "en-US"); locale != "en-GB" || name != "British name" {
+		t.Fatalf("regional public localization = %q %q", locale, name)
+	}
+}
+
+func TestExportNameAliasesPreserveTheCanonicalTooltip(t *testing.T) {
+	names := map[string]any{"en-US": []any{"canonical"}, "en_us": []any{"alias"}, "es-MX": []any{"unsupported"}}
+	for range 100 {
+		selected := supportedExportNames(names)
+		if got := selected["en-US"].([]any)[0]; got != "canonical" || len(selected) != 1 {
+			t.Fatalf("canonical tooltip=%#v, supported count=%d", got, len(selected))
+		}
+	}
+}

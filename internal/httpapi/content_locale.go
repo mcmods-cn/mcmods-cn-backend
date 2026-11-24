@@ -77,6 +77,41 @@ func normalizeContentLocale(value string) string {
 	return locale
 }
 
+// The same database projection may contain both a canonical human localization
+// and a Minecraft spelling or language fallback. Keep the most specific key.
+func selectCatalogLocales[T any](values map[string]T, resolve func(string, T) string) map[string]T {
+	result := make(map[string]T)
+	selected := make(map[string]string)
+	for key, value := range values {
+		locale := resolve(key, value)
+		if locale == "" {
+			continue
+		}
+		if previous, exists := selected[locale]; exists {
+			rank, previousRank := catalogLocaleKeyRank(key, locale), catalogLocaleKeyRank(previous, locale)
+			if rank > previousRank || rank == previousRank && key >= previous {
+				continue
+			}
+		}
+		result[locale] = value
+		selected[locale] = key
+	}
+	return result
+}
+
+func catalogLocaleKeyRank(key, locale string) int {
+	switch {
+	case key == locale:
+		return 0
+	case strings.EqualFold(strings.ReplaceAll(strings.TrimSpace(key), "_", "-"), locale):
+		return 1
+	case normalizeContentLocale(key) == locale:
+		return 2
+	default:
+		return 3
+	}
+}
+
 func isASCIIDigits(value string) bool {
 	if value == "" {
 		return false

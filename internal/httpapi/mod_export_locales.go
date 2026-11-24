@@ -53,15 +53,10 @@ func canonicalExportLocaleTag(value string) (string, bool) {
 
 func supportedExportNames(value any) map[string]any {
 	raw, _ := value.(map[string]any)
-	result := make(map[string]any, len(exportContentLocaleByCode))
-	for sourceLocale, localized := range raw {
-		locale, supported := exportContentLocale(sourceLocale)
-		if !supported {
-			continue
-		}
-		result[locale] = localized
-	}
-	return result
+	return selectCatalogLocales(raw, func(key string, _ any) string {
+		locale, _ := exportContentLocale(key)
+		return locale
+	})
 }
 
 // filterSupportedExportLocalizedFields removes locale variants which the site

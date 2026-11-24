@@ -516,14 +516,14 @@ func catalogResolvedName(raw []byte, primary, secondary, defaultLocale string) (
 	if len(raw) == 0 || json.Unmarshal(raw, &encoded) != nil {
 		return "", ""
 	}
-	names := make(map[string]string, len(encoded))
-	available := make([]string, 0, len(encoded))
-	for rawLocale, name := range encoded {
-		locale := normalizeContentLocale(rawLocale)
-		if locale == "" || strings.TrimSpace(name) == "" {
-			continue
+	names := selectCatalogLocales(encoded, func(key, name string) string {
+		if strings.TrimSpace(name) == "" {
+			return ""
 		}
-		names[locale] = name
+		return normalizeContentLocale(key)
+	})
+	available := make([]string, 0, len(names))
+	for locale := range names {
 		available = append(available, locale)
 	}
 	resolution := resolveContentLocale(primary, secondary, defaultLocale, available)
