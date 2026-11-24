@@ -405,6 +405,13 @@ func (c *Cache) pruneClaimsLocked(now time.Time) {
 	}
 }
 
+// All replicas use the Redis clock for lease scores and expiry comparisons.
+const realtimeLeaseClock = `
+local clock = redis.call('TIME')
+local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
+local ttl = tonumber(ARGV[1])
+`
+
 // AcquireRealtimeLease atomically applies deployment-wide total, user and
 // session connection budgets. Validated multi-instance configurations require
 // Redis; optional single-instance caching may use the bounded local lease table.
@@ -421,20 +428,18 @@ func (c *Cache) AcquireRealtimeLease(ctx context.Context, userID int64, sessionI
 		userKey, userOK := c.redisKey("realtime:leases:user:" + strconv.FormatInt(userID, 10))
 		sessionKey, sessionOK := c.redisKey("realtime:leases:session:" + sessionID)
 		if userOK && sessionOK {
-			now := time.Now().UnixMilli()
-			expiresAt := now + ttl.Milliseconds()
 			started := time.Now()
-			allowed, err := c.redis.Eval(ctx, `
-for index,key in ipairs(KEYS) do redis.call('ZREMRANGEBYSCORE',key,'-inf',ARGV[1]) end
-if redis.call('ZCARD',KEYS[1])>=tonumber(ARGV[4]) then return 0 end
-if redis.call('ZCARD',KEYS[2])>=tonumber(ARGV[5]) then return 0 end
-if redis.call('ZCARD',KEYS[3])>=tonumber(ARGV[6]) then return 0 end
+			allowed, err := c.redis.Eval(ctx, realtimeLeaseClock+`
+for _,key in ipairs(KEYS) do redis.call('ZREMRANGEBYSCORE',key,'-inf',now) end
 for index,key in ipairs(KEYS) do
- redis.call('ZADD',key,ARGV[2],ARGV[3])
- redis.call('PEXPIRE',key,ARGV[7])
+ if redis.call('ZCARD',key)>=tonumber(ARGV[2+index]) then return 0 end
+end
+for _,key in ipairs(KEYS) do
+ redis.call('ZADD',key,now+ttl,ARGV[2])
+ redis.call('PEXPIRE',key,ttl*2)
 end
 return 1
-`, []string{allKey, userKey, sessionKey}, now, expiresAt, lease.id, totalLimit, userLimit, sessionLimit, max(ttl.Milliseconds()*2, int64(1))).Int()
+`, []string{allKey, userKey, sessionKey}, max(ttl.Milliseconds(), int64(1)), lease.id, totalLimit, userLimit, sessionLimit).Int()
 			c.recordRedisResult(started, err)
 			if err == nil {
 				if allowed != 1 {
@@ -490,13 +495,18 @@ func (lease *RealtimeLease) Refresh(ctx context.Context) bool {
 		if !allOK || !userOK || !sessionOK || lease.cache.redis == nil {
 			return false
 		}
-		expiresAt := time.Now().Add(lease.ttl).UnixMilli()
 		started := time.Now()
-		refreshed, err := lease.cache.redis.Eval(ctx, `
-for index,key in ipairs(KEYS) do if not redis.call('ZSCORE',key,ARGV[1]) then return 0 end end
-for index,key in ipairs(KEYS) do redis.call('ZADD',key,'XX',ARGV[2],ARGV[1]); redis.call('PEXPIRE',key,ARGV[3]) end
+		refreshed, err := lease.cache.redis.Eval(ctx, realtimeLeaseClock+`
+for _,key in ipairs(KEYS) do
+ local score = redis.call('ZSCORE',key,ARGV[2])
+ if not score or tonumber(score)<=now then return 0 end
+end
+for _,key in ipairs(KEYS) do
+ redis.call('ZADD',key,'XX',now+ttl,ARGV[2])
+ redis.call('PEXPIRE',key,ttl*2)
+end
 return 1
-`, []string{allKey, userKey, sessionKey}, lease.id, expiresAt, max(lease.ttl.Milliseconds()*2, int64(1))).Int()
+`, []string{allKey, userKey, sessionKey}, max(lease.ttl.Milliseconds(), int64(1)), lease.id).Int()
 		lease.cache.recordRedisResult(started, err)
 		return err == nil && refreshed == 1
 	}
@@ -896,7 +906,7 @@ func (c *Cache) setLocal(key string, value []byte) {
 func (c *Cache) setLocalTTL(key string, value []byte, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.local) >= maxLocalEntries {
+	if _, exists := c.local[key]; !exists && len(c.local) >= maxLocalEntries {
 		now := time.Now()
 		for existingKey, entry := range c.local {
 			if now.After(entry.expiresAt) {

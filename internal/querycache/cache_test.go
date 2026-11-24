@@ -136,3 +136,21 @@ func TestRealtimeLeaseLocalFallbackEnforcesTotalUserAndSessionBudgets(t *testing
 	}
 	replacement.Release(ctx)
 }
+
+func TestReplacingLocalCacheEntriesPreservesOtherKeys(t *testing.T) {
+	cache := New(config.RedisConfig{})
+	for i := range maxLocalEntries {
+		cache.Set(t.Context(), strconv.Itoa(i), []byte("old"), time.Minute)
+	}
+	for i := range maxLocalEntries {
+		cache.Set(t.Context(), strconv.Itoa(i), []byte("new"), time.Minute)
+		if len(cache.local) != maxLocalEntries {
+			t.Fatalf("replacing key %d evicted an unrelated entry: %d keys remain", i, len(cache.local))
+		}
+	}
+	for i := range maxLocalEntries {
+		if value, ok := cache.Get(t.Context(), strconv.Itoa(i)); !ok || string(value) != "new" {
+			t.Fatalf("missing updated value for key %d", i)
+		}
+	}
+}
