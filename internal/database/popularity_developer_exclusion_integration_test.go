@@ -135,7 +135,7 @@ func TestPopularityExcludesEveryEffectiveDeveloperIntegration(t *testing.T) {
 			t.Helper()
 			var incremental, actual int
 			err := tx.QueryRow(ctx, `select facts.unique_view_count,(select count(*) from content_unique_views v
-				where v.object_route_id=facts.object_route_id and content_popularity_unique_view_eligible(v.object_route_id,v.viewer_user_id))
+				where v.object_route_id=facts.object_route_id and pg_temp.content_popularity_unique_view_eligible(v.object_route_id,v.viewer_user_id))
 				from content_popularity_lifetime_facts facts where facts.object_route_id=$1`, routeID).Scan(&incremental, &actual)
 			if err != nil || incremental != want || actual != want {
 				t.Fatalf("project unique views=%d source=%d, want %d: %v", incremental, actual, want, err)
