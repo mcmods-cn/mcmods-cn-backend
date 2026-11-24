@@ -870,7 +870,9 @@ func (s *Server) catalogRecipeBindingRows(ctx context.Context, recipeID int64) (
 
 func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotID string) (map[string]any, error) {
 	rows, err := s.db.Query(ctx, `select binding.id,binding.source_slot_id,coalesce(nullif(binding.semantic_role,''),slot.role,''),
-		candidate.alternative_index,coalesce(resource_entity.public_id,''),coalesce(candidate.raw_resource_id,''),candidate.amount,
+		candidate.alternative_index,coalesce(resource_entity.public_id,''),coalesce(candidate.raw_resource_id,''),
+		coalesce(resource.resolved,false),coalesce(resource.kind_code,''),coalesce(resource.canonical_id,''),
+		coalesce(candidate.ingredient_kind,''),coalesce(candidate.ingredient_type,''),candidate.amount,
 		coalesce(candidate.chance,candidate.chance_percent/100.0),candidate.byproduct,
 		coalesce(icon_file.public_id,''),coalesce(imported.revision_id,''),coalesce(imported.icon_path,'')
 		from recipe_import_bindings binding
@@ -890,11 +892,13 @@ func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotI
 	result := map[string]any{}
 	for rows.Next() {
 		var bindingID, slotKey, role, resourcePublicID, rawResourceID, iconFileID, revisionID, iconPath string
+		var resolved bool
+		var kindCode, canonicalID, ingredientKind, ingredientType string
 		var candidateIndex sql.NullInt64
 		var amount, probability sql.NullFloat64
 		var byproduct sql.NullBool
 		if err = rows.Scan(&bindingID, &slotKey, &role, &candidateIndex, &resourcePublicID, &rawResourceID,
-			&amount, &probability, &byproduct, &iconFileID, &revisionID, &iconPath); err != nil {
+			&resolved, &kindCode, &canonicalID, &ingredientKind, &ingredientType, &amount, &probability, &byproduct, &iconFileID, &revisionID, &iconPath); err != nil {
 			return nil, err
 		}
 		binding, exists := result[slotKey].(map[string]any)
@@ -905,10 +909,14 @@ func (s *Server) catalogImportedRecipeBindingRows(ctx context.Context, snapshotI
 		if !candidateIndex.Valid {
 			continue
 		}
-		candidate := map[string]any{"resourcePublicId": resourcePublicID, "rawResourceId": rawResourceID,
+		if kindCode == "" {
+			kindCode = resourceKindForIngredient(ingredientKind, ingredientType)
+		}
+		candidate := map[string]any{"resourcePublicId": resourcePublicID, "rawResourceId": catalogUnresolvedRawID(resolved, rawResourceID),
+			"unresolved": !resolved, "kindCode": kindCode, "canonicalId": canonicalID,
 			"amount": nullableSQLFloat(amount), "probability": nullableSQLFloat(probability), "byproduct": byproduct.Valid && byproduct.Bool,
 			"definition": map[string]any{}}
-		if rawResourceID == "" {
+		if resolved {
 			candidate["iconUrl"] = catalogRecipeResourceIconURL(resourcePublicID, iconFileID, revisionID, iconPath)
 		}
 		candidates, _ := binding["candidates"].([]map[string]any)

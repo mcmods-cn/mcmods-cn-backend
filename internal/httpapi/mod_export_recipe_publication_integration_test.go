@@ -115,3 +115,46 @@ func TestImportedRecipeVersionsFollowPublicationIncludingMissingLayouts(t *testi
 		})
 	}
 }
+
+func TestPublishedImportedRecipeCandidatesKeepTheirResourceIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		resolved bool
+		bundle   func(*testing.T) []byte
+	}{
+		{"registry resource", true, func(t *testing.T) []byte { return recipeObservationPackage(t, false) }},
+		{"reference only", false, func(t *testing.T) []byte { return auditRecipeNegativePackage(t, "valid") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAuditFixGRFixture(t)
+			_, rev := f.imported(t, tc.bundle(t))
+			f.reviewGR(t, rev, "approved")
+			var recipe, resource string
+			if err := f.db.QueryRow(f.ctx, `select r.public_id,e.public_id from recipe_import_snapshots s
+				join catalog_entities r on r.id=s.recipe_id
+				join recipe_import_bindings b on b.recipe_snapshot_id=s.id
+				join recipe_import_binding_candidates c on c.binding_id=b.id
+				join catalog_entities e on e.id=c.resource_id where s.revision_id=$1 and c.raw_resource_id='example:plate'`, rev).Scan(&recipe, &resource); err != nil {
+				t.Fatal(err)
+			}
+			raw := f.require(t, "", http.MethodGet, "/api/v1/catalog/recipes/"+recipe, nil, http.StatusOK)
+			out := decodeTEST022Data[struct {
+				Bindings map[string]struct{ Candidates []map[string]any }
+			}](t, raw)
+			candidates := out.Bindings["output_0"].Candidates
+			if len(candidates) != 1 {
+				t.Fatalf("output candidates=%v", candidates)
+			}
+			c := candidates[0]
+			if c["kindCode"] != "minecraft.item" || c["unresolved"] != !tc.resolved || c["amount"] != float64(2) || c["probability"] != nil {
+				t.Fatalf("candidate properties=%+v", c)
+			}
+			if tc.resolved && (c["resourcePublicId"] != resource || c["canonicalId"] != "example:plate" || c["rawResourceId"] != "") {
+				t.Fatalf("collected candidate=%+v", c)
+			}
+			if !tc.resolved && c["rawResourceId"] != "example:plate" {
+				t.Fatalf("reference candidate=%+v", c)
+			}
+		})
+	}
+}
