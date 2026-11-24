@@ -281,11 +281,11 @@ func probeConfigurationNamespaces(ctx context.Context, target Target, protocol i
 					result.Diagnostic = "Fabric 注册表解析失败：" + registryErr.Error()
 					continue
 				}
-				if recordErr := recordConfigurationIDs(registryEvidence, registryNames); recordErr != nil {
+				if recordErr := recordFabricRegistryNamespaces(registryEvidence, registryNames); recordErr != nil {
 					result.Diagnostic = recordErr.Error()
 					continue
 				}
-				if recordErr := recordConfigurationIDs(registryEvidence, entries); recordErr != nil {
+				if recordErr := recordFabricRegistryNamespaces(registryEvidence, entries); recordErr != nil {
 					result.Diagnostic = recordErr.Error()
 					continue
 				}
@@ -645,12 +645,19 @@ func parseConfigurationResourceLocationList(data []byte) ([]string, error) {
 func recordConfigurationIDs(target map[string]int, ids []string) error {
 	for _, id := range ids {
 		if namespace, _, ok := strings.Cut(strings.ToLower(id), ":"); ok {
-			if _, exists := target[namespace]; !exists && len(target) >= maximumConfigurationNamespaces {
-				return errors.New("configuration namespace evidence exceeds safety limit")
+			if err := recordConfigurationNamespace(target, namespace, 1); err != nil {
+				return err
 			}
-			target[namespace]++
 		}
 	}
+	return nil
+}
+
+func recordConfigurationNamespace(target map[string]int, namespace string, count int) error {
+	if _, exists := target[namespace]; !exists && len(target) >= maximumConfigurationNamespaces {
+		return errors.New("configuration namespace evidence exceeds safety limit")
+	}
+	target[namespace] += count
 	return nil
 }
 

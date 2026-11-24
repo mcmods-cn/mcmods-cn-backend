@@ -3,6 +3,7 @@ package serverprobe
 import (
 	"bytes"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -107,17 +108,24 @@ func TestParseFabricRegistrySync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(registries, []string{"minecraft:item"}) {
+	if !reflect.DeepEqual(registries, []fabricRegistryGroup{{namespace: "minecraft", paths: []string{"item"}}}) {
 		t.Fatalf("registries = %#v", registries)
 	}
-	wantEntries := []string{
-		"minecraft:stone",
-		"minecraft:dirt",
-		"examplemod:copper_ingot",
-		"examplemod:tin_ingot",
+	wantEntries := []fabricRegistryGroup{
+		{namespace: "minecraft", paths: []string{"stone", "dirt"}},
+		{namespace: "examplemod", paths: []string{"copper_ingot", "tin_ingot"}},
 	}
 	if !reflect.DeepEqual(entries, wantEntries) {
 		t.Fatalf("entries = %#v", entries)
+	}
+	evidence := map[string]int{}
+	for _, groups := range [][]fabricRegistryGroup{registries, entries} {
+		if err := recordFabricRegistryNamespaces(evidence, groups); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !reflect.DeepEqual(evidence, map[string]int{"minecraft": 3, "examplemod": 2}) {
+		t.Fatalf("namespace evidence = %#v", evidence)
 	}
 }
 
@@ -137,5 +145,27 @@ func TestParseConfigurationDynamicRegistry(t *testing.T) {
 	if registry != "minecraft:dimension_type" ||
 		!reflect.DeepEqual(entries, []string{"minecraft:overworld", "examplemod:moon"}) {
 		t.Fatalf("registry = %q, entries = %#v", registry, entries)
+	}
+}
+
+func BenchmarkParseFabricRegistrySync(b *testing.B) {
+	var data bytes.Buffer
+	writeVarInt(&data, 1)
+	_ = writeProtocolString(&data, "minecraft")
+	writeVarInt(&data, 1)
+	_ = writeProtocolString(&data, "item")
+	writeVarInt(&data, 1)
+	_ = writeProtocolString(&data, "example_items")
+	writeVarInt(&data, 1)
+	writeVarInt(&data, 1)
+	writeVarInt(&data, 64)
+	for index := range 64 {
+		_ = writeProtocolString(&data, "tool_"+strconv.Itoa(index))
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, _, err := parseFabricRegistrySync(data.Bytes()); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

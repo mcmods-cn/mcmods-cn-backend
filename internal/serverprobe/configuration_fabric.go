@@ -5,15 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 const fabricDirectRegistryChannel = "fabric:registry/sync/direct"
 
-func parseFabricRegistrySync(data []byte) ([]string, []string, error) {
+// Fabric transmits a namespace once for a group of paths. Keep that grouping so
+// retaining the decoded data costs O(wire bytes + number of identifiers).
+type fabricRegistryGroup struct {
+	namespace string
+	paths     []string
+}
+
+func parseFabricRegistrySync(data []byte) ([]fabricRegistryGroup, []fabricRegistryGroup, error) {
 	return parseFabricRegistrySyncWithBudget(data, newConfigurationParseBudget())
 }
 
-func parseFabricRegistrySyncWithBudget(data []byte, budget *configurationParseBudget) ([]string, []string, error) {
+func parseFabricRegistrySyncWithBudget(data []byte, budget *configurationParseBudget) ([]fabricRegistryGroup, []fabricRegistryGroup, error) {
 	if len(data) == 0 {
 		return nil, nil, errors.New("empty Fabric registry sync")
 	}
@@ -27,8 +35,7 @@ func parseFabricRegistrySyncWithBudget(data []byte, budget *configurationParseBu
 		return nil, nil, err
 	}
 
-	var registryNames []string
-	var entries []string
+	var registryNames, entries []fabricRegistryGroup
 	for groupIndex := int32(0); groupIndex < namespaceGroupCount; groupIndex++ {
 		registryNamespace, err := readProtocolString(reader, maxConfigurationPacketBytes)
 		if err != nil {
@@ -43,12 +50,13 @@ func parseFabricRegistrySyncWithBudget(data []byte, budget *configurationParseBu
 		if err = budget.claim("registry", registryCount, reader.Len(), 2); err != nil {
 			return nil, nil, fmt.Errorf("registry namespace %q: %w", registryNamespace, err)
 		}
+		registryGroup := fabricRegistryGroup{namespace: registryNamespace}
 		for registryIndex := int32(0); registryIndex < registryCount; registryIndex++ {
 			registryPath, err := readProtocolString(reader, maxConfigurationPacketBytes)
 			if err != nil {
 				return nil, nil, fmt.Errorf("registry %s #%d path: %w", registryNamespace, registryIndex, err)
 			}
-			registryNames = append(registryNames, registryNamespace+":"+registryPath)
+			registryGroup.paths = append(registryGroup.paths, registryPath)
 
 			entryNamespaceCount, err := readBoundedConfigurationVarInt(reader, "entry namespace", maximumConfigurationIdentifiers)
 			if err != nil {
@@ -84,6 +92,7 @@ func parseFabricRegistrySyncWithBudget(data []byte, budget *configurationParseBu
 					return nil, nil, fmt.Errorf("registry %s:%s namespace %s: %w",
 						registryNamespace, registryPath, entryNamespace, err)
 				}
+				entryGroup := fabricRegistryGroup{namespace: entryNamespace}
 				for bulkIndex := int32(0); bulkIndex < bulkCount; bulkIndex++ {
 					if _, err = readVarInt(reader); err != nil {
 						return nil, nil, fmt.Errorf(
@@ -122,10 +131,16 @@ func parseFabricRegistrySyncWithBudget(data []byte, budget *configurationParseBu
 								err,
 							)
 						}
-						entries = append(entries, entryNamespace+":"+entryPath)
+						entryGroup.paths = append(entryGroup.paths, entryPath)
 					}
 				}
+				if len(entryGroup.paths) > 0 {
+					entries = append(entries, entryGroup)
+				}
 			}
+		}
+		if len(registryGroup.paths) > 0 {
+			registryNames = append(registryNames, registryGroup)
 		}
 	}
 	if reader.Len() != 0 {
@@ -138,6 +153,16 @@ func parseFabricRegistrySyncWithBudget(data []byte, budget *configurationParseBu
 		}
 	}
 	return registryNames, entries, nil
+}
+
+func recordFabricRegistryNamespaces(target map[string]int, groups []fabricRegistryGroup) error {
+	for _, group := range groups {
+		namespace, _, _ := strings.Cut(group.namespace, ":")
+		if err := recordConfigurationNamespace(target, strings.ToLower(namespace), len(group.paths)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readBoundedConfigurationVarInt(reader io.ByteReader, label string, maximum int32) (int32, error) {
