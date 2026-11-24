@@ -7,13 +7,14 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"mcmods-cn-backend/internal/activitycatalog"
 	"mcmods-cn-backend/internal/progression"
 )
 
@@ -612,18 +613,22 @@ func validateTaskCondition(condition map[string]any) error {
 	if action == "" || objectType == "" || !stringIn(metric, "count", "markdown_bytes") || target <= 0 {
 		return errors.New("task condition requires action, objectType, metric and a positive target")
 	}
-	if !stringIn(action, "edit", "create", "view", "delete", "claim", "download", "upload", "purchase", "transfer", "checkin", "use") {
+	if activitycatalog.ActionID(action) == 0 {
 		return errors.New("task condition action is unsupported")
 	}
-	if !stringIn(objectType, "recipe", "mod", "resource", "blueprint", "plugin", "author", "team", "user", "comment", "tag", "file", "economy", "task", "shop_item", "modpack", "server", "map", "resource_pack", "shader_pack", "datapack", "addon", "community_post", "review", "skin", "player_profile") {
+	if activitycatalog.ObjectTypeID(objectType) == 0 {
 		return errors.New("task condition object type is unsupported")
 	}
 	condition["action"] = action
 	condition["objectType"] = objectType
 	condition["metric"] = metric
 	condition["target"] = target
-	if value := strings.TrimSpace(stringValue(condition["objectPublicId"])); value != "" {
-		condition["objectPublicId"] = value
+	if value := condition["objectPublicId"]; value != nil {
+		publicID, ok := value.(string)
+		if !ok {
+			return errors.New("task condition object public ID must be a string")
+		}
+		condition["objectPublicId"] = strings.TrimSpace(publicID)
 	}
 	return nil
 }
@@ -694,13 +699,5 @@ func normalizeTaskCurrencyRewards(rawCurrencies map[string]any) (map[string]int6
 }
 
 func stringIn(value string, allowed ...string) bool {
-	sorted := appendSorted(allowed)
-	index := sort.SearchStrings(sorted, value)
-	return index < len(sorted) && sorted[index] == value
-}
-
-func appendSorted(values []string) []string {
-	result := append([]string(nil), values...)
-	sort.Strings(result)
-	return result
+	return slices.Contains(allowed, value)
 }
