@@ -12,6 +12,17 @@
 | 资料导入与展示 | Fabric 开发客户端输出的 ZIP 的 SHA-256 为 `b0ade4147adc0f0b25632c6cd99464b31851ca57c29c621bb9e31657b34043b6`。同一份 ZIP 由 Chromium 续传，单节点 JetStream 投递，真实 PostgreSQL 存储，独立审核后匿名读取 5,830 项目录。此次 HTTP 联调使用受控对象存储。正式加载器入世界产包另行验收。 |
 | 当前数据库 | 安装入口 `cmd/db-initialize` 使用 generation 172。项目成员资格会影响评分、收藏、评论和浏览的统计。开发库版本不符时按[任务自有环境重建流程](testing-isolated-environment.md#重建任务自有环境)办理。已有 171 备份须用与其配对的应用读取。新代际首次安装、并发及最终综合测试各自绑定其运行版本。 |
 
+### 复查中已验证的边界
+
+| 操作 | 已取得的证据与复跑入口 |
+| --- | --- |
+| 创建项目、等待审核 | 创建 Mod、整合包和简单项目时，发布事务在准备图标和等待 slug 锁后重新读取审核策略。普通用户提交后仍受项目范围权限约束。真实 PostgreSQL 在持锁期间切换设置，旧实现返回过期的审核状态。创建回执现在在同一事务中读取，提交成功后无需重新查询数据库。 |
+| 收藏夹导出完成或失败 | 终态、产物引用和通知在同一事务完成。测试在准备通知时等待数据库行锁，恢复后检查此尝试仍持有有效租约。归属已变或租约自然截止时，该尝试回滚。见 `TestFavoriteExportLeaseDuringNotificationIntegration`。 |
+| 资料模板更改类型 | 已部署根目录的子类型标识须保留。检查和写入同一事务持有目录表锁，其他资料页仍可修改资源与详情。删除整个模板时会检查所有直接引用。见 `TestTemplateSchemaGuardDistinguishesDisableDeleteAndReferencesIntegration`。 |
+| 运行时间与分配 | Forge/NeoForge 的稳定构建版本选择保留原比较规则，改为一次扫描。相同 Go 1.26.11、单线程、2,048 个合成版本各测六次，中位耗时从 6.44 ms 降至 0.553 ms，每次分配从 4,406,376 字节降至 393,024 字节。复跑 `go test ./internal/httpapi -run '^$' -bench '^BenchmarkSelectLoaderArtifactVersion$' -benchmem -count=6`。 |
+
+完整 PostgreSQL 门禁按一次运行的固定提交计数。运行中止、测试断言失败、条件跳过分别保留。合并修复后需重新运行整门，所需服务和隔离步骤见[测试环境](testing-isolated-environment.md)。正式 Fabric 和 Forge 发行包的入世界导出、目标云服务与跨主机恢复仍待验收。
+
 ### 2026-11-23 冻结快照的验收
 
 
