@@ -248,6 +248,21 @@ func TestOCT02CommunityResourceReferencesRevalidatePublishedSourcesIntegration(t
 	if err != nil || len(refs[postID]) != 1 || refs[postID][0].PublicID != resource.PublicID {
 		t.Fatalf("published reference missing refs=%+v err=%v", refs[postID], err)
 	}
+	// Archiving and reactivating the bound version controls its snapshot independently
+	// of the parent project's publication status.
+	for _, state := range []string{"archived", "active"} {
+		if _, err = f.db.Exec(f.ctx, `update mod_content_versions set status=$2 where public_id=$1`, version.PublicID, state); err != nil {
+			t.Fatal(err)
+		}
+		refs, err = loadCommunityPostResourceReferencesWithQueryer(f.ctx, f.db, []int64{postID})
+		if err != nil || len(refs[postID]) != 1 {
+			t.Fatalf("reference after %s: refs=%+v err=%v", state, refs[postID], err)
+		}
+		got := refs[postID][0]
+		if state == "active" && got.RevisionID != revisionID || state == "archived" && (got.RevisionID != "" || got.IconPath != "") {
+			t.Fatalf("version %s selected snapshot %q with icon %q", state, got.RevisionID, got.IconPath)
+		}
+	}
 	if _, err := f.db.Exec(f.ctx, `update mods set review_status='pending' where id=$1`, f.modID); err != nil {
 		t.Fatal(err)
 	}

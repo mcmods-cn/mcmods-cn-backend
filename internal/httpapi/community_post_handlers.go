@@ -1305,13 +1305,12 @@ func loadCommunityPostResourceReferencesWithQueryer(ctx context.Context, queryer
 			order by value.updated_at desc limit 1) detail on true
 		left join mod_content_versions version on version.id=detail.version_id
 		left join lateral (select imported.revision_id,imported.icon_path,imported.names from resource_import_snapshots imported
-			join catalog_import_revisions import_revision on import_revision.id=imported.revision_id
-			join mods public_mod on public_mod.id=import_revision.mod_id and public_mod.review_status='approved'
-			where imported.resource_id=entity.id and import_revision.is_active and import_revision.status in ('ready','partial')
-			order by (import_revision.target_version_id=detail.version_id) desc,
+			join catalog_import_revisions revision on revision.id=imported.revision_id
+			where imported.resource_id=entity.id and `+publicImportRevisionSQL+`
+			order by (revision.target_version_id=detail.version_id) desc,
 			(imported.icon_path<>'') desc,imported.created_at desc limit 1) snapshot on true
 		left join lateral (select jsonb_object_agg(value.locale,value.name) names from content_localizations value
-			where value.catalog_entity_id=entity.id and value.name<>'') localized on true
+			where value.catalog_entity_id=entity.id and value.review_status='approved' and value.name<>'') localized on true
 		where ref.post_id=any($1::bigint[]) order by ref.post_id,ref.display_order,ref.id`, postIDs)
 	if err != nil {
 		return nil, err

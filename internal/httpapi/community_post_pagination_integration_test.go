@@ -85,7 +85,7 @@ func TestCommunityPostCatalogBoundsMillionRowsAndOmitsBodiesIntegration(t *testi
 		resource_id bigint not null,revision_id text not null,icon_path text not null,names jsonb not null,
 		created_at timestamptz not null);
 	create temporary table catalog_import_revisions(id text primary key,target_version_id bigint,mod_id bigint,status text,is_active boolean);
-	create temporary table content_localizations(catalog_entity_id bigint not null,locale text not null,name text not null);
+	create temporary table content_localizations(catalog_entity_id bigint not null,locale text not null,name text not null,review_status text not null default 'approved');
 	create temporary table community_post_bounties(
 		post_id bigint primary key,currency_id bigint not null,amount bigint not null,status text not null,
 		tax_amount bigint not null,net_amount bigint not null);

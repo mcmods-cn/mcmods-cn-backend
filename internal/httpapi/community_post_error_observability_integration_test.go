@@ -60,11 +60,12 @@ func TestCommunityPostCorruptReferencesAndTranslationResultsFailClosedIntegratio
 			resource_id bigint not null,revision_id text not null,icon_path text not null,
 			names jsonb not null,created_at timestamptz not null
 		);
-		create temporary table content_localizations(catalog_entity_id bigint not null,locale text not null,name text not null);
+		create temporary table content_localizations(catalog_entity_id bigint not null,locale text not null,name text not null,review_status text not null default 'approved');
 		insert into catalog_entities(id,public_id) values(11,'r00000011');
 		insert into game_resources(entity_id,canonical_id) values(11,'minecraft:stone');
 		insert into mods values(1,'approved');
-		insert into catalog_import_revisions values('arch025-revision',null,1,true,'ready');
+		insert into mod_content_versions values(17,'v00000017',1,'active');
+		insert into catalog_import_revisions values('arch025-revision',17,1,true,'ready');
 		insert into resource_import_snapshots values(11,'arch025-revision','', '"corrupt-names"'::jsonb,now());
 		insert into community_post_resource_refs values(1,7,11,'block','minecraft:stone',0);
 
