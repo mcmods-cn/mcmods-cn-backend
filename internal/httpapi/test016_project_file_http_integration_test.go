@@ -584,7 +584,7 @@ func TestTEST016ProjectPublicationStatusIsRevalidatedInsideFileCreationHTTPInteg
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		var waiting int
-		if err = f.db.QueryRow(f.ctx, `select count(*) from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and (query like '%from oss_files%' or query like '%from mods%')`).Scan(&waiting); err != nil {
+		if err = f.db.QueryRow(f.ctx, `select count(*) from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and $1::int=any(pg_blocking_pids(pid)) and (query like '%from oss_files%' or query like '%from mods%')`, blocker.Conn().PgConn().PID()).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		if waiting > 0 {
@@ -796,7 +796,7 @@ func TestTEST016ScanRevalidatesParentPublicationUnderConcurrentStatusChangeHTTPI
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		var waiting int
-		if err = f.db.QueryRow(f.ctx, `select count(*) from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and query like '%from project_files%'`).Scan(&waiting); err != nil {
+		if err = f.db.QueryRow(f.ctx, `select count(*) from pg_stat_activity where datname=current_database() and wait_event_type='Lock' and $1::int=any(pg_blocking_pids(pid)) and query like '%from project_files%'`, blocker.Conn().PgConn().PID()).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		if waiting > 0 {
@@ -914,7 +914,7 @@ func TestTEST016ModrinthEmptyOrUnusableVersionDoesNotSpin(t *testing.T) {
 				}
 				files := []map[string]any{}
 				if mode != "empty" {
-					file := map[string]any{"filename": "v1.jar", "url": "https://cdn.example.invalid/v1.jar", "hashes": map[string]string{"sha1": "owned-hash"}}
+					file := map[string]any{"filename": "v1.jar", "url": "https://cdn.example.invalid/v1.jar", "hashes": map[string]string{"sha1": strings.Repeat("b", 40)}}
 					if mode == "invalid-url" {
 						file["url"] = "http://127.0.0.1/private"
 					}

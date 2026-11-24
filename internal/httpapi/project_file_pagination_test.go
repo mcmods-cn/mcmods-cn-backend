@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha1"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -72,7 +73,7 @@ func TestModrinthProjectFilePagesTraverseBoundedVersionBatches(t *testing.T) {
 					"version_type": "release", "date_published": "2026-08-20T12:00:00Z",
 					"game_versions": []string{"1.21.1"}, "loaders": []string{"fabric"},
 					"files": []map[string]any{{
-						"hashes": map[string]string{"sha1": "hash-" + id}, "url": "https://cdn.example.test/" + id + ".jar",
+						"hashes": map[string]string{"sha1": fmt.Sprintf("%x", sha1.Sum([]byte(id)))}, "url": "https://cdn.example.test/" + id + ".jar",
 						"filename": id + ".jar", "primary": true, "size": 1024,
 					}},
 				})
@@ -121,7 +122,7 @@ func TestModrinthProjectFilePagesTraverseBoundedVersionBatches(t *testing.T) {
 		}
 		seen[id] = true
 	}
-	if ids[0] != "hash-v25" || ids[len(ids)-1] != "hash-v01" {
+	if ids[0] != fmt.Sprintf("%x", sha1.Sum([]byte("v25"))) || ids[len(ids)-1] != fmt.Sprintf("%x", sha1.Sum([]byte("v01"))) {
 		t.Fatalf("unexpected provider order: first=%q last=%q", ids[0], ids[len(ids)-1])
 	}
 	if requests.Load() > 9 {
@@ -196,5 +197,33 @@ func TestProjectFileProviderLimitsFailClosed(t *testing.T) {
 	defer server.Close()
 	if err := getProviderJSONLimited(context.Background(), server.Client(), server.URL, http.Header{}, 100, &map[string]any{}); err == nil {
 		t.Fatal("expected oversized provider JSON to fail")
+	}
+}
+
+func TestModrinthProjectFileIDsUseOnlyDownloadableDigests(t *testing.T) {
+	sha1Value, sha512Value := strings.Repeat("a", 40), strings.Repeat("b", 128)
+	for _, tc := range []struct{ name, sha1Input, sha512Input, id, sha1, sha512 string }{
+		{"prefer SHA1", strings.ToUpper(sha1Value), sha512Value, sha1Value, sha1Value, sha512Value},
+		{"fallback to SHA512", "unavailable", " " + strings.ToUpper(sha512Value) + " ", sha512Value, "", sha512Value},
+		{"ignore invalid secondary", sha1Value, strings.Repeat("z", 128), sha1Value, sha1Value, ""},
+		{"no usable identity", strings.Repeat("x", 40), "", "", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var version modrinthProjectVersion
+			if err := json.Unmarshal([]byte(`{"files":[{"filename":"release.jar","url":"https://cdn.example.test/release.jar"}]}`), &version); err != nil {
+				t.Fatal(err)
+			}
+			version.Files[0].Hashes = map[string]string{"sha1": tc.sha1Input, "sha512": tc.sha512Input}
+			files := modrinthVersionProjectFiles(version, "project01")
+			if tc.id == "" {
+				if len(files) != 0 {
+					t.Fatalf("listed undownloadable file: %#v", files)
+				}
+				return
+			}
+			if len(files) != 1 || files[0].ID != tc.id || files[0].SHA1 != tc.sha1 || files[0].SHA512 != tc.sha512 {
+				t.Fatalf("file digest identity mismatch: %#v", files)
+			}
+		})
 	}
 }
