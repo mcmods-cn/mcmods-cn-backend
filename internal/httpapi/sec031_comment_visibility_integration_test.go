@@ -176,8 +176,42 @@ func TestSEC031CommentSubresourcesHideCommentsWhoseTargetIsInvisibleIntegration(
 	t.Run("target owner retains access", func(t *testing.T) {
 		assertRepliesVisible(t, security.Claims{Subject: ownerID})
 	})
+	// Route IDs are registered before publication. A shared link should start
+	// resolving at the same transition as the public page it points to.
+	var categoryID string
+	if err := pool.QueryRow(ctx, `insert into project_changelog_categories(object_route_id,default_locale)
+		select id,'zh-CN' from public_routes where entity_type='mod' and internal_id=$1 returning public_id`, modID).Scan(&categoryID); err != nil {
+		t.Fatal(err)
+	}
+	ids := []string{rootPublicID, categoryID}
+	for _, kind := range []string{"author", "team"} {
+		var id string
+		if err := pool.QueryRow(ctx, `insert into creators(kind,name,normalized_name) values($1,$1,$1) returning public_id`, kind).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	checkLink := func(id string, want int) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/public-links/"+id, nil)
+		r.SetPathValue("publicId", id)
+		response := httptest.NewRecorder()
+		server.resolvePublicLink(response, r.WithContext(ctx))
+		if response.Code != want {
+			t.Errorf("short link %s returned %d, want %d", id, response.Code, want)
+		}
+	}
+	for _, id := range ids {
+		checkLink(id, http.StatusNotFound)
+	}
+	if _, err := pool.Exec(ctx, `update creators set review_status='approved' where public_id=any($1)`, ids[2:]); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = pool.Exec(ctx, `update mods set review_status='approved' where id=$1`, modID); err != nil {
 		t.Fatal(err)
+	}
+	for _, id := range ids {
+		checkLink(id, http.StatusOK)
 	}
 	t.Run("public visibility restores access", func(t *testing.T) {
 		assertRepliesVisible(t, claims)

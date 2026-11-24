@@ -1192,7 +1192,7 @@ func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "解析短链接失败")
 		return
 	}
-	visible, visibilityErr := s.publicLinkTargetIsVisible(r.Context(), entityType, internalID)
+	visible, visibilityErr := s.publicLinkTargetIsVisible(r.Context(), entityType, internalID, publicID)
 	if visibilityErr != nil {
 		writeError(w, http.StatusInternalServerError, "解析短链接发布状态失败")
 		return
@@ -1214,7 +1214,11 @@ func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == "" {
-		target = s.catalogPublicTarget(r.Context(), entityType, internalID, publicID)
+		target, err = s.catalogPublicTarget(r.Context(), entityType, internalID, publicID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "解析短链接失败")
+			return
+		}
 	}
 	// These objects live in the account's economy workspace. Historical route
 	// registry rows still contain retired standalone paths, so normalize on read
@@ -1229,14 +1233,14 @@ func (s *Server) resolvePublicLink(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": publicID, "entityType": entityType, "target": target})
 }
 
-func (s *Server) catalogPublicTarget(ctx context.Context, entityType string, internalID int64, publicID string) string {
+func (s *Server) catalogPublicTarget(ctx context.Context, entityType string, internalID int64, publicID string) (string, error) {
 	switch entityType {
 	case "tag":
-		return "/mods-tag?publicId=" + url.QueryEscape(publicID)
+		return "/mods-tag?publicId=" + url.QueryEscape(publicID), nil
 	case "recipe_type":
-		return "/recipe-types?publicId=" + url.QueryEscape(publicID)
+		return "/recipe-types?publicId=" + url.QueryEscape(publicID), nil
 	case "recipe":
-		return "/recipe-types?recipePublicId=" + url.QueryEscape(publicID)
+		return "/recipe-types?recipePublicId=" + url.QueryEscape(publicID), nil
 	case "resource", "structure", "document":
 		var versionID, siteID string
 		// Manual publications use a content-version identity, rather than an
@@ -1250,10 +1254,10 @@ func (s *Server) catalogPublicTarget(ctx context.Context, entityType string, int
 			where detail.resource_id=$1 and detail.status='active' and detail.published_revision_id is not null
 			order by version.updated_at desc,version.id desc limit 1`, internalID).Scan(&versionID, &siteID)
 		if manualErr == nil {
-			return "/mods/" + url.PathEscape(siteID) + "/resources/" + url.PathEscape(publicID) + "?version=" + url.QueryEscape(versionID)
+			return "/mods/" + url.PathEscape(siteID) + "/resources/" + url.PathEscape(publicID) + "?version=" + url.QueryEscape(versionID), nil
 		}
 		if !errors.Is(manualErr, pgx.ErrNoRows) {
-			return ""
+			return "", manualErr
 		}
 		// Resource detail pages select a content version. An import revision is
 		// a source for that version, not a frontend route/version identity.
@@ -1265,12 +1269,15 @@ func (s *Server) catalogPublicTarget(ctx context.Context, entityType string, int
 			join mod_content_versions version on version.id=revision.target_version_id and version.mod_id=mod.id and version.status='active'
 			where resource.entity_id=$1 and revision.status in ('ready','partial') order by revision.activated_at desc nulls last limit 1`, internalID).
 			Scan(&versionID, &siteID)
-		if err != nil {
-			return ""
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
 		}
-		return "/mods/" + url.PathEscape(siteID) + "/resources/" + url.PathEscape(publicID) + "?version=" + url.QueryEscape(versionID)
+		if err != nil {
+			return "", err
+		}
+		return "/mods/" + url.PathEscape(siteID) + "/resources/" + url.PathEscape(publicID) + "?version=" + url.QueryEscape(versionID), nil
 	}
-	return ""
+	return "", nil
 }
 
 func categoryForResourceKind(kind string) string {

@@ -3,12 +3,15 @@ package httpapi
 import (
 	"context"
 	"errors"
+
 	"github.com/jackc/pgx/v5"
+
+	"mcmods-cn-backend/internal/security"
 )
 
 // The anonymous resolver is a discovery surface. A route registration is never
 // proof of current publication. Editor/reviewer entry points keep their own ACLs.
-func (s *Server) publicLinkTargetIsVisible(ctx context.Context, entityType string, internalID int64) (bool, error) {
+func (s *Server) publicLinkTargetIsVisible(ctx context.Context, entityType string, internalID int64, publicID string) (bool, error) {
 	var query string
 	switch entityType {
 	case "mod":
@@ -19,8 +22,16 @@ func (s *Server) publicLinkTargetIsVisible(ctx context.Context, entityType strin
 		query = `select exists(select 1 from simple_projects where id=$1 and review_status='approved')`
 	case "minecraft_server":
 		query = `select exists(select 1 from minecraft_servers where id=$1 and review_status='approved')`
-	case "creator":
-		query = `select exists(select 1 from creators where id=$1 and review_status='approved')`
+	case "author", "team":
+		var visible bool
+		err := s.db.QueryRow(ctx, `select exists(select 1 from creators where id=$1 and kind=$2 and review_status='approved')`, internalID, entityType).Scan(&visible)
+		return visible, err
+	case "comment":
+		comment, err := s.resolveVisibleComment(ctx, publicID, security.Claims{})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return err == nil && comment.ID == internalID, err
 	case "community_post":
 		query = `select exists(select 1 from community_posts where id=$1 and status='active' and review_status='approved')`
 	case "blueprint":
@@ -35,17 +46,26 @@ func (s *Server) publicLinkTargetIsVisible(ctx context.Context, entityType strin
 		query = `select exists(select 1 from shop_items where id=$1 and status='active')`
 	case "task":
 		query = `select exists(select 1 from task_definitions where id=$1 and status='active')`
-	case "project_changelog":
+	case "project_changelog", "project_changelog_category":
+		parentSQL := `select target.entity_type,target.internal_id from project_changelogs entry join public_routes target on target.id=entry.object_route_id
+			where entry.id=$1 and entry.status='active' and entry.review_status='approved'`
+		if entityType == "project_changelog_category" {
+			parentSQL = `select target.entity_type,target.internal_id from project_changelog_categories category
+				join public_routes target on target.id=category.object_route_id where category.id=$1`
+		}
 		var parentType string
 		var parentID int64
-		err := s.db.QueryRow(ctx, `select target.entity_type,target.internal_id from project_changelogs entry join public_routes target on target.id=entry.object_route_id where entry.id=$1 and entry.status='active' and entry.review_status='approved'`, internalID).Scan(&parentType, &parentID)
+		err := s.db.QueryRow(ctx, parentSQL, internalID).Scan(&parentType, &parentID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
 		}
 		if err != nil {
 			return false, err
 		}
-		return s.publicLinkTargetIsVisible(ctx, parentType, parentID)
+		if !changelogTargetTypes[parentType] {
+			return false, nil
+		}
+		return s.publicLinkTargetIsVisible(ctx, parentType, parentID, "")
 	default:
 		return true, nil
 	}
