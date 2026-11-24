@@ -145,12 +145,11 @@ func (s *Server) runModMetadataImportWithProviderClientFactory(ctx context.Conte
 
 func (s *Server) runModMetadataImportWithProviderClients(ctx context.Context, jobID string, newClient func(time.Duration, string) (*http.Client, error), archiveClient modpackArchiveHTTPClientFactory) error {
 	var projectType, provider, sourceURL string
-	var userID int64
 	var startedAt time.Time
 	err := s.db.QueryRow(ctx,
 		`update mod_metadata_import_jobs set status='running',progress=10,error='',started_at=now(),updated_at=now()
-		 where public_id=$1 and status='queued' returning project_type,provider,source_url,user_id,started_at`, jobID,
-	).Scan(&projectType, &provider, &sourceURL, &userID, &startedAt)
+		 where public_id=$1 and status='queued' returning project_type,provider,source_url,started_at`, jobID,
+	).Scan(&projectType, &provider, &sourceURL, &startedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
 	}
@@ -158,6 +157,11 @@ func (s *Server) runModMetadataImportWithProviderClients(ctx context.Context, jo
 		return err
 	}
 	fail := func(importErr error) error {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			// The worker is stopping. The stale-claim recovery will re-enqueue
+			// this attempt; cancellation is not a terminal provider failure.
+			return ctx.Err()
+		}
 		failureCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_, writeErr := s.db.Exec(failureCtx,
@@ -190,6 +194,24 @@ func (s *Server) runModMetadataImportWithProviderClients(ctx context.Context, jo
 	if owned, progressErr := s.updateModMetadataImportProgress(ctx, jobID, startedAt, 25); progressErr != nil || !owned {
 		return progressErr
 	}
+	complete := func(draft any, loadErr error, validate func() error, validationMessage string) error {
+		if loadErr != nil {
+			return fail(loadErr)
+		}
+		if owned, err := s.updateModMetadataImportProgress(ctx, jobID, startedAt, 85); err != nil || !owned {
+			return err
+		}
+		if err := validate(); err != nil {
+			return fail(fmt.Errorf("%s: %w", validationMessage, err))
+		}
+		result, err := json.Marshal(draft)
+		if err != nil {
+			return fail(err)
+		}
+		_, err = s.db.Exec(ctx, `update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
+			finished_at=now(),updated_at=now() where public_id=$1 and status='running' and started_at=$3`, jobID, string(result), startedAt)
+		return err
+	}
 	if projectType == "modpack" {
 		var draft createModpackRequest
 		switch provider {
@@ -200,24 +222,7 @@ func (s *Server) runModMetadataImportWithProviderClients(ctx context.Context, jo
 		default:
 			err = errors.New("unsupported modpack import provider")
 		}
-		if err != nil {
-			return fail(err)
-		}
-		if owned, progressErr := s.updateModMetadataImportProgress(ctx, jobID, startedAt, 85); progressErr != nil || !owned {
-			return progressErr
-		}
-		if err = normalizeAndValidateModpackImportDraft(&draft); err != nil {
-			return fail(fmt.Errorf("导入数据校验失败: %w", err))
-		}
-		result, marshalErr := json.Marshal(draft)
-		if marshalErr != nil {
-			return fail(marshalErr)
-		}
-		if _, err = s.db.Exec(ctx, `update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
-			finished_at=now(),updated_at=now() where public_id=$1 and status='running' and started_at=$3`, jobID, string(result), startedAt); err != nil {
-			return err
-		}
-		return nil
+		return complete(&draft, err, func() error { return normalizeAndValidateModpackImportDraft(&draft) }, "导入数据校验失败")
 	}
 	if simpleProjectTypes[projectType] {
 		var draft simpleProjectSnapshot
@@ -229,24 +234,7 @@ func (s *Server) runModMetadataImportWithProviderClients(ctx context.Context, jo
 		default:
 			err = errors.New("unsupported project import provider")
 		}
-		if err != nil {
-			return fail(err)
-		}
-		if owned, progressErr := s.updateModMetadataImportProgress(ctx, jobID, startedAt, 85); progressErr != nil || !owned {
-			return progressErr
-		}
-		if err = normalizeAndValidateSimpleProjectDraft(&draft, true); err != nil {
-			return fail(fmt.Errorf("imported project data is invalid: %w", err))
-		}
-		result, marshalErr := json.Marshal(draft)
-		if marshalErr != nil {
-			return fail(marshalErr)
-		}
-		if _, err = s.db.Exec(ctx, `update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
-			finished_at=now(),updated_at=now() where public_id=$1 and status='running' and started_at=$3`, jobID, string(result), startedAt); err != nil {
-			return err
-		}
-		return nil
+		return complete(&draft, err, func() error { return normalizeAndValidateSimpleProjectDraft(&draft, true) }, "imported project data is invalid")
 	}
 	var draft createModRequest
 	switch provider {
@@ -259,26 +247,7 @@ func (s *Server) runModMetadataImportWithProviderClients(ctx context.Context, jo
 	default:
 		err = errors.New("unsupported import provider")
 	}
-	if err != nil {
-		return fail(err)
-	}
-	if owned, progressErr := s.updateModMetadataImportProgress(ctx, jobID, startedAt, 85); progressErr != nil || !owned {
-		return progressErr
-	}
-	if err = normalizeAndValidateModRequest(&draft); err != nil {
-		return fail(fmt.Errorf("导入数据校验失败: %w", err))
-	}
-	result, err := json.Marshal(draft)
-	if err != nil {
-		return fail(err)
-	}
-	if _, err = s.db.Exec(ctx,
-		`update mod_metadata_import_jobs set status='completed',progress=100,result=$2::jsonb,error='',
-		 finished_at=now(),updated_at=now() where public_id=$1 and status='running' and started_at=$3`,
-		jobID, string(result), startedAt); err != nil {
-		return err
-	}
-	return nil
+	return complete(&draft, err, func() error { return normalizeAndValidateModRequest(&draft) }, "导入数据校验失败")
 }
 
 // started_at is the current claim's fencing value. Recovery clears it before a
@@ -659,16 +628,16 @@ func getProviderBytesLimited(ctx context.Context, client *http.Client, endpoint 
 		return nil, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// Provider errors can contain private documents or credential-bearing URLs.
+		return nil, &providerHTTPStatusError{statusCode: response.StatusCode, message: "provider request failed"}
+	}
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maximumBytes+1))
 	if readErr != nil {
 		return nil, readErr
 	}
 	if int64(len(body)) > maximumBytes {
 		return nil, errors.New("provider response is too large")
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		// Provider errors can contain private documents or credential-bearing URLs.
-		return nil, &providerHTTPStatusError{statusCode: response.StatusCode, message: "provider request failed"}
 	}
 	return body, nil
 }
