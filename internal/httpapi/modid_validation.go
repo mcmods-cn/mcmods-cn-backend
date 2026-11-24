@@ -224,10 +224,5 @@ func (s *Server) confirmModExportMODIDMismatch(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.writeAppLog(context.Background(), "user_interaction", "warn", "mod_import.modid_mismatch_confirmed", jobID, actorID, r, http.StatusAccepted, 0, map[string]any{"modId": identity.ID, "analysisHash": request.AnalysisHash})
-	job, err := s.modExportJobByID(r.Context(), jobID, identity.ID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "无法读取已确认的导入任务")
-		return
-	}
-	writeJSON(w, http.StatusAccepted, job)
+	s.writeCommittedCatalogImportJob(w, r, jobID, identity.ID, false)
 }

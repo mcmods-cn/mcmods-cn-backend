@@ -216,6 +216,29 @@ func TestMODIDConfirmationProtocolIsBoundSingleUseAndTransactionalIntegration(t 
 	}
 	assertMODIDJobState(t, ctx, pool, happyJob, "confirmation_required", "", changedAnalysisHash, true)
 
+	receiptJob := newJob("importing", "receipt-token", actorID)
+	if paused, err = server.pauseCatalogImportForMODIDConfirmation(ctx, receiptJob, "receipt-token", modID, sourceHash, counts); err != nil || !paused {
+		t.Fatalf("prepare confirmation receipt: paused=%t err=%v", paused, err)
+	}
+	var receiptHash string
+	if err = pool.QueryRow(ctx, `update catalog_import_jobs set error_detail='[]'::jsonb
+		where id=$1 returning modid_analysis_hash`, receiptJob).Scan(&receiptHash); err != nil {
+		t.Fatal(err)
+	}
+	response = invokeMODIDConfirmation(t, ctx, server, modSiteID, receiptJob, receiptHash, claims)
+	var problem struct {
+		Code    string
+		Details struct{ JobID string }
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &problem); err != nil || response.Code != http.StatusInternalServerError ||
+		problem.Code != "import_job_accepted_status_unavailable" || problem.Details.JobID != receiptJob {
+		t.Fatalf("committed confirmation without readable status: http=%d problem=%+v err=%v", response.Code, problem, err)
+	}
+	if err = pool.QueryRow(ctx, `select count(*) from nats_outbox where aggregate_id=$1 and event_type='mod.catalog_import.confirmed'`, receiptJob).
+		Scan(&outboxCount); err != nil || outboxCount != 1 {
+		t.Fatalf("confirmation receipt outbox count=%d err=%v", outboxCount, err)
+	}
+
 	atomicJob := newJob("importing", "atomic-token", actorID)
 	if paused, err = server.pauseCatalogImportForMODIDConfirmation(ctx, atomicJob, "atomic-token", modID, sourceHash, counts); err != nil || !paused {
 		t.Fatalf("prepare atomic confirmation: paused=%t err=%v", paused, err)
