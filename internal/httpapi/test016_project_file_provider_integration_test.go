@@ -13,7 +13,7 @@ import (
 )
 
 func test016ProviderVersion(id, projectID, hash string) map[string]any {
-	return map[string]any{"id": id, "project_id": projectID, "name": "TEST016 External", "version_number": "1.0", "version_type": "release", "game_versions": []string{"1.21.1"}, "loaders": []string{"neoforge"}, "date_published": "2026-09-30T00:00:00Z", "downloads": 17, "files": []map[string]any{{"filename": "external.jar", "url": "https://cdn.example.invalid/external.jar", "size": 174, "primary": true, "hashes": map[string]string{"sha1": hash, "sha512": strings.Repeat("b", 128)}}}}
+	return map[string]any{"id": id, "status": "listed", "project_id": projectID, "name": "TEST016 External", "version_number": "1.0", "version_type": "release", "game_versions": []string{"1.21.1"}, "loaders": []string{"neoforge"}, "date_published": "2026-09-30T00:00:00Z", "downloads": 17, "files": []map[string]any{{"filename": "external.jar", "url": "https://cdn.example.invalid/external.jar", "size": 174, "primary": true, "hashes": map[string]string{"sha1": hash, "sha512": strings.Repeat("b", 128)}}}}
 }
 
 func (f test016FileFixture) modrinthConfig(t *testing.T, endpoint, projectID string) modImportConfig {
@@ -100,7 +100,7 @@ func TestTEST016ModrinthIdentityLimitsAndFailureDegradationHTTPIntegration(t *te
 							versions[i] = fmt.Sprint("v", i)
 						}
 					}
-					_ = json.NewEncoder(w).Encode(map[string]any{"id": projectID, "versions": versions})
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": projectID, "status": "approved", "versions": versions})
 					return
 				}
 				version := test016ProviderVersion("v1", projectID, hash)
@@ -182,7 +182,7 @@ func TestTEST016ProviderCacheSeparatesOriginsAndCaseSensitiveProjectIDsHTTPInteg
 			projectID := "owned"
 			if strings.HasPrefix(r.URL.Path, "/project/") {
 				projectID = strings.TrimPrefix(r.URL.Path, "/project/")
-				_ = json.NewEncoder(w).Encode(map[string]any{"id": projectID, "versions": []string{projectID + "-v1"}})
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": projectID, "status": "approved", "versions": []string{projectID + "-v1"}})
 				return
 			}
 			var ids []string

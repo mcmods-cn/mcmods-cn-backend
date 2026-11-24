@@ -491,11 +491,14 @@ func (worker *ProjectAutomationWorker) loadReleases(ctx context.Context, job pro
 			modrinthProjectVersion
 			Changelog string `json:"changelog"`
 		}
-		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(job.ExternalID)+"/version", providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), ""), &raw); err != nil {
+		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(job.ExternalID)+"/version", publicProviderHeaders(cfg.UserAgent), &raw); err != nil {
 			return nil, err
 		}
 		result := make([]projectAutomationRelease, 0, len(raw))
 		for _, item := range raw {
+			if !publicModrinthVersionStatus(item.Status) {
+				continue
+			}
 			published, _ := time.Parse(time.RFC3339, item.DatePublished)
 			release := projectAutomationRelease{ID: item.ID, Version: firstNonEmpty(item.VersionNumber, item.Name, item.ID), Body: item.Changelog,
 				PublishedAt: published, GameVersions: item.GameVersions, Loaders: normalizeLoaders(item.Loaders), URL: "https://modrinth.com/project/" + job.ExternalID + "/version/" + item.ID}
@@ -560,6 +563,7 @@ func (worker *ProjectAutomationWorker) loadGitHubReleases(ctx context.Context, r
 		HTMLURL     string    `json:"html_url"`
 		PublishedAt time.Time `json:"published_at"`
 		Prerelease  bool      `json:"prerelease"`
+		Draft       *bool     `json:"draft"`
 		Assets      []struct {
 			ID                 int64  `json:"id"`
 			Name               string `json:"name"`
@@ -569,11 +573,14 @@ func (worker *ProjectAutomationWorker) loadGitHubReleases(ctx context.Context, r
 			ContentType        string `json:"content_type"`
 		} `json:"assets"`
 	}
-	if err = getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+repository+"/releases?per_page=100", providerCredentialHeaders(cfg.UserAgent, "github", cfg.GitHub.BaseURL, bearerAuthorization(cfg.GitHub.Token), ""), &raw); err != nil {
+	if err = getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+repository+"/releases?per_page=100", publicProviderHeaders(cfg.UserAgent), &raw); err != nil {
 		return nil, err
 	}
 	result := make([]projectAutomationRelease, 0, len(raw))
 	for _, item := range raw {
+		if item.Draft == nil || *item.Draft {
+			continue
+		}
 		release := projectAutomationRelease{ID: fmt.Sprint(item.ID), Version: firstNonEmpty(item.TagName, item.Name, fmt.Sprint(item.ID)), Body: item.Body,
 			PublishedAt: item.PublishedAt, URL: item.HTMLURL}
 		channel := "release"

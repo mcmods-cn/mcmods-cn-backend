@@ -30,7 +30,7 @@ func TestProjectAutomationRetainsNewScheduleWhileRunFinishesIntegration(t *testi
 				w.Header().Set("Content-Type", "application/json")
 				switch r.URL.Path {
 				case "/project/schedule-source":
-					_, _ = w.Write([]byte(`{"id":"schedule-source"}`))
+					_, _ = w.Write([]byte(`{"id":"schedule-source","status":"approved"}`))
 				case "/project/schedule-source/version":
 					reachedOnce.Do(func() { close(reachedProvider) })
 					select {

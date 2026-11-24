@@ -909,7 +909,7 @@ func TestTEST016ModrinthEmptyOrUnusableVersionDoesNotSpin(t *testing.T) {
 				calls.Add(1)
 				w.Header().Set("Content-Type", "application/json")
 				if r.URL.Path == "/project/owned" {
-					_ = json.NewEncoder(w).Encode(map[string]any{"id": "owned", "versions": []string{"v1"}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": "owned", "status": "approved", "versions": []string{"v1"}})
 					return
 				}
 				files := []map[string]any{}
@@ -923,7 +923,7 @@ func TestTEST016ModrinthEmptyOrUnusableVersionDoesNotSpin(t *testing.T) {
 					}
 					files = append(files, file)
 				}
-				_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "v1", "project_id": "owned", "files": files}})
+				_ = json.NewEncoder(w).Encode([]map[string]any{{"id": "v1", "status": "listed", "project_id": "owned", "files": files}})
 			}))
 			defer provider.Close()
 			binary, err := os.Executable()

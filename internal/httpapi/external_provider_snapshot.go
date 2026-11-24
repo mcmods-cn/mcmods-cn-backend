@@ -125,12 +125,19 @@ func publicModrinthProjectStatus(status string) bool {
 	}
 }
 
+func publicModrinthVersionStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "listed", "archived", "unlisted":
+		return true
+	default:
+		return false
+	}
+}
+
 func modrinthVersionCompatibilities(versions []modrinthVersion) []modLoaderCompatibilityPayload {
 	pairs := make(map[string][]string)
 	for _, version := range versions {
-		switch version.Status {
-		case "listed", "archived", "unlisted":
-		default:
+		if !publicModrinthVersionStatus(version.Status) {
 			continue
 		}
 		for _, loader := range normalizeLoaders(version.Loaders) {

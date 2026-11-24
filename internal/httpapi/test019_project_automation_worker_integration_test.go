@@ -60,7 +60,7 @@ func TestTEST019ProjectAutomationWorkerRetriesCompletesIdempotentlyAndRecoversLe
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprintf(w, `[{
-			"id":"test019-release","name":"TEST019 release","version_number":"1.0.0",
+			"id":"test019-release","status":"listed","name":"TEST019 release","version_number":"1.0.0",
 			"changelog":"Reliable automated changelog","date_published":%q,"version_type":"release",
 			"game_versions":["1.21.1"],"loaders":["fabric"],"files":[]
 		}]`, publishedAt.Format(time.RFC3339))

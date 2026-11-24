@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -18,6 +19,7 @@ func TestProjectAutomationModrinthReleaseUsesProviderMetadata(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[{
 			"id": "fixture-release",
+			"status": "listed",
 			"name": "A friendly release title",
 			"version_number": "2.5.0-beta.3",
 			"version_type": "beta",
@@ -69,5 +71,52 @@ func TestProjectAutomationModrinthReleaseUsesProviderMetadata(t *testing.T) {
 		file.SizeBytes != 42 || file.SHA1 != "fixture-sha1" || file.SHA512 != "fixture-sha512" ||
 		file.DirectURL != "https://cdn.modrinth.com/data/fixture-pack/versions/fixture-release/pack.jar" {
 		t.Errorf("release-file metadata changed during import: %+v", file)
+	}
+}
+
+func TestPublicReleaseProjectionUsesDeclaredPublicStates(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			t.Error("public release request contained an authorization header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/project/example/version":
+			_ = json.NewEncoder(w).Encode([]map[string]string{
+				{"id": "listed", "status": "listed"}, {"id": "archived", "status": "archived"},
+				{"id": "unlisted", "status": "unlisted"}, {"id": "unspecified"}, {"id": "unknown", "status": "future"},
+			})
+		case "/repos/example/project/releases":
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 1, "draft": false}, {"id": 2, "draft": false, "prerelease": true}, {"id": 3},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer provider.Close()
+	cfg := defaultModImportConfig()
+	cfg.Modrinth.BaseURL, cfg.GitHub.BaseURL = provider.URL, provider.URL
+	worker := &ProjectAutomationWorker{}
+	for _, tc := range []struct {
+		source, externalID string
+		want               []string
+	}{
+		{"modrinth", "example", []string{"listed", "archived", "unlisted"}},
+		{"github", "example/project", []string{"1", "2"}},
+	} {
+		t.Run(tc.source, func(t *testing.T) {
+			releases, err := worker.loadReleases(t.Context(), projectAutomationJob{SourceType: tc.source, ExternalID: tc.externalID}, cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := make([]string, 0, len(releases))
+			for _, release := range releases {
+				ids = append(ids, release.ID)
+			}
+			if !slices.Equal(ids, tc.want) {
+				t.Fatalf("public release IDs %v, want %v", ids, tc.want)
+			}
+		})
 	}
 }

@@ -33,7 +33,7 @@ func TestAuditFixCMP006AutomationRevokedAuthorityIntegration(t *testing.T) {
 					}
 				}
 				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprintf(w, "[{\"id\":\"audit-release\",\"name\":\"Audit release\",\"version_number\":\"1.0.0\",\"changelog\":\"Audit automated source\",\"date_published\":%q,\"version_type\":\"release\",\"game_versions\":[\"1.21.1\"],\"loaders\":[\"neoforge\"],\"files\":[]}]", time.Now().UTC().Format(time.RFC3339))
+				fmt.Fprintf(w, "[{\"id\":\"audit-release\",\"status\":\"listed\",\"name\":\"Audit release\",\"version_number\":\"1.0.0\",\"changelog\":\"Audit automated source\",\"date_published\":%q,\"version_type\":\"release\",\"game_versions\":[\"1.21.1\"],\"loaders\":[\"neoforge\"],\"files\":[]}]", time.Now().UTC().Format(time.RFC3339))
 			}))
 			t.Cleanup(provider.Close)
 			imp := defaultModImportConfig()

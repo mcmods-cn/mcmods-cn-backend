@@ -27,15 +27,15 @@ func TestProjectChangelogAutomationRetainsIndependentHistoryWhenSourceReboundInt
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/project/" + source:
-			_, _ = fmt.Fprintf(w, `{"id":%q}`, source)
+			_, _ = fmt.Fprintf(w, `{"id":%q,"status":"approved"}`, source)
 		case "/project/" + replacement:
-			_, _ = fmt.Fprintf(w, `{"id":%q}`, replacement)
+			_, _ = fmt.Fprintf(w, `{"id":%q,"status":"approved"}`, replacement)
 		case "/project/" + source + "/version":
 			body := originalBody
 			if updated.Load() {
 				body = updatedBody
 			}
-			_, _ = fmt.Fprintf(w, `[{"id":%q,"version_number":"1.0.0","changelog":%q,"date_published":%q,
+			_, _ = fmt.Fprintf(w, `[{"id":%q,"status":"listed","version_number":"1.0.0","changelog":%q,"date_published":%q,
 				"game_versions":["1.21.1"],"loaders":["fabric"],"files":[]}]`, release, body, published)
 		default:
 			http.NotFound(w, r)

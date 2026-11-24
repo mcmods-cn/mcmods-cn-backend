@@ -181,11 +181,13 @@ func (s *Server) internalProjectFilePage(ctx context.Context, project projectFil
 }
 
 type modrinthProjectFileManifest struct {
+	Status   string   `json:"status"`
 	ID       string   `json:"id"`
 	Versions []string `json:"versions"`
 }
 
 type modrinthProjectVersion struct {
+	Status        string   `json:"status"`
 	ID            string   `json:"id"`
 	Name          string   `json:"name"`
 	VersionNumber string   `json:"version_number"`
@@ -247,7 +249,7 @@ func (s *Server) loadModrinthProjectFilePage(ctx context.Context, project projec
 		for statePosition < end && len(items) <= request.Limit {
 			versionID := manifest.Versions[len(manifest.Versions)-1-statePosition]
 			version, exists := byID[versionID]
-			if !exists {
+			if !exists || !publicModrinthVersionStatus(version.Status) {
 				statePosition++
 				stateFileOffset = 0
 				continue
@@ -308,7 +310,7 @@ func (s *Server) cachedModrinthProjectFileManifest(ctx context.Context, projectI
 		if clientErr != nil {
 			return nil, clientErr
 		}
-		headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), "")
+		headers := publicProviderHeaders(cfg.UserAgent)
 		var manifest modrinthProjectFileManifest
 		endpoint := cfg.Modrinth.BaseURL + "/project/" + url.PathEscape(projectID)
 		if clientErr = getProviderJSONLimited(loadContext, client, endpoint, headers, projectFileProviderJSONLimit, &manifest); clientErr != nil {
@@ -330,6 +332,9 @@ func (s *Server) cachedModrinthProjectFileManifest(ctx context.Context, projectI
 }
 
 func validateModrinthProjectFileManifest(manifest modrinthProjectFileManifest) error {
+	if !publicModrinthProjectStatus(manifest.Status) {
+		return errProviderSourceNotPublic
+	}
 	if projectFileMaximumProviderProjects != 1 || strings.TrimSpace(manifest.ID) == "" {
 		return errors.New("invalid Modrinth project manifest")
 	}
@@ -361,7 +366,7 @@ func (s *Server) cachedModrinthProjectVersions(ctx context.Context, ids []string
 		if clientErr != nil {
 			return nil, clientErr
 		}
-		headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), "")
+		headers := publicProviderHeaders(cfg.UserAgent)
 		endpoint, _ := url.Parse(cfg.Modrinth.BaseURL + "/versions")
 		query := endpoint.Query()
 		query.Set("ids", string(material))
@@ -479,7 +484,8 @@ func (s *Server) loadModrinthProjectFileByHash(ctx context.Context, projectID, f
 	if err != nil {
 		return providerProjectFile{}, err
 	}
-	headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), "")
+	headers := publicProviderHeaders(cfg.UserAgent)
+	fileID = strings.ToLower(strings.TrimSpace(fileID))
 	endpoint, _ := url.Parse(cfg.Modrinth.BaseURL + "/version_file/" + url.PathEscape(fileID))
 	query := endpoint.Query()
 	query.Set("algorithm", algorithm)
@@ -488,7 +494,7 @@ func (s *Server) loadModrinthProjectFileByHash(ctx context.Context, projectID, f
 	if err = getProviderJSONLimited(ctx, client, endpoint.String(), headers, projectFileProviderJSONLimit, &version); err != nil {
 		return providerProjectFile{}, err
 	}
-	if version.ProjectID != manifest.ID || modrinthManifestPosition(manifest, version.ID) < 0 {
+	if !publicModrinthVersionStatus(version.Status) || version.ProjectID != manifest.ID || modrinthManifestPosition(manifest, version.ID) < 0 {
 		return providerProjectFile{}, errExternalProjectFileNotFound
 	}
 	if len(version.Files) > projectFileMaximumFilesPerVersion {
@@ -688,12 +694,14 @@ func (s *Server) cachedProviderProjectFiles(ctx context.Context, source, project
 // define a different cache authority; none of that material is exposed in keys.
 func projectFileProviderCacheKey(source, kind, identity string, cfg modImportConfig) string {
 	provider := cfg.Modrinth
+	version := "v4"
 	if source == "curseforge" {
 		provider = cfg.CurseForge
+		version = "v3"
 	}
 	material, _ := json.Marshal([]string{strings.TrimRight(provider.BaseURL, "/"), provider.Token, provider.APIKey, identity})
 	digest := sha256.Sum256(material)
-	return "project-files:" + source + ":" + kind + ":v3:" + hex.EncodeToString(digest[:])
+	return "project-files:" + source + ":" + kind + ":" + version + ":" + hex.EncodeToString(digest[:])
 }
 
 func loadModrinthProjectFiles(ctx context.Context, projectID string, cfg modImportConfig) ([]providerProjectFile, error) {
@@ -701,7 +709,7 @@ func loadModrinthProjectFiles(ctx context.Context, projectID string, cfg modImpo
 	if err != nil {
 		return nil, err
 	}
-	headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), "")
+	headers := publicProviderHeaders(cfg.UserAgent)
 	endpoint, _ := url.Parse(cfg.Modrinth.BaseURL + "/project/" + url.PathEscape(projectID) + "/version")
 	query := endpoint.Query()
 	query.Set("include_changelog", "false")
@@ -715,6 +723,9 @@ func loadModrinthProjectFiles(ctx context.Context, projectID string, cfg modImpo
 	}
 	result := make([]providerProjectFile, 0, len(versions))
 	for _, version := range versions {
+		if !publicModrinthVersionStatus(version.Status) {
+			continue
+		}
 		if len(version.Files) > projectFileMaximumFilesPerVersion || len(result)+len(version.Files) > 500 {
 			return nil, errors.New("Modrinth project contains too many files for bulk automation")
 		}

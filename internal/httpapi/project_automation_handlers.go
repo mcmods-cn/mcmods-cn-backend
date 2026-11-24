@@ -312,17 +312,23 @@ func (s *Server) verifyProjectExternalSource(ctx context.Context, projectType, s
 	}
 	if provider == "modrinth" {
 		var project modrinthProject
-		headers := providerCredentialHeaders(cfg.UserAgent, "modrinth", cfg.Modrinth.BaseURL, bearerAuthorization(cfg.Modrinth.Token), "")
+		headers := publicProviderHeaders(cfg.UserAgent)
 		if err = getProviderJSON(ctx, client, cfg.Modrinth.BaseURL+"/project/"+url.PathEscape(reference), headers, &project); err != nil {
 			return "", "", errors.New("无法验证 Modrinth 项目")
+		}
+		if !publicModrinthProjectStatus(project.Status) || strings.TrimSpace(project.ID) == "" {
+			return "", "", errProviderSourceNotPublic
 		}
 		return project.ID, canonicalURL, nil
 	}
 	if provider == "github" {
-		var repository map[string]any
-		headers := providerCredentialHeaders(cfg.UserAgent, "github", cfg.GitHub.BaseURL, bearerAuthorization(cfg.GitHub.Token), "")
+		var repository githubRepository
+		headers := publicProviderHeaders(cfg.UserAgent)
 		if err = getProviderJSON(ctx, client, cfg.GitHub.BaseURL+"/repos/"+reference, headers, &repository); err != nil {
 			return "", "", errors.New("无法验证 GitHub 仓库")
+		}
+		if repository.Private == nil || *repository.Private {
+			return "", "", errProviderSourceNotPublic
 		}
 		return reference, canonicalURL, nil
 	}

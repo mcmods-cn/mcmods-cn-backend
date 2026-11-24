@@ -54,7 +54,7 @@ func TestModrinthProjectFilePagesTraverseBoundedVersionBatches(t *testing.T) {
 			for index := range versions {
 				versions[index] = fmt.Sprintf("v%02d", index+1)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "project01", "versions": versions})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "project01", "status": "approved", "versions": versions})
 		case "/versions":
 			var ids []string
 			if err := json.Unmarshal([]byte(r.URL.Query().Get("ids")), &ids); err != nil {
@@ -69,7 +69,7 @@ func TestModrinthProjectFilePagesTraverseBoundedVersionBatches(t *testing.T) {
 			response := make([]map[string]any, 0, len(ids))
 			for _, id := range ids {
 				response = append(response, map[string]any{
-					"id": id, "project_id": "project01", "name": id, "version_number": id,
+					"id": id, "status": "listed", "project_id": "project01", "name": id, "version_number": id,
 					"version_type": "release", "date_published": "2026-08-20T12:00:00Z",
 					"game_versions": []string{"1.21.1"}, "loaders": []string{"fabric"},
 					"files": []map[string]any{{
@@ -184,7 +184,7 @@ func TestCurseForgeProjectFilePagesUseLimitPlusOne(t *testing.T) {
 }
 
 func TestProjectFileProviderLimitsFailClosed(t *testing.T) {
-	manifest := modrinthProjectFileManifest{ID: "project01", Versions: make([]string, projectFileMaximumModrinthVersions+1)}
+	manifest := modrinthProjectFileManifest{ID: "project01", Status: "approved", Versions: make([]string, projectFileMaximumModrinthVersions+1)}
 	for index := range manifest.Versions {
 		manifest.Versions[index] = fmt.Sprintf("v%d", index)
 	}

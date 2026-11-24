@@ -186,7 +186,7 @@ func TestAuditFixCMP003ExternalProjectDownloadRechecksVisibilityBeforeIntent(t *
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasPrefix(r.URL.Path, "/project/") {
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "owned-project", "versions": []string{"v1"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "owned-project", "status": "approved", "versions": []string{"v1"}})
 			return
 		}
 		if hide.Load() {

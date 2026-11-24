@@ -21,12 +21,12 @@ func TestProjectMirrorRetainsIndependentDownloadsWhenSourceReboundIntegration(t 
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/project/" + source:
-			test016MirrorJSON(w, map[string]string{"id": source})
+			test016MirrorJSON(w, map[string]string{"id": source, "status": "approved"})
 		case "/project/" + replacement:
-			test016MirrorJSON(w, map[string]string{"id": replacement})
+			test016MirrorJSON(w, map[string]string{"id": replacement, "status": "approved"})
 		case "/project/" + source + "/version":
 			test016MirrorJSON(w, []map[string]any{{
-				"id": "mirror-scope-v1", "project_id": source, "name": "Mirror release", "version_number": "1.0",
+				"id": "mirror-scope-v1", "status": "listed", "project_id": source, "name": "Mirror release", "version_number": "1.0",
 				"date_published": published, "version_type": "release", "game_versions": []string{"1.21.1"}, "loaders": []string{"neoforge"},
 				"files": []map[string]any{{"filename": "owned-mirror.jar", "url": "https://" + r.Host + artifactPath,
 					"size": len(artifact), "primary": true, "hashes": map[string]string{"sha512": externalFileID}}},

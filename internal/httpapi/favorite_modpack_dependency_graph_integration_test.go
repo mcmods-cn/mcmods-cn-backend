@@ -139,7 +139,7 @@ func TestFavoriteExportDependencyGraphTraversesCyclesAndReportsLimitsIntegration
 		fileName := "dependency-" + projectID + ".jar"
 		response.Header().Set("Content-Type", "application/json")
 		if encodeErr := json.NewEncoder(response).Encode([]map[string]any{{
-			"id": versionID, "project_id": projectID, "name": "Release", "version_number": "1.0.0", "version_type": "release",
+			"id": versionID, "status": "listed", "project_id": projectID, "name": "Release", "version_number": "1.0.0", "version_type": "release",
 			"game_versions": []string{"1.21.1"}, "loaders": []string{"neoforge"}, "date_published": "2026-08-22T00:00:00Z",
 			"files": []map[string]any{{"hashes": map[string]string{"sha1": strings.Repeat("a", 40), "sha512": strings.Repeat("b", 128)},
 				"url":      "https://cdn.modrinth.com/data/" + projectID + "/versions/" + versionID + "/" + fileName,
