@@ -36,12 +36,13 @@ func (cfg oauthProviderConfig) loginReady() bool {
 }
 
 type oauthProviderProfile struct {
-	Provider       string
-	ProviderUserID string
-	Username       string
-	Email          string
-	EmailVerified  bool
-	AvatarURL      string
+	Provider          string
+	ProviderUserID    string
+	Username          string
+	Email             string
+	EmailVerified     bool
+	AvatarURL         string
+	loadVerifiedEmail func(context.Context) (string, error)
 }
 
 var supportedOAuthProviders = map[string]struct{}{
@@ -50,7 +51,13 @@ var supportedOAuthProviders = map[string]struct{}{
 
 const maxOAuthResponseBytes = 1 << 20
 
-var oauthHTTPClient = &http.Client{Timeout: 15 * time.Second}
+// Provider endpoints receive credentials and are pinned by the adapters below.
+var oauthHTTPClient = &http.Client{
+	Timeout:       15 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+var errOAuthIdentityUnavailable = errors.New("OAuth identity lookup unavailable")
 
 var errOAuthSettingsUnavailable = errors.New("OAuth settings are unavailable")
 
@@ -133,6 +140,10 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	location := s.requestClientLocation(r)
 	user, err := s.findOrCreateOAuthUser(r.Context(), profile, location)
+	if errors.Is(err, errOAuthIdentityUnavailable) {
+		writeError(w, http.StatusBadGateway, "third-party login provider request failed")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "第三方账号登录失败")
 		return
@@ -387,9 +398,10 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 	}
 	defer resp.Body.Close()
 	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		Error       string `json:"error"`
-		Description string `json:"error_description"`
+		AccessToken string  `json:"access_token"`
+		Scope       *string `json:"scope"`
+		Error       string  `json:"error"`
+		Description string  `json:"error_description"`
 	}
 	if err := decodeOAuthJSONResponse(resp, &tokenResp); err != nil {
 		return oauthProviderProfile{}, err
@@ -415,58 +427,79 @@ func fetchGitHubProfile(ctx context.Context, cfg oauthProviderConfig, code strin
 	var user struct {
 		ID        int64  `json:"id"`
 		Login     string `json:"login"`
-		Name      string `json:"name"`
-		Email     string `json:"email"`
 		AvatarURL string `json:"avatar_url"`
 	}
 	if err := json.Unmarshal(raw, &user); err != nil {
 		return oauthProviderProfile{}, err
 	}
-	user.Email = fetchGitHubPrimaryEmail(ctx, tokenResp.AccessToken)
-	return oauthProviderProfile{
+	if user.ID <= 0 {
+		return oauthProviderProfile{}, errors.New("GitHub profile has no valid account ID")
+	}
+	profile := oauthProviderProfile{
 		Provider:       "github",
 		ProviderUserID: fmt.Sprintf("%d", user.ID),
 		Username:       user.Login,
-		Email:          user.Email,
-		EmailVerified:  user.Email != "",
 		AvatarURL:      user.AvatarURL,
-	}, nil
+	}
+	// Existing accounts are identified by GitHub ID. Only a new binding needs
+	// a verified email, and the user may intentionally withhold the email scope.
+	if tokenResp.Scope == nil || githubEmailScope(*tokenResp.Scope) {
+		profile.loadVerifiedEmail = func(ctx context.Context) (string, error) {
+			return fetchGitHubPrimaryEmail(ctx, tokenResp.AccessToken)
+		}
+	}
+	return profile, nil
 }
 
-func fetchGitHubPrimaryEmail(ctx context.Context, accessToken string) string {
+func githubEmailScope(scope string) bool {
+	for _, grant := range strings.FieldsFunc(scope, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if grant == "user" || grant == "user:email" {
+			return true
+		}
+	}
+	return false
+}
+
+func fetchGitHubPrimaryEmail(ctx context.Context, accessToken string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user/emails", nil)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := oauthHTTPClient.Do(req)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ""
-	}
 	var emails []struct {
 		Email    string `json:"email"`
 		Primary  bool   `json:"primary"`
 		Verified bool   `json:"verified"`
 	}
 	if err := decodeOAuthJSONResponse(resp, &emails); err != nil {
-		return ""
+		return "", err
 	}
-	for _, email := range emails {
-		if email.Primary && email.Verified {
-			return email.Email
+	if emails == nil {
+		return "", errors.New("GitHub email response must be an array")
+	}
+	fallback := ""
+	for _, candidate := range emails {
+		if !candidate.Verified {
+			continue
+		}
+		address := normalizeEmail(candidate.Email)
+		if !validEmailAddress(address) {
+			return "", errors.New("GitHub returned an invalid verified email")
+		}
+		if candidate.Primary {
+			return address, nil
+		}
+		if fallback == "" {
+			fallback = address
 		}
 	}
-	for _, email := range emails {
-		if email.Verified {
-			return email.Email
-		}
-	}
-	return ""
+	return fallback, nil
 }
 
 func fetchGoogleProfile(ctx context.Context, cfg oauthProviderConfig, code string) (oauthProviderProfile, error) {
@@ -701,6 +734,14 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, profile oauthProvide
 	}
 	if err != pgx.ErrNoRows {
 		return user, err
+	}
+
+	if profile.loadVerifiedEmail != nil {
+		email, err := profile.loadVerifiedEmail(ctx)
+		if err != nil {
+			return user, errors.Join(errOAuthIdentityUnavailable, err)
+		}
+		profile.Email, profile.EmailVerified = email, email != ""
 	}
 
 	tx, err := s.db.Begin(ctx)
