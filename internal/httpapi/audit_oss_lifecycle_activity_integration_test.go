@@ -116,7 +116,7 @@ func TestAuditCMP003OSSSignedDownloadCommitsCounterAndExistingActivityHTTPIntegr
 }
 
 func TestAuditCMP003OSSUploadTicketCommitsReservationBlueprintSessionAndActivityHTTPIntegration(t *testing.T) {
-	for _, scope := range []string{"user", "admin", "blueprint", "multipart", "multipart_unavailable_abort"} {
+	for _, scope := range []string{"user", "admin", "blueprint", "multipart", "multipart_unavailable_abort", "multipart_abort_deadline"} {
 		t.Run(scope, func(t *testing.T) {
 			f := newTEST037Fixture(t)
 			grantTEST044Permissions(t, f.ctx, f.db, f.userIDs[f.editor], "oss.write")
@@ -134,14 +134,16 @@ func TestAuditCMP003OSSUploadTicketCommitsReservationBlueprintSessionAndActivity
 			body := ossDirectUploadRequest{OriginalName: name, ContentType: "application/octet-stream", SizeBytes: size, SHA256: strings.Repeat("a", 64), Category: "test037", Source: "test037-atomic-ticket"}
 			auditFixInjectActivityFailure(t, f.test013Fixture, f.userIDs[f.editor], true)
 			before := auditOSSAllFacts(t, f)
-			if scope == "multipart_unavailable_abort" {
+			if scope == "multipart_abort_deadline" {
+				f.store.waitForAbortDeadline.Store(true)
+			} else if scope == "multipart_unavailable_abort" {
 				f.store.failAbort.Store(true)
 			}
 			raw := auditOSSRequire(t, f, f.editor, http.MethodPost, route, body, 500)
 			if !strings.Contains(string(raw), "failed to persist OSS upload ticket activity") {
 				t.Fatalf("unrelated ticket failure: %s", raw)
 			}
-			if scope != "multipart_unavailable_abort" {
+			if scope != "multipart_unavailable_abort" && scope != "multipart_abort_deadline" {
 				if after := auditOSSAllFacts(t, f); !reflect.DeepEqual(before, after) {
 					t.Fatal("unissued ticket committed reservation/blueprint/session/activity")
 				}
@@ -151,6 +153,7 @@ func TestAuditCMP003OSSUploadTicketCommitsReservationBlueprintSessionAndActivity
 					t.Fatalf("explicit cleanup/other/reserved/intents=%d/%d/%d/%d err=%v", cleanup, other, reserved, intents, err)
 				}
 				f.store.failAbort.Store(false)
+				f.store.waitForAbortDeadline.Store(false)
 				worker := NewOSSMultipartCleanupWorker(f.server.cfg, f.db)
 				worker.drain(f.ctx)
 				var aborted int

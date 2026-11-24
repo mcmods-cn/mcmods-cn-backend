@@ -35,12 +35,13 @@ type test037Multipart struct {
 }
 
 type test037Store struct {
-	mu                  sync.Mutex
-	objects             map[string]test036Object
-	uploads             map[string]*test037Multipart
-	aborts              map[string]int
-	sequence            int
-	failCopy, failAbort atomic.Bool
+	mu                   sync.Mutex
+	objects              map[string]test036Object
+	uploads              map[string]*test037Multipart
+	aborts               map[string]int
+	sequence             int
+	failCopy, failAbort  atomic.Bool
+	waitForAbortDeadline atomic.Bool
 }
 
 type test037Fixture struct {
@@ -82,6 +83,10 @@ func newTEST037FixtureWithBase(t *testing.T, base test013Fixture) test037Fixture
 				providerError(403, "SignatureDoesNotMatch")
 				return
 			}
+		}
+		if r.Method == http.MethodDelete && q.Get("uploadId") != "" && f.store.waitForAbortDeadline.Load() {
+			<-r.Context().Done()
+			return
 		}
 		if r.Method == http.MethodPut && r.Header.Get("x-oss-copy-source") != "" && f.store.failCopy.Load() ||
 			r.Method == http.MethodDelete && q.Get("uploadId") != "" && f.store.failAbort.Load() {

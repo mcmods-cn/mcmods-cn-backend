@@ -119,11 +119,16 @@ func (s *Server) persistOSSUploadTicket(r *http.Request, cfg ossConfigPayload, r
 }
 
 func (s *Server) cleanupUnissuedOSSMultipart(r *http.Request, cfg ossConfigPayload, req ossDirectUploadRequest, objectKey, uploadID string, expiresAt time.Time, client *aliyunoss.Client) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := abortOSSMultipartUpload(ctx, client, cfg, objectKey, uploadID); err == nil {
+	abortCtx, stopAbort := context.WithTimeout(context.Background(), 10*time.Second)
+	abortErr := abortOSSMultipartUpload(abortCtx, client, cfg, objectKey, uploadID)
+	stopAbort()
+	if abortErr == nil {
 		return
 	}
+
+	// A timed-out provider request still needs a live context to journal cleanup.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	tx, err := s.db.Begin(ctx)
 	if err == nil {
 		defer tx.Rollback(ctx)
