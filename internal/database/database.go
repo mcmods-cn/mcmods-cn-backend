@@ -45,6 +45,9 @@ func connectPool(ctx context.Context, dbConfig config.DBConfig, minConns, maxCon
 	// Override even an explicit DATABASE_URL setting so every application pool
 	// assigns the same event instant to the same UTC day bucket.
 	poolConfig.ConnConfig.RuntimeParams["timezone"] = "UTC"
+	// Writes re-read current state after waiting on row locks. Callers that
+	// need a stable snapshot select their isolation level with BeginTx.
+	poolConfig.ConnConfig.RuntimeParams["default_transaction_isolation"] = "read committed"
 	poolConfig.ConnConfig.RuntimeParams["search_path"] = applicationSearchPath
 	poolConfig.ConnConfig.RuntimeParams["lock_timeout"] = "10s"
 	poolConfig.ConnConfig.RuntimeParams["statement_timeout"] = "5min"
